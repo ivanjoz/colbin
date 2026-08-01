@@ -46,6 +46,9 @@ func appendNullableColumn(out []byte, pointee *fieldMeta, slotPtrs []unsafe.Poin
 		}
 		out = append(out, bitmap...)
 	}
+	if elideEmpty(pointee, len(present)) {
+		return out
+	}
 	return encodeElemColumn(out, pointee, present)
 }
 
@@ -77,8 +80,12 @@ func encodeMapColumn(out []byte, fm *fieldMeta, slotPtrs []unsafe.Pointer) []byt
 			idx++
 		}
 	}
-	out = encodeElemColumn(out, fm.mapKey, elemPointers(keys, fm.mapKeyType, total))
-	out = encodeElemColumn(out, fm.mapVal, elemPointers(vals, fm.mapValType, total))
+	if !elideEmpty(fm.mapKey, total) { // keys are scalar/string, so never elided
+		out = encodeElemColumn(out, fm.mapKey, elemPointers(keys, fm.mapKeyType, total))
+	}
+	if !elideEmpty(fm.mapVal, total) { // a map of self-referential values (see elideEmpty)
+		out = encodeElemColumn(out, fm.mapVal, elemPointers(vals, fm.mapValType, total))
+	}
 	return out
 }
 
@@ -128,6 +135,9 @@ func (dec *decoder) decodeNullableColumn(pointee *fieldMeta, pointeeType reflect
 		presentPtrs[k] = vp
 		k++
 	}
+	if elideEmpty(pointee, numPresent) {
+		return nil // the encoder wrote no value column
+	}
 	return dec.decodeElemColumn(pointee, pointeeType, size, numPresent, presentPtrs)
 }
 
@@ -140,14 +150,18 @@ func (dec *decoder) decodeMapColumn(fm *fieldMeta, n int, slotPtrs []unsafe.Poin
 		total += int(l)
 	}
 	keys := reflect.MakeSlice(reflect.SliceOf(fm.mapKeyType), total, total)
-	if err := dec.decodeElemColumn(fm.mapKey, fm.mapKeyType, fm.mapKeyType.Size(), total,
-		elemPointers(keys, fm.mapKeyType, total)); err != nil {
-		return err
+	if !elideEmpty(fm.mapKey, total) {
+		if err := dec.decodeElemColumn(fm.mapKey, fm.mapKeyType, fm.mapKeyType.Size(), total,
+			elemPointers(keys, fm.mapKeyType, total)); err != nil {
+			return err
+		}
 	}
 	vals := reflect.MakeSlice(reflect.SliceOf(fm.mapValType), total, total)
-	if err := dec.decodeElemColumn(fm.mapVal, fm.mapValType, fm.mapValType.Size(), total,
-		elemPointers(vals, fm.mapValType, total)); err != nil {
-		return err
+	if !elideEmpty(fm.mapVal, total) { // the encoder may have written no value column
+		if err := dec.decodeElemColumn(fm.mapVal, fm.mapValType, fm.mapValType.Size(), total,
+			elemPointers(vals, fm.mapValType, total)); err != nil {
+			return err
+		}
 	}
 	idx := 0
 	for i := 0; i < n; i++ {

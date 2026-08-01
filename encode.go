@@ -175,6 +175,9 @@ func encodeArrayBody(out []byte, elem *fieldMeta, elemSize uintptr, shPtrs []uns
 	}
 	out = appendIntColumn(out, *lenBuf, 32)
 	putI64(lenBuf)
+	if elideEmpty(elem, total) {
+		return out
+	}
 
 	elemPtrs := make([]unsafe.Pointer, 0, total) // value pointer of every element, flattened
 	for _, sp := range shPtrs {

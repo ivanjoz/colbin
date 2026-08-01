@@ -184,6 +184,9 @@ func (dec *decoder) decodeArrayBody(elem *fieldMeta, sliceType reflect.Type, ele
 			elemPtrs = append(elemPtrs, unsafe.Add(sv.UnsafePointer(), uintptr(j)*elemSize))
 		}
 	}
+	if elideEmpty(elem, total) {
+		return nil // the encoder wrote no element column
+	}
 	return dec.decodeElemColumn(elem, sliceType.Elem(), elemSize, total, elemPtrs)
 }
 

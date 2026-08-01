@@ -161,6 +161,16 @@ Payloads by `field_type`:
   keys column and a flattened values column.
 - **nullable** (pointer types): `[nullFlags:1] [presence bitmap IF has_nulls]` in
   front of the (dense) inner column.
+
+Recursive types (`type Node struct{ Kids []Node }`, including cycles spanning
+several types, or closed through a pointer or map value) are supported. Because
+the layout is schema-driven, an *empty* array/map/nullable column would still
+write the nested columns of its element type, which never terminates when that
+type refers back to itself. So for element types that can reach themselves, and
+only those, a column holding zero values is omitted entirely. Both sides agree
+without an extra marker: the count comes from the length/presence sub-column that
+precedes it, and "can reach itself" is a static property of the Go type. Types
+that are not self-referential are unaffected, byte for byte.
 - **any** (`interface{}`): `N` self-describing tagged values. Unlike every other
   column, `any` values can't be columnarized (concrete type is unknown at build
   time and varies per value), so each is written row-style as `[tag:1] payload` —
@@ -223,6 +233,8 @@ go test -bench . -benchmem
 - Not a streaming format — all records are buffered before output.
 - Trusts the input buffer on decode (internal use); malformed data can panic on
   slice bounds rather than returning an error.
-- Self-referential struct types recurse infinitely during type analysis.
+- Self-referential *values* (a pointer graph that loops back on itself) are not
+  detected and will recurse until the stack runs out. Self-referential *types* are
+  fine — see below.
 - No backwards-compatibility guarantees — the format version byte is bumped on any
   wire change (this project is pre-alpha).
