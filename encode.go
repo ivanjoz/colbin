@@ -50,7 +50,7 @@ func Marshal(v any) (out []byte, err error) {
 		recordPtrs = make([]unsafe.Pointer, n)
 		base := rv.UnsafePointer() // &elem[0]
 		size := elemType.Size()
-		for i := 0; i < n; i++ {
+		for i := range n {
 			recordPtrs[i] = unsafe.Add(base, uintptr(i)*size)
 		}
 	case reflect.Struct:

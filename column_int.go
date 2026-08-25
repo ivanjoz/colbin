@@ -75,7 +75,7 @@ func appendIntColumn(out []byte, values []int64, nativeWidth uint8) []byte {
 // decodeIntColumn reads n values from br into out, reversing encodeIntColumn.
 func decodeIntColumn(br *bitReader, n int, nativeWidth uint8, isSigned, empty bool, precCode uint8, out []int64) {
 	if empty {
-		for i := 0; i < n; i++ {
+		for i := range n {
 			out[i] = 0
 		}
 		return
@@ -86,7 +86,7 @@ func decodeIntColumn(br *bitReader, n int, nativeWidth uint8, isSigned, empty bo
 	if isSigned {
 		base = signExtend(rawBase, nativeWidth) // base may be negative
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		e := br.readBits(width)
 		if !isSigned && e == 0 { // sentinel -> zero value
 			out[i] = 0

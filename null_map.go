@@ -94,7 +94,7 @@ func elemPointers(backing reflect.Value, elemType reflect.Type, n int) []unsafe.
 	base := backing.UnsafePointer()
 	size := elemType.Size()
 	ptrs := make([]unsafe.Pointer, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		ptrs[i] = unsafe.Add(base, uintptr(i)*size)
 	}
 	return ptrs
@@ -114,7 +114,7 @@ func (dec *decoder) decodeNullableColumn(pointee *fieldMeta, pointeeType reflect
 		dec.pos += bmBytes
 		present = make([]bool, n)
 		numPresent = 0
-		for i := 0; i < n; i++ {
+		for i := range n {
 			if bitmap[i>>3]>>(uint(i)&7)&1 == 1 {
 				present[i] = true
 				numPresent++
@@ -126,7 +126,7 @@ func (dec *decoder) decodeNullableColumn(pointee *fieldMeta, pointeeType reflect
 	size := pointeeType.Size()
 	presentPtrs := make([]unsafe.Pointer, numPresent)
 	k := 0
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if hasNulls && !present[i] {
 			continue // leave the slot nil
 		}
@@ -164,13 +164,13 @@ func (dec *decoder) decodeMapColumn(fm *fieldMeta, n int, slotPtrs []unsafe.Poin
 		}
 	}
 	idx := 0
-	for i := 0; i < n; i++ {
+	for i := range n {
 		l := int(lengths[i])
 		if l == 0 {
 			continue // leave the map field nil (matches Go zero value)
 		}
 		m := reflect.MakeMapWithSize(fm.mapType, l)
-		for j := 0; j < l; j++ {
+		for range l {
 			m.SetMapIndex(keys.Index(idx), vals.Index(idx))
 			idx++
 		}

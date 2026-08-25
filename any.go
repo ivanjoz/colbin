@@ -113,7 +113,7 @@ func encodeAnyValue(out []byte, v reflect.Value) []byte {
 // decodeAnyColumn reverses encodeAnyColumn, setting each decoded value into its slot.
 func (dec *decoder) decodeAnyColumn(fm *fieldMeta, n int, slotPtrs []unsafe.Pointer) error {
 	dec.readByte() // ftAny flags
-	for i := 0; i < n; i++ {
+	for i := range n {
 		val := dec.decodeAnyValue()
 		slot := reflect.NewAt(fm.ifaceType, slotPtrs[i]).Elem()
 		if val == nil {
@@ -158,7 +158,7 @@ func (dec *decoder) decodeAnyValue() any {
 	case aMap:
 		n := int(dec.readUvarint())
 		m := make(map[string]any, n)
-		for i := 0; i < n; i++ {
+		for range n {
 			m[dec.readAnyString()] = dec.decodeAnyValue()
 		}
 		return m

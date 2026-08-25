@@ -67,7 +67,7 @@ func Unmarshal(data []byte, dst any) error {
 		base := backing.UnsafePointer()
 		size := elemType.Size()
 		recordPtrs = make([]unsafe.Pointer, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			recordPtrs[i] = unsafe.Add(base, uintptr(i)*size)
 		}
 	case reflect.Struct:
@@ -96,7 +96,7 @@ func Unmarshal(data []byte, dst any) error {
 // decodeSubTable reads [colCount] then each [id][column] into the given records.
 func (dec *decoder) decodeSubTable(ti *typeInfo, n int, ptrs []unsafe.Pointer) error {
 	colCount := int(dec.readByte())
-	for c := 0; c < colCount; c++ {
+	for range colCount {
 		id := dec.readByte()
 		fm := ti.byID[id]
 		if fm == nil {
@@ -180,7 +180,7 @@ func (dec *decoder) decodeArrayBody(elem *fieldMeta, sliceType reflect.Type, ele
 		// Store the slice header into the field; GC keeps the backing array alive
 		// because the field is typed as a slice.
 		*(*sliceHeader)(sp) = sliceHeader{data: sv.UnsafePointer(), len: l, cap: l}
-		for j := 0; j < l; j++ {
+		for j := range l {
 			elemPtrs = append(elemPtrs, unsafe.Add(sv.UnsafePointer(), uintptr(j)*elemSize))
 		}
 	}
@@ -244,7 +244,7 @@ func (dec *decoder) readFloatColumn(n int) []float64 {
 	span := n * int(width) / 8
 	br := bitReader{buf: dec.data[dec.pos : dec.pos+span]}
 	dec.pos += span
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if width == 64 {
 			out[i] = math.Float64frombits(br.readBits(64))
 		} else {
@@ -259,7 +259,7 @@ func (dec *decoder) readFloatColumn(n int) []float64 {
 func (dec *decoder) readBlobs(n int) [][]byte {
 	lengths := dec.readIntColumn(n, 32)
 	out := make([][]byte, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		l := int(lengths[i])
 		out[i] = dec.data[dec.pos : dec.pos+l]
 		dec.pos += l
