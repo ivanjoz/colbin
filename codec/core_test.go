@@ -67,7 +67,7 @@ func TestPacked5StringColumnIntegration(t *testing.T) {
 	}
 	const value = "Factura 2024-1023"
 
-	got, err := Marshal([]row{{Text: value}})
+	got, err := marshalStandard([]row{{Text: value}})
 	if err != nil {
 		t.Fatal(err)
 	}

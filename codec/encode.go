@@ -23,7 +23,7 @@ func Marshal(v any) (out []byte, err error) {
 	if err != nil {
 		return nil, err
 	}
-	return appendMessage([]byte{formatVersion}, rv)
+	return appendMessage([]byte{formatVersion}, rv, true)
 }
 
 // recoverEncode turns an encodeError panic raised deep in the any encoder into a
@@ -59,7 +59,11 @@ func marshalRoot(v any) (reflect.Value, error) {
 // which is therefore byte for byte the same in either. The prefix is copied in
 // after the record layout is known so that the whole message still comes from
 // the single sized allocation it always did.
-func appendMessage(prefix []byte, rv reflect.Value) (out []byte, err error) {
+// allowCompact is set by Marshal and clear by MarshalJSON: a compact message has
+// no room for a schema section, and at these sizes the schema is the larger cost
+// anyway (47 bytes of field names against a 24-byte body), so the self-describing
+// form stays columnar.
+func appendMessage(prefix []byte, rv reflect.Value, allowCompact bool) (out []byte, err error) {
 	// Non-record top-level types (maps, []*struct, scalars, …) use value mode: a
 	// single N=1 element column reusing the element machinery. struct / []struct
 	// keep the columnar records layout below.
@@ -96,12 +100,31 @@ func appendMessage(prefix []byte, rv reflect.Value) (out []byte, err error) {
 		return nil, err
 	}
 
+	// Compact mode, when the type allows it and the message is small enough for
+	// per-record framing to beat amortised columns. At one record it always wins
+	// -- the columnar header and per-column type bytes have nothing to spread
+	// over -- so it is taken without building the alternative. At two or three
+	// the answer depends on how many fields are zero, which no cheap predictor
+	// gets right, so both are built and the smaller kept.
+	var compactBuf []byte
+	if allowCompact && compactUsable(ti) {
+		if shape, ok := compactShape(rv.Kind() == reflect.Slice, len(recordPtrs)); ok {
+			compactBuf = appendCompact(ti, recordPtrs, shape)
+			if len(recordPtrs) == 1 {
+				return compactBuf, nil
+			}
+		}
+	}
+
 	out = make([]byte, 0, len(prefix)+16+bodySizeHint(ti, len(recordPtrs)))
 	out = append(out, prefix...)
 	out = binary.AppendUvarint(out, uint64(len(recordPtrs)))
 	out = encodeSubTable(out, ti, recordPtrs)
 	if n := len(recordPtrs); n > 0 {
 		ti.bytesPerRecord.Store(uint32((len(out)-len(prefix))/n + 1))
+	}
+	if compactBuf != nil && len(compactBuf) < len(out) {
+		return compactBuf, nil
 	}
 	return out, nil
 }

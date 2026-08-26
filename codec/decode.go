@@ -7,8 +7,23 @@ import (
 	"reflect"
 	"unsafe"
 
+	"github.com/ivanjoz/colbin/compact"
 	"github.com/ivanjoz/colbin/packed5"
 )
+
+// derefTarget walks (and allocates) the destination pointer chain so decoding
+// lands on the concrete value: e.g. **ContentFields -> alloc *ContentFields ->
+// struct. rv is the non-nil pointer Unmarshal was handed.
+func derefTarget(rv reflect.Value) reflect.Value {
+	target := rv.Elem()
+	for target.Kind() == reflect.Ptr {
+		if target.IsNil() {
+			target.Set(reflect.New(target.Type().Elem()))
+		}
+		target = target.Elem()
+	}
+	return target
+}
 
 // decoder walks the byte stream with an explicit cursor; each column computes
 // its own byte span so the cursor can advance to the next column.
@@ -29,6 +44,13 @@ func Unmarshal(data []byte, dst any) error {
 	if rv.Kind() != reflect.Ptr || rv.IsNil() {
 		return fmt.Errorf("colbin: Unmarshal needs a non-nil pointer")
 	}
+	// Walk the destination pointer chain first: both modes decode into the
+	// concrete value, and compact mode dispatches on bit 0 of byte 0 before any
+	// version byte exists to read.
+	if compact.IsCompact(data) {
+		return decodeCompact(data, derefTarget(rv))
+	}
+
 	dec := &decoder{data: data}
 	switch v := dec.readByte(); v {
 	case formatVersion:
@@ -40,15 +62,7 @@ func Unmarshal(data []byte, dst any) error {
 		return fmt.Errorf("colbin: bad version byte 0x%02x", v)
 	}
 
-	// Walk (and allocate) the destination pointer chain so we decode into the
-	// concrete value: e.g. **ContentFields -> alloc *ContentFields -> struct.
-	target := rv.Elem()
-	for target.Kind() == reflect.Ptr {
-		if target.IsNil() {
-			target.Set(reflect.New(target.Type().Elem()))
-		}
-		target = target.Elem()
-	}
+	target := derefTarget(rv)
 
 	// Non-record types use value mode: a single N=1 element column, no record count.
 	if !topLevelIsRecords(target.Type()) {

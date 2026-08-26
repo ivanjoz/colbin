@@ -2,7 +2,9 @@ package codec
 
 // Wire format constants shared by encoder and decoder.
 
-// magic/version byte prefixing every message. Bump on any wire-format change.
+// magic/version byte prefixing every message. Bump on any wire-format change,
+// keeping it even: bit 0 is the compact-mode discriminator (see the compact
+// package), so an odd version byte would be read as a compact message.
 const formatVersion byte = 0x02
 
 // reserved field-id: 255 is never assigned, so a struct may have at most 254
@@ -23,6 +25,10 @@ const (
 )
 
 // jsonFormatVersion prefixes a self-describing message written by MarshalJSON.
+// It is 0x04 rather than 0x03 because bit 0 of byte 0 discriminates compact mode
+// from standard mode (see the compact package): every standard version byte must
+// therefore be even, or a self-describing message would be misread as a compact
+// one.
 // Its body is byte-for-byte the body a formatVersion message would carry; the
 // only difference is the schema section sitting between the version byte and the
 // body:
@@ -32,7 +38,7 @@ const (
 // A reader that has the Go type skips the schema and decodes as usual (see
 // Unmarshal); a reader that does not uses the schema to produce JSON (see
 // DecodeAny / DecodeJSON).
-const jsonFormatVersion byte = 0x03
+const jsonFormatVersion byte = 0x04
 
 // Scalar kinds recorded in a schema descriptor for ftInt/ftFloat columns. The
 // wire carries only the ftInt class, so width and signedness — needed both to

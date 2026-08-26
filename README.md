@@ -11,15 +11,20 @@ The codecs choose their own compact or fixed/raw fallback, so wide random number
 and strings outside the packed alphabet remain bounded rather than inflating
 without limit.
 
+Messages come in **two formats** — a columnar *standard mode* for batches and a
+bit-level *compact mode* for one to three records. `Marshal` chooses; `Unmarshal`
+accepts either. See [Modes](#modes).
+
 ## When to use it
 
 Use colbin when you serialize **arrays of homogeneous structs** (every record has
 the same fields) where numbers dominate — cache payloads, API list responses, DB
 row batches. The wins come from encoding many similar values of one field together.
 
-Do **not** reach for it to serialize a single small object where CBOR/JSON is fine,
-or for heterogeneous documents. colbin must buffer all records before emitting (it
-is not a record-at-a-time stream).
+Single objects and two- or three-record replies are handled too, by compact mode
+— a lone flat struct is about 3x smaller than JSON. What colbin is *not* for is
+heterogeneous documents, and it must buffer all records before emitting (it is
+not a record-at-a-time stream).
 
 ## Usage
 
@@ -64,6 +69,92 @@ type Product struct {
 slices, use value mode. `Unmarshal` needs a non-nil pointer to the corresponding
 destination. Decoding requires a **compatible Go type** — the format is not
 self-describing about field names (see [Field ids](#field-ids)).
+
+## Modes
+
+**Bit 0 of the first byte** selects the format, and the two branches share
+nothing else:
+
+```
+bit 0 == 0    standard mode — columnar, one column per field, any record count
+bit 0 == 1    compact mode  — bit-level, one to three records
+```
+
+A standard message continues with a version byte and a columnar body. A compact
+message has no version field, no record count and no column count, because it
+needs none of them.
+
+Because bit 0 is the discriminator, **every standard version byte is even**:
+`0x02` for the binary form and `0x04` for JSON mode. An odd one would be read as
+a compact message.
+
+`Marshal` picks the mode and `Unmarshal` dispatches on that bit, so neither is
+something callers choose. `MarshalJSON` is always standard mode — a compact
+message has no room for a schema section, and at these sizes the schema is the
+larger cost anyway.
+
+### Compact mode
+
+At one to three records the columnar layout has nothing to amortise its framing
+over. A one-record message otherwise pays a version byte, a record count, a
+column count, and a field id *plus* a type byte for every column — all to
+describe a single value each. Compact mode drops all of it.
+
+Its header is **four bits**, after which the whole message is one LSB-first
+bitstream with no alignment anywhere until a final pad to a byte boundary:
+
+| bit | field | meaning |
+|---|---|---|
+| 0 | mode | always `1` |
+| 1 | `ALL_POSITIVE` | every signed integer in the message is `>= 0` |
+| 2-3 | shape | `0` lone struct · `1`/`2`/`3` array of that many records |
+
+Shape `0` and shape `1` both carry one record and differ only in whether it
+renders as an object or an array of one — which the binary path takes from the
+destination Go type, but a JSON reader would need told.
+
+`ALL_POSITIVE` decides how a signed value becomes its unsigned payload: set, the
+payload is the **magnitude**; clear, the **zigzag**. That is worth one bit on
+every integer in the message, and the pre-scan it requires is free at three
+records.
+
+A record is then a run of `[field_id:8][value]` pairs closed by id `255` — the
+same id the standard mode reserves as a terminator. **A field holding its zero
+value is omitted entirely**: the key run *is* the presence information, so an
+absent field costs nothing beyond the terminator the record already owes.
+
+Integers use a varint whose first unit is one bit narrower than LEB128's,
+spending that bit on a selector for a one-time four-bit offset. Arrays of
+primitives delegate to the same `varint` and `packed5` codecs the columnar mode
+uses, so an array field costs the same in either mode — a run of correlated ids
+still gets the delta transform. See [`compact/README.md`](compact/README.md).
+
+### How the mode is chosen
+
+Compact mode is used when the record count is 1 to 3 **and** every field is a
+scalar, string, `[]byte`, or an array of those. Excluded, each for a reason:
+
+| excluded | why |
+|---|---|
+| nested `struct`, array of `struct` | a struct holding 100 sub-structs carries 100 records' worth of columnar data; the amortisation premise fails |
+| `*T` (nullable) | omitting a zero-valued field cannot then distinguish `nil` from `&0` the way the null bitmap does |
+| `map`, `any` | no compact representation |
+| `[]int`, `[]uint` elements | platform-dependent width that never reaches the wire, so a 64-bit writer and a 32-bit reader would disagree silently |
+
+The test is purely structural and memoised per type — a slice's *length* does not
+matter, because an array field delegates to the same codecs either way.
+
+At **one record** compact always wins, so it is taken without building the
+alternative. At **two or three** the answer depends on how many fields are zero,
+which no cheap predictor gets right, so both are built and the smaller kept.
+
+| | standard | compact | `encoding/json` |
+|---|---:|---:|---:|
+| one 5-field struct | 34 B | **24 B** | 76 B |
+| same, three fields zero | 28 B | **12 B** | — |
+| 2 records | **50 B** | 50 B | 154 B |
+| 3 records | **62 B** | 65 B | 220 B |
+| struct with a 1000-element `[]int32` | 1017 B | **1009 B** | — |
 
 ## JSON mode
 
@@ -126,7 +217,7 @@ go test ./comparison -run TestJSONModeSchemaOverhead -v -count=1
 ### Schema wire format
 
 ```
-message   := [version=0x03] [schemaLen:uvarint] schema body
+message   := [version=0x04] [schemaLen:uvarint] schema body
 
 schema    := [flags:1] [structCount:uvarint] structDef{structCount} rootDesc
 structDef := [fieldCount:1] ( [field_id:1] packed5(json_name) desc )*
@@ -221,6 +312,11 @@ See [`varint/README.md`](varint/README.md) for the codec and wire layout.
 
 ## Wire format
 
+Both formats start at bit 0 of byte 0; see [Modes](#modes) for the
+discrimination rule.
+
+### Standard mode
+
 ```
 message := [version=0x02:1] [recordCount:uvarint] subTable
 
@@ -262,6 +358,44 @@ that are not self-referential are unaffected, byte for byte.
 
 The integer decoder reports the consumed payload span and each packed5 string is
 self-delimiting, so the decoder can advance directly to the next column or frame.
+
+### Compact mode
+
+```
+message := [header:4 bits] record{n}                    // then padded to a byte
+
+header  := mode(bit 0 = 1) | ALL_POSITIVE(bit 1) | shape(bits 2-3)
+
+record  := ( [field_id:8] value )* [255:8]              // 255 closes the record
+```
+
+Everything after the four header bits is one LSB-first bitstream; nothing is byte
+aligned until the final pad, which is never read back because a record ends at
+its terminator and the message ends at its last record.
+
+| value | encoding |
+|---|---|
+| int | varint over the magnitude or the zigzag, per `ALL_POSITIVE` |
+| uint | varint over the value; never zigzagged |
+| bool | **1 bit** |
+| float32/64 | raw IEEE-754, 32 or 64 bits |
+| string | one `packed5` frame, self-delimiting, no length alongside it |
+| bytes | varint length, then the bytes |
+| array of int / string / float | element count, then the same codec the columnar mode uses |
+| array of bool | element count, then a bitmap, one bit each |
+
+The compact varint spends unit 0's seventh payload bit on a selector:
+
+```
+unit 0    [selector:1] [cont:1] [payload:6]   (+ [payload:4] if selector)
+unit i    [cont:1] [payload:7]
+```
+
+`cont` says another unit follows; the nibble is a one-time offset on unit 0, not
+a per-unit addition. That gives two capacity ladders, `6+7k` and `10+7k`, and the
+encoder takes whichever reaches the value first — three ties, three wins of four
+bits and one loss of four per seven bit-lengths, the loss falling only where
+LEB128's first byte was already exactly full.
 
 ## Performance
 
@@ -337,6 +471,8 @@ current snapshot, and Protobuf regeneration instructions.
 | `codec/` | serialization engine, schema metadata, pools, and white-box tests |
 | `codec/schema.go` | JSON mode: the schema section, built once per type and cached |
 | `codec/schema_decode.go` | JSON mode: schema-driven decode to Go values or JSON |
+| `codec/compact_mode.go` | compact mode: eligibility, mode selection, and the Go-type bridge |
+| `compact/` | compact mode wire format: bitstream, selector varint, reader/writer |
 | `varint/` | adaptive integer-array codec used by integer and length columns |
 | `packed5/` | self-delimiting string codec used by every string path |
 | `comparison/` | 21-model Colbin, Protobuf, JSON v2, and CBOR comparison corpus |
@@ -346,6 +482,9 @@ current snapshot, and Protobuf regeneration instructions.
 
 - The plain binary mode is not self-describing: encoder and decoder must share a
   compatible Go type. Use JSON mode when the reader has no such type.
+- Compact mode carries no schema, so `MarshalJSON` always uses standard mode. A
+  compact message also rejects an unknown field id rather than skipping it: the
+  wire holds no type tag, so there is no way to know how far to step.
 - Not a streaming format — all records are buffered before output.
 - Trusts the input buffer on decode (internal use); malformed data can panic on
   slice bounds rather than returning an error. `DecodeJSON` and `DecodeAny` do
@@ -355,4 +494,5 @@ current snapshot, and Protobuf regeneration instructions.
   detected and will recurse until the stack runs out. Self-referential *types* are
   fine — see below.
 - No backwards-compatibility guarantees — the format version byte is bumped on any
-  wire change (this project is pre-alpha).
+  wire change (this project is pre-alpha). Bumped version bytes must stay **even**,
+  since bit 0 discriminates compact mode.

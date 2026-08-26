@@ -71,6 +71,11 @@ type typeInfo struct {
 	// It is a capacity hint, so a stale or wildly wrong value is only ever a
 	// wasted guess — no correctness stake, and no lock needed.
 	bytesPerRecord atomic.Uint32
+
+	// compactMode memoises whether this type can use compact mode (see
+	// compact_mode.go). The answer depends only on the layout, so it is computed
+	// once on first use; a race just recomputes the same value.
+	compactMode atomic.Int32
 }
 
 var typeInfoCache sync.Map // reflect.Type -> *typeInfo

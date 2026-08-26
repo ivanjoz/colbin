@@ -57,7 +57,7 @@ func MarshalJSON(v any) (out []byte, err error) {
 	prefix = append(prefix, jsonFormatVersion)
 	prefix = binary.AppendUvarint(prefix, uint64(len(schema)))
 	prefix = append(prefix, schema...)
-	return appendMessage(prefix, rv)
+	return appendMessage(prefix, rv, false)
 }
 
 // schemaFor returns the cached schema section describing a root marshal type.

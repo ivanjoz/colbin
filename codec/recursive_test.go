@@ -214,7 +214,9 @@ func TestReachesCycle(t *testing.T) {
 }
 
 // Pin representative version-2 messages so future changes to the varint and
-// packed5 integration are explicit wire-format decisions.
+// packed5 integration are explicit wire-format decisions. These go through
+// marshalStandard: Marshal may answer a small message in compact mode, which is
+// a different format with its own tests.
 func TestWireFormatVersion2(t *testing.T) {
 	type textLine struct{ Text, Css, Tag string }
 	type content struct {
@@ -248,7 +250,7 @@ func TestWireFormatVersion2(t *testing.T) {
 		{[]*content{}, "020400000000050428024204000005035902ef021c02ae0400000000d00000"},
 	}
 	for i, tc := range cases {
-		got, err := Marshal(tc.val)
+		got, err := marshalStandard(tc.val)
 		if err != nil {
 			t.Fatalf("case %d: %v", i, err)
 		}
