@@ -18,28 +18,53 @@ import (
 func Marshal(v any) (out []byte, err error) {
 	// The any encoder panics with encodeError for dynamic types it can't represent
 	// (interface{}-held struct/chan/func, non-string map keys); recover into an error.
-	defer func() {
-		if r := recover(); r != nil {
-			if ce, ok := r.(encodeError); ok {
-				out, err = nil, ce.err
-			} else {
-				panic(r)
-			}
+	defer recoverEncode(&out, &err)
+	rv, err := marshalRoot(v)
+	if err != nil {
+		return nil, err
+	}
+	return appendMessage([]byte{formatVersion}, rv)
+}
+
+// recoverEncode turns an encodeError panic raised deep in the any encoder into a
+// normal error return. Anything else keeps unwinding.
+func recoverEncode(out *[]byte, err *error) {
+	if r := recover(); r != nil {
+		ce, ok := r.(encodeError)
+		if !ok {
+			panic(r)
 		}
-	}()
+		*out, *err = nil, ce.err
+	}
+}
+
+// marshalRoot resolves the value Marshal was handed: pointers are followed to
+// the value they name, which is the type both the schema and the body describe.
+func marshalRoot(v any) (reflect.Value, error) {
 	rv := reflect.ValueOf(v)
 	for rv.Kind() == reflect.Ptr {
 		if rv.IsNil() {
-			return nil, fmt.Errorf("colbin: Marshal nil pointer")
+			return reflect.Value{}, fmt.Errorf("colbin: Marshal nil pointer")
 		}
 		rv = rv.Elem()
 	}
+	if !rv.IsValid() {
+		return reflect.Value{}, fmt.Errorf("colbin: Marshal nil value")
+	}
+	return rv, nil
+}
 
+// appendMessage writes prefix — the version byte, plus the schema section in
+// JSON mode — followed by the message body, which both marshal modes share and
+// which is therefore byte for byte the same in either. The prefix is copied in
+// after the record layout is known so that the whole message still comes from
+// the single sized allocation it always did.
+func appendMessage(prefix []byte, rv reflect.Value) (out []byte, err error) {
 	// Non-record top-level types (maps, []*struct, scalars, …) use value mode: a
 	// single N=1 element column reusing the element machinery. struct / []struct
 	// keep the columnar records layout below.
 	if !topLevelIsRecords(rv.Type()) {
-		out = append(out, formatVersion)
+		out = append(make([]byte, 0, len(prefix)+32), prefix...)
 		return encodeValueMode(out, rv), nil
 	}
 
@@ -71,12 +96,41 @@ func Marshal(v any) (out []byte, err error) {
 		return nil, err
 	}
 
-	out = make([]byte, 0, 16+len(recordPtrs)*len(ti.fields))
-	out = append(out, formatVersion)
+	out = make([]byte, 0, len(prefix)+16+bodySizeHint(ti, len(recordPtrs)))
+	out = append(out, prefix...)
 	out = binary.AppendUvarint(out, uint64(len(recordPtrs)))
 	out = encodeSubTable(out, ti, recordPtrs)
+	if n := len(recordPtrs); n > 0 {
+		ti.bytesPerRecord.Store(uint32((len(out)-len(prefix))/n + 1))
+	}
 	return out, nil
 }
+
+// bodySizeHint estimates the body of an n-record message of this type, from what
+// its last encode measured per record (falling back to the field count, which is
+// only ever right for a flat struct of small scalars).
+//
+// The estimate is capped: records of one type can vary in size without limit — one
+// message holding a single huge record would otherwise leave a per-record figure
+// that a later thousand-record batch multiplies into a wild allocation. Past the
+// cap the buffer just grows the ordinary way, and the regrows matter less the
+// larger the payload already is.
+func bodySizeHint(ti *typeInfo, n int) int {
+	hint := int64(ti.bytesPerRecord.Load())
+	if hint == 0 {
+		hint = int64(len(ti.fields))
+	}
+	if need := int64(n) * hint; need < maxSizeHint {
+		return int(need)
+	}
+	return maxSizeHint
+}
+
+// maxSizeHint bounds how much output buffer a size estimate may ask for up
+// front, which is also the most a stale estimate can waste. Above it the buffer
+// grows the ordinary way from 1 MiB, and a payload that large amortises its
+// regrows over proportionally more encoding work.
+const maxSizeHint = 1 << 20 // 1 MiB
 
 // encodeSubTable writes [colCount] then every field as [id][column]. Used at the
 // top level and recursively for nested structs (struct fields / struct elements).

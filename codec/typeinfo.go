@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/viant/xunsafe"
 )
@@ -42,6 +43,11 @@ type fieldMeta struct {
 	// via reflect; the concrete value is self-describing on the wire (see any.go).
 	ifaceType reflect.Type
 
+	// jsonName is the key this field gets in JSON mode. It is read once per type
+	// when the schema section is built, never on an encode or decode path, so it
+	// sits at the end rather than among the fields the per-record loops touch.
+	jsonName string
+
 	// cyclic reports that this descriptor's type can reach itself — a
 	// self-referential type such as `type Node struct{ Kids []Node }`. Empty
 	// columns of such types are elided on the wire (see elideEmpty), since the
@@ -55,6 +61,16 @@ type typeInfo struct {
 	size   uintptr
 	fields []fieldMeta          // in declaration order
 	byID   map[uint8]*fieldMeta // wire id -> field, for decode
+
+	// bytesPerRecord is what the last encode of this type actually cost, per
+	// record. The output buffer is sized from it, which is the difference
+	// between one allocation and a dozen regrows: the field count alone is a
+	// hopeless estimate for anything but a flat struct of small scalars, and
+	// each regrow copies the whole payload so far.
+	//
+	// It is a capacity hint, so a stale or wildly wrong value is only ever a
+	// wasted guess — no correctness stake, and no lock needed.
+	bytesPerRecord atomic.Uint32
 }
 
 var typeInfoCache sync.Map // reflect.Type -> *typeInfo
@@ -155,6 +171,7 @@ func (st *buildState) build(t reflect.Type) (*typeInfo, error) {
 			return nil, fmt.Errorf("colbin: field %s.%s: %w", t.Name(), sf.Name, err)
 		}
 		fm.name = name
+		fm.jsonName = jsonFieldName(sf, name)
 		fm.offset = sf.Offset
 		fm.xf = &xs.Fields[i]
 		ti.fields = append(ti.fields, fm)
@@ -215,6 +232,26 @@ func parseCbTag(sf reflect.StructField) (name string, explicitID int, skip bool)
 		}
 	}
 	return name, explicitID, false
+}
+
+// jsonFieldName is the key a field gets in JSON mode. A `json` tag name wins,
+// then the cb name, then the Go field name — so one struct can serve both
+// encoding/json and colbin's JSON mode. It never feeds the field-id hash, so
+// adding or changing a json tag leaves the binary payload untouched.
+//
+// Only the tag's name matters here: `omitempty` cannot be honoured (a column is
+// dense, every record carries a value) and `json:"-"` does not drop the field
+// (it is in the payload regardless, so it needs a key) — use `cb:"-"` to leave a
+// field out entirely.
+func jsonFieldName(sf reflect.StructField, cbName string) string {
+	tag := sf.Tag.Get("json")
+	if tag == "" || tag == "-" {
+		return cbName
+	}
+	if name, _, _ := strings.Cut(tag, ","); name != "" {
+		return name
+	}
+	return cbName
 }
 
 // describeType maps a Go type to its wire type class, recursively resolving

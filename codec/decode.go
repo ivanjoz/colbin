@@ -15,6 +15,10 @@ import (
 type decoder struct {
 	data []byte
 	pos  int
+
+	// jsonSafe is set only by the schema-driven decoders (see schema_decode.go):
+	// it replaces values JSON has no form for. The typed path never reads it.
+	jsonSafe bool
 }
 
 // Unmarshal decodes a colbin message into dst, which must be a non-nil pointer
@@ -26,8 +30,14 @@ func Unmarshal(data []byte, dst any) error {
 		return fmt.Errorf("colbin: Unmarshal needs a non-nil pointer")
 	}
 	dec := &decoder{data: data}
-	if dec.readByte() != formatVersion {
-		return fmt.Errorf("colbin: bad version byte")
+	switch v := dec.readByte(); v {
+	case formatVersion:
+	case jsonFormatVersion:
+		// A self-describing message: the body underneath is identical, so the
+		// schema section is simply stepped over when the Go type is known.
+		dec.pos += int(dec.readUvarint())
+	default:
+		return fmt.Errorf("colbin: bad version byte 0x%02x", v)
 	}
 
 	// Walk (and allocate) the destination pointer chain so we decode into the

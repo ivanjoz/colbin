@@ -164,23 +164,76 @@ func exampleBatches(c *comparison.BenchmarkCorpus) []exampleBatch {
 	}
 }
 
+// benchCodec is what the benchmarks drive: encode the corpus, then read the
+// result back. Colbin's JSON mode belongs here but not in wireCodecs above,
+// because its readers do not target the corpus type at all — that is the point
+// of the mode — so it has no place in the round-trip test or the payload report.
+type benchCodec struct {
+	name   string
+	encode func(*comparison.BenchmarkCorpus) ([]byte, error)
+	decode func([]byte) error
+}
+
+// benchCodecs is the round-trip formats plus the two JSON-mode readers: one
+// producing JSON text, one producing Go values. Both work from the schema the
+// message carries, with no Go type involved.
+//
+// The two JSON-mode entries share an encode call, so BenchmarkEncode measures
+// MarshalJSON twice. That is left in deliberately: the two figures are the same
+// work, so the gap between them is the benchmark's own noise floor, measured
+// alongside the numbers it applies to.
+var benchCodecs = func() []benchCodec {
+	out := make([]benchCodec, 0, len(wireCodecs)+2)
+	for _, codec := range wireCodecs {
+		out = append(out, benchCodec{
+			name:   codec.name,
+			encode: codec.marshal,
+			decode: func(data []byte) error {
+				var decoded comparison.BenchmarkCorpus
+				err := codec.unmarshal(data, &decoded)
+				benchmarkCorpus = &decoded
+				return err
+			},
+		})
+	}
+	return append(out,
+		benchCodec{
+			name:   "ColbinJSONText",
+			encode: func(v *comparison.BenchmarkCorpus) ([]byte, error) { return colbin.MarshalJSON(v) },
+			decode: func(data []byte) (err error) {
+				benchmarkBytes, err = colbin.DecodeJSON(data)
+				return err
+			},
+		},
+		benchCodec{
+			name:   "ColbinJSONValues",
+			encode: func(v *comparison.BenchmarkCorpus) ([]byte, error) { return colbin.MarshalJSON(v) },
+			decode: func(data []byte) (err error) {
+				benchmarkValue, err = colbin.DecodeAny(data)
+				return err
+			},
+		},
+	)
+}()
+
 var (
 	benchmarkBytes  []byte
 	benchmarkCorpus *comparison.BenchmarkCorpus
+	benchmarkValue  any
 )
 
 func BenchmarkEncode(b *testing.B) {
 	corpus := comparison.GenerateCorpus(testSeed, benchmarkRecordsPerType)
-	for _, codec := range wireCodecs {
+	for _, codec := range benchCodecs {
 		b.Run(codec.name, func(b *testing.B) {
-			encoded, err := codec.marshal(corpus)
+			encoded, err := codec.encode(corpus)
 			if err != nil {
 				b.Fatal(err)
 			}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
-				benchmarkBytes, err = codec.marshal(corpus)
+				benchmarkBytes, err = codec.encode(corpus)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -193,20 +246,18 @@ func BenchmarkEncode(b *testing.B) {
 
 func BenchmarkDecode(b *testing.B) {
 	corpus := comparison.GenerateCorpus(testSeed, benchmarkRecordsPerType)
-	for _, codec := range wireCodecs {
+	for _, codec := range benchCodecs {
 		b.Run(codec.name, func(b *testing.B) {
-			data, err := codec.marshal(corpus)
+			data, err := codec.encode(corpus)
 			if err != nil {
 				b.Fatal(err)
 			}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
-				var decoded comparison.BenchmarkCorpus
-				if err := codec.unmarshal(data, &decoded); err != nil {
+				if err := codec.decode(data); err != nil {
 					b.Fatal(err)
 				}
-				benchmarkCorpus = &decoded
 			}
 			b.ReportMetric(float64(len(data)), "B/payload")
 			b.ReportMetric(float64(comparison.ExampleTypeCount*benchmarkRecordsPerType), "models/op")

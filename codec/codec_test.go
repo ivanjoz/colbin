@@ -115,3 +115,37 @@ func TestNestedRoundTrip(t *testing.T) {
 		t.Fatalf("nested round-trip mismatch:\n in=%+v\nout=%+v", in, out)
 	}
 }
+
+// The output-buffer estimate is remembered per type, so a type first encoded as
+// one huge record must not leave behind a figure that a later large batch
+// multiplies into an enormous allocation.
+func TestSizeHintSurvivesMixedBatchShapes(t *testing.T) {
+	type row struct {
+		ID   int64
+		Blob []byte
+	}
+	huge := []row{{ID: 1, Blob: make([]byte, 1<<20)}}
+	if _, err := Marshal(huge); err != nil {
+		t.Fatal(err)
+	}
+	// Same type, now many tiny records: the hint from above is per record, and
+	// bodySizeHint has to cap it rather than ask for a gigabyte.
+	tiny := make([]row, 1000)
+	for i := range tiny {
+		tiny[i] = row{ID: int64(i), Blob: []byte{1}}
+	}
+	data, err := Marshal(tiny)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cap(data) > 2<<20 {
+		t.Fatalf("output buffer capacity %d B for a %d B payload", cap(data), len(data))
+	}
+	var out []row
+	if err := Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(out, tiny) {
+		t.Fatal("round-trip mismatch after the mixed-shape encodes")
+	}
+}

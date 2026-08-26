@@ -65,6 +65,95 @@ slices, use value mode. `Unmarshal` needs a non-nil pointer to the corresponding
 destination. Decoding requires a **compatible Go type** — the format is not
 self-describing about field names (see [Field ids](#field-ids)).
 
+## JSON mode
+
+`Marshal` writes nothing about field *names*, and only three bits about a field's
+type, because both sides derive the rest from the Go type. `MarshalJSON` is the
+mode for readers that have no such type: it prefixes a **schema section** — the
+field names plus the type facts the columns leave out — and the reader turns the
+message into JSON on its own.
+
+```go
+data, err := colbin.MarshalJSON(rows)   // []Product -> []byte (schema + payload)
+
+text, err := colbin.DecodeJSON(data)    // -> [{"id":1,"name":"Tin Light",...},...]
+value, err := colbin.DecodeAny(data)    // -> []any of map[string]any
+```
+
+The payload under the schema is **byte for byte what `Marshal` writes**, so the
+binary mode is unchanged in size and speed, and `Unmarshal` accepts either form
+(with a Go type in hand it steps over the schema). The schema is built once per
+type and cached, so marshalling copies it rather than deriving it.
+
+JSON keys come from the `json` tag, else the `cb` name, else the Go field name —
+one struct can serve `encoding/json` and this mode at once. A `json` tag never
+feeds the field-id hash, so adding one leaves the payload untouched.
+
+| Go value | `DecodeJSON` output |
+|---|---|
+| `[]Struct` | array of objects |
+| a single `Struct` | one object |
+| map, scalar, `[]*T`, `[][]T` (value mode) | that value |
+| non-string map key | stringified, as `encoding/json` does |
+| `[]byte` | base64 string, as `encoding/json` does |
+| `NaN`, `±Inf` | `null` (JSON has no other form); `DecodeAny` keeps the float |
+| empty or nil slice/map | `null` (the format does not distinguish them) |
+
+Two `encoding/json` behaviours it cannot reproduce: `omitempty` (a column is
+dense — every record carries a value for every field) and `json:"-"` (the field
+is in the payload either way, so it still needs a key; use `cb:"-"` to leave it
+out of the payload entirely).
+
+### Schema size
+
+The section is a per-message constant — it describes the *type*, so it does not
+grow with the record count. Over the 21 comparison models:
+
+| model | payload, 10 recs | payload, 200 recs | schema |
+|---|---:|---:|---:|
+| `MetricPoints` | 195 B | 3.4 KB | 44 B |
+| `Products` | 684 B | 13.4 KB | 68 B |
+| `People` | 1.1 KB | 22.6 KB | 118 B |
+| `Invoices` (deepest) | 4.9 KB | 96.2 KB | 362 B |
+
+So it is 10–27% of a 10-record message and well under 1% of a 200-record one.
+Run the report with:
+
+```sh
+go test ./comparison -run TestJSONModeSchemaOverhead -v -count=1
+```
+
+### Schema wire format
+
+```
+message   := [version=0x03] [schemaLen:uvarint] schema body
+
+schema    := [flags:1] [structCount:uvarint] structDef{structCount} rootDesc
+structDef := [fieldCount:1] ( [field_id:1] packed5(json_name) desc )*
+desc      := [desc_flags:1] extra
+```
+
+`flags` bit 0 marks records mode (`body` is the usual
+`[recordCount:uvarint] subTable`); bit 1 marks a lone struct, which renders as an
+object rather than a one-element array. `desc_flags` holds the `field_type` in
+its low three bits plus two bits for the properties the columnar layout depends
+on but never writes: `nullable` (a pointer column starts with `nullFlags`, with
+no type byte of its own) and `cyclic` (an empty column of a self-referential type
+is elided). `extra` depends on the type:
+
+| type | extra |
+|---|---|
+| int, float | `[scalar_kind:1]` — width *and* signedness; a `uint64` and a `bool` are both int columns, and the width decides where the varint frame ends |
+| string, bytes, any | — |
+| array | the element `desc` |
+| struct | `[structIndex:uvarint]` into the struct table |
+| map | the key `desc`, then the value `desc` |
+
+Struct types are hoisted into an indexed table instead of being inlined so a
+self-referential type describes itself in finite space: the index is reserved
+before its fields are walked, so a back-edge resolves to an index already
+assigned.
+
 ## Field ids and the `cb` tag
 
 Every field is identified on the wire by a single `uint8`. By default it is derived
@@ -176,22 +265,42 @@ self-delimiting, so the decoder can advance directly to the next column or frame
 
 ## Performance
 
-Two design choices keep it fast:
+Three design choices keep it fast:
 
 - **Field access via `github.com/viant/xunsafe`** — cached, typed, unsafe struct
   field get/set on the hot numeric path (array elements use direct pointer casts).
   Type layout (`typeInfo`, field ids, accessors) is built once per type and cached.
 - **The codecs append directly to the output buffer** and integer/byte columns
   reuse scratch slices from `sync.Pool`.
+- **The output buffer is sized from what the type last measured.** Each type
+  remembers its encoded bytes per record, so the buffer is allocated about the
+  right size instead of growing into place — a payload that starts from a
+  field-count guess is copied again at every regrow. Against the field-count
+  estimate alone this cut encode allocations from 8 to 3 and bytes allocated by
+  69% on the 1000-record scalar batch, by 38% on the nested one, and by 62% on
+  the comparison corpus — 14%, 14% and 26% less time respectively. The estimate
+  is capped at 1 MiB, since records of one type can vary in size without bound;
+  past that the buffer grows the ordinary way.
 
 ### Benchmarks
 
-A short local run on an i7-1355U with Go 1.26 after the varint/packed5 refactor:
+Medians of a `-count=6` run on an i7-1355U with Go 1.27:
 
 | 1000 records | payload | encode | decode |
 |---|---:|---:|---:|
-| scalar | 26.8 KB | 363 µs | 114 µs |
-| nested | 43.5 KB | 888 µs | 582 µs |
+| scalar | 26.8 KB | 158 µs | 97 µs |
+| nested | 43.5 KB | 499 µs | 541 µs |
+
+Each benchmark ran in its own process from a cold start (package under 62 °C).
+This laptop throttles hard enough that one sequential `go test -bench .` charges
+the later benchmarks 6–11% for the heat the earlier ones produced, which reads
+as a code difference and is not one.
+
+JSON mode on the same fixtures: `MarshalJSON` costs what `Marshal` does (1.02x —
+the schema is a cached copy), while reading without a Go type costs 3.6x the typed
+decode for `DecodeAny` and 13x for `DecodeJSON` on the scalar batch (6.5x on the
+nested one, whose typed decode is already map- and slice-heavy). Both build a map
+per record instead of filling a struct, and `DecodeJSON` then renders text.
 
 These numbers are a development snapshot, not a cross-format comparison. Re-run
 on the target workload before making a storage or latency decision.
@@ -223,9 +332,11 @@ current snapshot, and Protobuf regeneration instructions.
 
 | file | role |
 |---|---|
-| `colbin.go` | small public `Marshal` / `Unmarshal` facade |
+| `colbin.go` | small public `Marshal` / `Unmarshal` / `MarshalJSON` facade |
 | `doc.go` | public package documentation |
 | `codec/` | serialization engine, schema metadata, pools, and white-box tests |
+| `codec/schema.go` | JSON mode: the schema section, built once per type and cached |
+| `codec/schema_decode.go` | JSON mode: schema-driven decode to Go values or JSON |
 | `varint/` | adaptive integer-array codec used by integer and length columns |
 | `packed5/` | self-delimiting string codec used by every string path |
 | `comparison/` | 21-model Colbin, Protobuf, JSON v2, and CBOR comparison corpus |
@@ -233,9 +344,13 @@ current snapshot, and Protobuf regeneration instructions.
 
 ## Limitations
 
+- The plain binary mode is not self-describing: encoder and decoder must share a
+  compatible Go type. Use JSON mode when the reader has no such type.
 - Not a streaming format — all records are buffered before output.
 - Trusts the input buffer on decode (internal use); malformed data can panic on
-  slice bounds rather than returning an error.
+  slice bounds rather than returning an error. `DecodeJSON` and `DecodeAny` do
+  turn that panic into an error, but still trust the counts they read, so a
+  corrupt message can ask for a large allocation.
 - Self-referential *values* (a pointer graph that loops back on itself) are not
   detected and will recurse until the stack runs out. Self-referential *types* are
   fine — see below.

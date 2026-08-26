@@ -187,3 +187,57 @@ func BenchmarkColbinDecodeNested(b *testing.B) {
 		_ = Unmarshal(data, &out)
 	}
 }
+
+// JSON mode, measured against the same fixtures: encoding costs the schema copy
+// on top of Marshal, and decoding trades the typed columns for maps of values.
+
+func BenchmarkColbinEncodeScalarJSONMode(b *testing.B) {
+	recs := randScalarRecords(benchN, rand.New(rand.NewSource(1)))
+	out, _ := MarshalJSON(recs)
+	b.SetBytes(int64(len(out)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		out, _ = MarshalJSON(recs)
+	}
+	_ = out
+}
+
+func BenchmarkColbinDecodeScalarToAny(b *testing.B) {
+	recs := randScalarRecords(benchN, rand.New(rand.NewSource(1)))
+	data, _ := MarshalJSON(recs)
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := DecodeAny(data); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkColbinDecodeScalarToJSON(b *testing.B) {
+	recs := randScalarRecords(benchN, rand.New(rand.NewSource(1)))
+	data, _ := MarshalJSON(recs)
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := DecodeJSON(data); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkColbinDecodeNestedToJSON(b *testing.B) {
+	recs := randNestedRecords(benchN, rand.New(rand.NewSource(1)))
+	data, _ := MarshalJSON(recs)
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := DecodeJSON(data); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
