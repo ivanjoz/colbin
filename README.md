@@ -202,6 +202,23 @@ Run them:
 go test ./codec -bench . -benchmem
 ```
 
+### Cross-format comparison
+
+The [`comparison/`](comparison/) package contains a seeded `gofakeit` generator,
+21 varied models, checked-in Protobuf bindings, round-trip tests, per-model
+payload-size reporting, and paired encode/decode benchmarks for Colbin, Protobuf,
+Go's `encoding/json/v2`, and `fxamacker/cbor`. Every serializer receives the same
+generated `BenchmarkCorpus`, and fixture generation is excluded from benchmark
+timing.
+
+```sh
+go test ./comparison -run TestPayloadSizeComparison -v -count=1
+go test ./comparison -run '^$' -bench . -benchmem -count=5
+```
+
+See [`comparison/README.md`](comparison/README.md) for the model coverage,
+current snapshot, and Protobuf regeneration instructions.
+
 ## Files
 
 | file | role |
@@ -211,6 +228,7 @@ go test ./codec -bench . -benchmem
 | `codec/` | serialization engine, schema metadata, pools, and white-box tests |
 | `varint/` | adaptive integer-array codec used by integer and length columns |
 | `packed5/` | self-delimiting string codec used by every string path |
+| `comparison/` | 21-model Colbin, Protobuf, JSON v2, and CBOR comparison corpus |
 | `colbin_test.go` | public API integration test |
 
 ## Limitations
