@@ -1,4 +1,4 @@
-package colbin
+package codec
 
 import (
 	"encoding/binary"
@@ -6,6 +6,8 @@ import (
 	"math"
 	"reflect"
 	"unsafe"
+
+	"github.com/ivanjoz/colbin/packed5"
 )
 
 // decoder walks the byte stream with an explicit cursor; each column computes
@@ -122,7 +124,10 @@ func (dec *decoder) decodeColumn(fm *fieldMeta, n int, ptrs []unsafe.Pointer) er
 	}
 	switch fm.fType {
 	case ftInt:
-		vals := dec.readIntColumn(n, fm.intWidth)
+		vals, err := dec.readIntColumn(n, fm.bitWidth)
+		if err != nil {
+			return err
+		}
 		for i, p := range ptrs {
 			setInt64(fm, p, vals[i])
 		}
@@ -131,15 +136,23 @@ func (dec *decoder) decodeColumn(fm *fieldMeta, n int, ptrs []unsafe.Pointer) er
 		for i, p := range ptrs {
 			setFloat64(fm, p, vals[i])
 		}
-	case ftString, ftBytes:
+	case ftString:
 		dec.readByte() // top flags byte (carries only the type)
-		blobs := dec.readBlobs(n)
-		for i, p := range ptrs {
-			if fm.fType == ftString {
-				fm.xf.SetString(p, string(blobs[i])) // copies out of the input buffer
-			} else {
-				fm.xf.SetBytes(p, cloneBytes(blobs[i]))
+		for _, p := range ptrs {
+			s, err := dec.readPacked5String()
+			if err != nil {
+				return err
 			}
+			fm.xf.SetString(p, s)
+		}
+	case ftBytes:
+		dec.readByte() // top flags byte (carries only the type)
+		blobs, err := dec.readBlobs(n)
+		if err != nil {
+			return err
+		}
+		for i, p := range ptrs {
+			fm.xf.SetBytes(p, cloneBytes(blobs[i]))
 		}
 	case ftStruct:
 		dec.readByte() // flags (ftStruct)
@@ -167,7 +180,10 @@ func (dec *decoder) decodeColumn(fm *fieldMeta, n int, ptrs []unsafe.Pointer) er
 // then decodes the flattened element column into the slices' backing arrays.
 // shPtrs point at the slice headers to populate (one per record).
 func (dec *decoder) decodeArrayBody(elem *fieldMeta, sliceType reflect.Type, elemSize uintptr, shPtrs []unsafe.Pointer) error {
-	lengths := dec.readIntColumn(len(shPtrs), 32)
+	lengths, err := dec.readIntColumn(len(shPtrs), 64)
+	if err != nil {
+		return err
+	}
 	total := 0
 	elemPtrs := make([]unsafe.Pointer, 0)
 	for i, sp := range shPtrs {
@@ -197,7 +213,10 @@ func (dec *decoder) decodeElemColumn(elem *fieldMeta, elemType reflect.Type, ele
 	}
 	switch elem.fType {
 	case ftInt:
-		vals := dec.readIntColumn(n, elem.intWidth)
+		vals, err := dec.readIntColumn(n, elem.bitWidth)
+		if err != nil {
+			return err
+		}
 		for i, p := range ptrs {
 			setInt64At(elem.goKind, p, vals[i])
 		}
@@ -206,15 +225,23 @@ func (dec *decoder) decodeElemColumn(elem *fieldMeta, elemType reflect.Type, ele
 		for i, p := range ptrs {
 			setFloat64At(elem.goKind, p, vals[i])
 		}
-	case ftString, ftBytes:
+	case ftString:
 		dec.readByte()
-		blobs := dec.readBlobs(n)
-		for i, p := range ptrs {
-			if elem.fType == ftString {
-				*(*string)(p) = string(blobs[i])
-			} else {
-				*(*[]byte)(p) = cloneBytes(blobs[i])
+		for _, p := range ptrs {
+			s, err := dec.readPacked5String()
+			if err != nil {
+				return err
 			}
+			*(*string)(p) = s
+		}
+	case ftBytes:
+		dec.readByte()
+		blobs, err := dec.readBlobs(n)
+		if err != nil {
+			return err
+		}
+		for i, p := range ptrs {
+			*(*[]byte)(p) = cloneBytes(blobs[i])
 		}
 	case ftStruct:
 		dec.readByte()
@@ -241,14 +268,13 @@ func (dec *decoder) readFloatColumn(n int) []float64 {
 	if flags>>7&1 == 1 { // empty column
 		return out
 	}
-	span := n * int(width) / 8
-	br := bitReader{buf: dec.data[dec.pos : dec.pos+span]}
-	dec.pos += span
 	for i := range n {
 		if width == 64 {
-			out[i] = math.Float64frombits(br.readBits(64))
+			out[i] = math.Float64frombits(binary.LittleEndian.Uint64(dec.data[dec.pos:]))
+			dec.pos += 8
 		} else {
-			out[i] = float64(math.Float32frombits(uint32(br.readBits(32))))
+			out[i] = float64(math.Float32frombits(binary.LittleEndian.Uint32(dec.data[dec.pos:])))
+			dec.pos += 4
 		}
 	}
 	return out
@@ -256,15 +282,18 @@ func (dec *decoder) readFloatColumn(n int) []float64 {
 
 // readBlobs reads a length sub-column + concatenated bytes, returning n raw
 // slices that alias the input buffer (callers copy as needed).
-func (dec *decoder) readBlobs(n int) [][]byte {
-	lengths := dec.readIntColumn(n, 32)
+func (dec *decoder) readBlobs(n int) ([][]byte, error) {
+	lengths, err := dec.readIntColumn(n, 64)
+	if err != nil {
+		return nil, err
+	}
 	out := make([][]byte, n)
 	for i := range n {
 		l := int(lengths[i])
 		out[i] = dec.data[dec.pos : dec.pos+l]
 		dec.pos += l
 	}
-	return out
+	return out, nil
 }
 
 // cloneBytes copies a slice so decoded []byte fields don't alias the input.
@@ -274,25 +303,25 @@ func cloneBytes(b []byte) []byte {
 	return c
 }
 
-// readIntColumn reads a flags byte + packed int payload and returns n decoded values.
-func (dec *decoder) readIntColumn(n int, nativeWidth uint8) []int64 {
-	flags := dec.readByte()
-	isSigned := flags>>3&1 == 1
-	prec := flags >> 4 & 7
-	empty := flags>>7&1 == 1
-	span := intColumnBytes(n, nativeWidth, prec, empty)
-	br := bitReader{buf: dec.data[dec.pos : dec.pos+span]}
-	dec.pos += span
-	out := make([]int64, n)
-	decodeIntColumn(&br, n, nativeWidth, isSigned, empty, prec, out)
-	return out
+func (dec *decoder) readPacked5String() (string, error) {
+	s, consumed, err := packed5.Decode(dec.data[dec.pos:])
+	if err != nil {
+		return "", err
+	}
+	dec.pos += consumed
+	return s, nil
 }
 
-// intColumnBytes returns the byte span of a packed int column (base + n deltas).
-func intColumnBytes(n int, nativeWidth, prec uint8, empty bool) int {
-	if empty {
-		return 0
+// readIntColumn reads a colbin type byte followed by one varint array frame.
+func (dec *decoder) readIntColumn(n int, width uint8) ([]int64, error) {
+	if flags := dec.readByte(); flags&7 != ftInt {
+		return nil, fmt.Errorf("colbin: expected integer column at pos %d", dec.pos-1)
 	}
-	totalBits := int(nativeWidth) + n*int(intWidths[prec])
-	return (totalBits + 7) / 8
+	out := make([]int64, n)
+	consumed, err := decodeIntColumn(dec.data[dec.pos:], n, width, out)
+	if err != nil {
+		return nil, err
+	}
+	dec.pos += consumed
+	return out, nil
 }

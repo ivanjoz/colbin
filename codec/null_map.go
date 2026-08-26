@@ -1,12 +1,10 @@
-package colbin
+package codec
 
 import (
 	"reflect"
 	"unsafe"
 )
 
-// Phase C: nullability (pointers) and maps.
-//
 // Nullable column wire layout (in place of the usual [flags][payload]):
 //   [nullFlags:1] [presence bitmap: ceil(N/8) bytes IF has_nulls] innerElementColumn
 // The inner column holds only the non-null values (dense). The decoder knows a
@@ -64,7 +62,7 @@ func encodeMapColumn(out []byte, fm *fieldMeta, slotPtrs []unsafe.Pointer) []byt
 		(*lenBuf)[i] = int64(mv.Len())
 		total += mv.Len()
 	}
-	out = appendIntColumn(out, *lenBuf, 32)
+	out = appendIntColumn(out, *lenBuf, 64)
 	putI64(lenBuf)
 
 	// Copy entries into addressable backing slices (map keys/values aren't
@@ -144,7 +142,10 @@ func (dec *decoder) decodeNullableColumn(pointee *fieldMeta, pointeeType reflect
 // decodeMapColumn reverses encodeMapColumn.
 func (dec *decoder) decodeMapColumn(fm *fieldMeta, n int, slotPtrs []unsafe.Pointer) error {
 	dec.readByte() // ftMap flags
-	lengths := dec.readIntColumn(n, 32)
+	lengths, err := dec.readIntColumn(n, 64)
+	if err != nil {
+		return err
+	}
 	total := 0
 	for _, l := range lengths {
 		total += int(l)

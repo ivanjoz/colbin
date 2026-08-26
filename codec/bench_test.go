@@ -1,4 +1,4 @@
-package colbin
+package codec
 
 import (
 	"math/rand"
@@ -19,7 +19,7 @@ func randString(rng *rand.Rand, maxLen int) string {
 }
 
 // randScalarRecords builds ERP-ish rows: IDs drift upward by small steps (the
-// case FOR+bit-packing is built for), plus small ages, occasional negatives,
+// case adaptive varint columns are built for), plus small ages, occasional negatives,
 // short names and floats.
 func randScalarRecords(n int, rng *rand.Rand) []ScalarRecord {
 	recs := make([]ScalarRecord, n)

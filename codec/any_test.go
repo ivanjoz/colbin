@@ -1,6 +1,7 @@
-package colbin
+package codec
 
 import (
+	"math"
 	"reflect"
 	"testing"
 )
@@ -46,6 +47,7 @@ func TestAnyScalarKinds(t *testing.T) {
 		{int(-7), int64(-7)},
 		{int32(42), int64(42)},
 		{uint16(9), uint64(9)},
+		{uint64(math.MaxUint64), uint64(math.MaxUint64)},
 		{float32(1.5), float64(1.5)},
 		{float64(3.25), 3.25},
 		{"hola", "hola"},

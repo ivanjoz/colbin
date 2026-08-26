@@ -1,4 +1,4 @@
-package colbin
+package codec
 
 import "sync"
 
@@ -7,10 +7,46 @@ import "sync"
 // scratch. This replaces one N-sized allocation per column with a reused buffer.
 
 var (
+	i8Pool   = sync.Pool{New: func() any { s := make([]int8, 0, 256); return &s }}
+	i16Pool  = sync.Pool{New: func() any { s := make([]int16, 0, 256); return &s }}
+	i32Pool  = sync.Pool{New: func() any { s := make([]int32, 0, 256); return &s }}
 	i64Pool  = sync.Pool{New: func() any { s := make([]int64, 0, 256); return &s }}
 	f64Pool  = sync.Pool{New: func() any { s := make([]float64, 0, 256); return &s }}
 	blobPool = sync.Pool{New: func() any { s := make([][]byte, 0, 256); return &s }}
 )
+
+func getI8(n int) *[]int8 {
+	p := i8Pool.Get().(*[]int8)
+	if cap(*p) < n {
+		*p = make([]int8, n)
+	} else {
+		*p = (*p)[:n]
+	}
+	return p
+}
+func putI8(p *[]int8) { i8Pool.Put(p) }
+
+func getI16(n int) *[]int16 {
+	p := i16Pool.Get().(*[]int16)
+	if cap(*p) < n {
+		*p = make([]int16, n)
+	} else {
+		*p = (*p)[:n]
+	}
+	return p
+}
+func putI16(p *[]int16) { i16Pool.Put(p) }
+
+func getI32(n int) *[]int32 {
+	p := i32Pool.Get().(*[]int32)
+	if cap(*p) < n {
+		*p = make([]int32, n)
+	} else {
+		*p = (*p)[:n]
+	}
+	return p
+}
+func putI32(p *[]int32) { i32Pool.Put(p) }
 
 func getI64(n int) *[]int64 {
 	p := i64Pool.Get().(*[]int64)

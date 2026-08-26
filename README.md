@@ -1,14 +1,15 @@
 # colbin
 
-A columnar, delta-encoded binary serializer for **slices of structs** — sized and
+A compact columnar binary serializer for **slices of structs** — sized and
 tuned for numeric, DB-row-shaped data. It exposes a familiar
 `Marshal`/`Unmarshal` surface, but uses a fundamentally different layout from
 row-oriented formats such as CBOR or JSON: colbin transposes the data and encodes
-it **column-by-column** (SoA), applying frame-of-reference (FOR) delta encoding
-plus bit-packing to each numeric column.
+it **column-by-column** (SoA). Integer columns use the local adaptive `varint`
+codec, while strings use self-delimiting `packed5` frames with a raw fallback.
 
-On typical ERP row batches this yields payloads **~3× smaller than CBOR**, decode
-**~3× faster**, and encode modestly faster — see [Benchmarks](#benchmarks).
+The codecs choose their own compact or fixed/raw fallback, so wide random numbers
+and strings outside the packed alphabet remain bounded rather than inflating
+without limit.
 
 ## When to use it
 
@@ -92,11 +93,11 @@ transmitting field names.
 
 | Go type | Encoding |
 |---|---|
-| `int8..int64`, `uint8..uint32`, `int`, `uint`, `bool` | integer column (FOR + bit-pack) |
+| `int8..int64`, `uint8..uint64`, `int`, `uint`, `bool` | adaptive varint column |
 | `float32`, `float64` | raw IEEE-754 (32/64-bit) |
-| `string` | length sub-column + concatenated UTF-8 |
-| `[]byte` | length sub-column + concatenated bytes |
-| `[]T` (T scalar or struct) | length sub-column + flattened element column |
+| `string` | self-delimiting packed5 frame (raw fallback when packing would grow it) |
+| `[]byte` | varint length column + concatenated bytes |
+| `[]T` (T scalar or struct) | varint length column + flattened element column |
 | nested `struct` | recursive sub-table of columns |
 | `[][]T`, deeper nesting | recursion |
 | `*T` (incl. `*struct`, `[]*T`) | nullable column (null bitmap, see below) |
@@ -105,9 +106,7 @@ transmitting field names.
 
 **Not yet supported** (error on encode): `time.Time`, pointer-to-pointer
 (`**T`), non-scalar map keys, a struct/`chan`/`func` held inside an `interface{}`.
-`uint64` values above `math.MaxInt64` are not
-representable (the internal column type is `int64`). `nil` and empty slices/maps
-are indistinguishable — both decode to `nil`.
+`nil` and empty slices/maps are indistinguishable — both decode to `nil`.
 
 ### Nullability
 
@@ -120,44 +119,38 @@ no nulls costs just the 1 flag byte. This is how `[]*int32` stores a null *slot*
 
 ## How the integer encoding works
 
-This is the core of the format. For each integer column (all N values of one field),
-colbin picks the smallest bit-width that fits the data and stores every value as a
-small delta from a per-column base:
+Fixed-width Go integers are converted to the signed type with the same width and
+passed to `varint.AppendArray`; `int` and `uint` use the stable 64-bit wire path.
+The codec evaluates raw, delta-of-previous, frame-of-reference, and fixed-width
+representations, then writes the smallest plan. Its one-byte header records the
+selected transform, zigzag mode, and variable-length parameters;
+`varint.DecodeArray` returns the exact payload span consumed. Same-width conversion
+preserves unsigned bit patterns—including the full `uint64` range—while keeping
+fixed-width fallbacks at 1, 2, 4, or 8 bytes.
 
-- **Unsigned mode** (no negative values): `0` is a reserved *sentinel* meaning
-  "empty/absent" and decodes back to `0`. The base is `min_nonzero - 1`, so every
-  real value maps to `>= 1` and never collides with the sentinel.
-  `enc = (v == 0) ? 0 : v - base`.
-- **Signed mode** (column contains a negative): `0` can no longer be a sentinel, so
-  the base is the true minimum (possibly negative) and `enc = v - base`. The wider
-  span typically costs ~1 more bit.
-
-The largest `enc` picks the packed width from `{8, 12, 16, 24, 32, 48, 64}` bits
-(true bit-level packing — 12/24/48-bit values straddle byte boundaries). Columns
-that are entirely zero are flagged empty and store nothing.
+See [`varint/README.md`](varint/README.md) for the codec and wire layout.
 
 ## Wire format
 
 ```
-message := [version:1] [recordCount:uvarint] subTable
+message := [version=0x02:1] [recordCount:uvarint] subTable
 
 subTable := [colCount:1] column*                 // one column per field
 
-column   := [field_id:1] [flags:1] payload
-
-flags    := field_type(bits 0-2) | is_signed(bit 3) | precision(bits 4-6) | empty(bit 7)
+column   := [field_id:1] [type_flags:1] payload
 ```
 
 Payloads by `field_type`:
 
-- **int**: `[base : nativeWidth bits] [enc : N × precisionWidth bits]`, byte-aligned
-  at column end (empty column: no payload).
+- **int**: one adaptive `varint` array frame; N comes from the containing layout.
 - **float**: `N × (32|64) raw IEEE-754 bits` (empty column: no payload).
-- **string / bytes**: an embedded int length-column, then the concatenated bytes.
-- **array**: an embedded int length-column (element count per record), then one
+- **string**: N consecutive self-delimiting `packed5` frames. Each frame may use
+  packed tokens or raw bytes, whichever is smaller.
+- **bytes**: a varint length column, then concatenated raw bytes.
+- **array**: a varint length column (element count per record), then one
   flattened element column (recursively `[flags] payload`).
 - **struct**: a nested `subTable`.
-- **map**: an embedded int length-column (entry count per record), then a flattened
+- **map**: a varint length column (entry count per record), then a flattened
   keys column and a flattened values column.
 - **nullable** (pointer types): `[nullFlags:1] [presence bitmap IF has_nulls]` in
   front of the (dense) inner column.
@@ -176,10 +169,10 @@ that are not self-referential are unaffected, byte for byte.
   time and varies per value), so each is written row-style as `[tag:1] payload` —
   a compact escape hatch inside the columnar frame. `nil`/`bool`/`int64`/`uint64`/
   `float64`/`string`/`[]byte`/`[]any`/`map[string]any` (recursive). Decode
-  normalizes numbers to `int64`/`uint64`/`float64`, matching CBOR's dynamic decode.
+  normalizes numbers to `int64`/`uint64`/`float64`.
 
-Each column is byte-aligned, and its byte span is deterministically recomputable
-from N and the flags, so the decoder advances column-to-column with a simple cursor.
+The integer decoder reports the consumed payload span and each packed5 string is
+self-delimiting, so the decoder can advance directly to the next column or frame.
 
 ## Performance
 
@@ -188,45 +181,37 @@ Two design choices keep it fast:
 - **Field access via `github.com/viant/xunsafe`** — cached, typed, unsafe struct
   field get/set on the hot numeric path (array elements use direct pointer casts).
   Type layout (`typeInfo`, field ids, accessors) is built once per type and cached.
-- **Encode writes bit-packed data straight into the output buffer** (no per-column
-  temp buffer or copy), scans each column once for min/max, and reuses scratch
-  slices from `sync.Pool`.
+- **The codecs append directly to the output buffer** and integer/byte columns
+  reuse scratch slices from `sync.Pool`.
 
 ### Benchmarks
 
-Historical comparison from the original Genix package, using 1000 records on an
-i7-1355U:
+A short local run on an i7-1355U with Go 1.26 after the varint/packed5 refactor:
 
-| | colbin | CBOR | ratio |
-|---|---|---|---|
-| Size (scalar) | 27.7 KB | 89.8 KB | **3.24× smaller** |
-| Size (nested) | 43.4 KB | 121.8 KB | **2.81× smaller** |
-| Encode (scalar) | 162 µs / 8 allocs | 204 µs / 2 allocs | **1.26× faster** |
-| Decode (scalar) | 178 µs | 504 µs | **2.8× faster** |
+| 1000 records | payload | encode | decode |
+|---|---:|---:|---:|
+| scalar | 26.8 KB | 363 µs | 114 µs |
+| nested | 43.5 KB | 888 µs | 582 µs |
 
-> The `MB/s` figure printed by `go test -bench` is misleading here: it is
-> `bytes ÷ time`, and colbin emits ~3× fewer bytes, so it reports lower MB/s despite
-> lower latency. Compare **ns/op**.
+These numbers are a development snapshot, not a cross-format comparison. Re-run
+on the target workload before making a storage or latency decision.
 
 Run them:
 
 ```sh
-go test -bench . -benchmem
+go test ./codec -bench . -benchmem
 ```
 
 ## Files
 
 | file | role |
 |---|---|
-| `bitstream.go` | LSB-first bit packer/reader (32-bit chunked) |
-| `format.go` | version, type codes, width table, precision selection, sign-extend |
-| `column_int.go` | integer column encode (FOR + bit-pack) and decode |
-| `typeinfo.go` | field ids, `cb` tag, recursive type layout, cache |
-| `value.go` / `value_elem.go` | typed scalar get/set (struct fields / array elements) |
-| `null_map.go` | nullable (pointer) columns via bitmap, and map columns |
-| `pool.go` | scratch-slice pools for encoding |
-| `encode.go` / `decode.go` | `Marshal` / `Unmarshal` and the column drivers |
-| `*_test.go` | round-trip, random, size, and benchmark tests |
+| `colbin.go` | small public `Marshal` / `Unmarshal` facade |
+| `doc.go` | public package documentation |
+| `codec/` | serialization engine, schema metadata, pools, and white-box tests |
+| `varint/` | adaptive integer-array codec used by integer and length columns |
+| `packed5/` | self-delimiting string codec used by every string path |
+| `colbin_test.go` | public API integration test |
 
 ## Limitations
 

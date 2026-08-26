@@ -1,4 +1,4 @@
-package colbin
+package codec
 
 import (
 	"encoding/binary"
@@ -6,6 +6,8 @@ import (
 	"math"
 	"reflect"
 	"unsafe"
+
+	"github.com/ivanjoz/colbin/packed5"
 )
 
 // Marshal encodes v into the colbin format. Structs and slices of structs use
@@ -99,7 +101,7 @@ func encodeColumn(out []byte, fm *fieldMeta, ptrs []unsafe.Pointer) []byte {
 		for i, p := range ptrs {
 			(*buf)[i] = readInt64(fm, p)
 		}
-		out = appendIntColumn(out, *buf, fm.intWidth)
+		out = appendIntColumn(out, *buf, fm.bitWidth)
 		putI64(buf)
 		return out
 	case ftFloat:
@@ -107,18 +109,14 @@ func encodeColumn(out []byte, fm *fieldMeta, ptrs []unsafe.Pointer) []byte {
 		for i, p := range ptrs {
 			(*buf)[i] = readFloat64(fm, p)
 		}
-		out = appendFloatColumn(out, *buf, fm.intWidth) // intWidth holds 32/64 here
+		out = appendFloatColumn(out, *buf, fm.bitWidth)
 		putF64(buf)
 		return out
 	case ftString:
 		out = append(out, ftString)
-		buf := getBlobs(len(ptrs))
-		for i, p := range ptrs {
-			s := fm.xf.String(p)
-			(*buf)[i] = unsafe.Slice(unsafe.StringData(s), len(s))
+		for _, p := range ptrs {
+			out = packed5.Append(out, fm.xf.String(p))
 		}
-		out = appendBlobColumn(out, *buf)
-		putBlobs(buf)
 		return out
 	case ftBytes:
 		out = append(out, ftBytes)
@@ -173,7 +171,7 @@ func encodeArrayBody(out []byte, elem *fieldMeta, elemSize uintptr, shPtrs []uns
 		(*lenBuf)[i] = int64(sh.len)
 		total += sh.len
 	}
-	out = appendIntColumn(out, *lenBuf, 32)
+	out = appendIntColumn(out, *lenBuf, 64)
 	putI64(lenBuf)
 	if elideEmpty(elem, total) {
 		return out
@@ -202,7 +200,7 @@ func encodeElemColumn(out []byte, elem *fieldMeta, ptrs []unsafe.Pointer) []byte
 		for i, p := range ptrs {
 			(*buf)[i] = readInt64At(elem.goKind, p)
 		}
-		out = appendIntColumn(out, *buf, elem.intWidth)
+		out = appendIntColumn(out, *buf, elem.bitWidth)
 		putI64(buf)
 		return out
 	case ftFloat:
@@ -210,18 +208,14 @@ func encodeElemColumn(out []byte, elem *fieldMeta, ptrs []unsafe.Pointer) []byte
 		for i, p := range ptrs {
 			(*buf)[i] = readFloat64At(elem.goKind, p)
 		}
-		out = appendFloatColumn(out, *buf, elem.intWidth)
+		out = appendFloatColumn(out, *buf, elem.bitWidth)
 		putF64(buf)
 		return out
 	case ftString:
 		out = append(out, ftString)
-		buf := getBlobs(len(ptrs))
-		for i, p := range ptrs {
-			s := *(*string)(p)
-			(*buf)[i] = unsafe.Slice(unsafe.StringData(s), len(s))
+		for _, p := range ptrs {
+			out = packed5.Append(out, *(*string)(p))
 		}
-		out = appendBlobColumn(out, *buf)
-		putBlobs(buf)
 		return out
 	case ftBytes:
 		out = append(out, ftBytes)
@@ -267,24 +261,23 @@ func appendFloatColumn(out []byte, vals []float64, width uint8) []byte {
 	if empty {
 		return out
 	}
-	bw := bitWriter{buf: out}
 	for _, v := range vals {
 		if width == 64 {
-			bw.writeBits(math.Float64bits(v), 64)
+			out = binary.LittleEndian.AppendUint64(out, math.Float64bits(v))
 		} else {
-			bw.writeBits(uint64(math.Float32bits(float32(v))), 32)
+			out = binary.LittleEndian.AppendUint32(out, math.Float32bits(float32(v)))
 		}
 	}
-	return bw.flush()
+	return out
 }
 
-// appendBlobColumn writes a 32-bit-base length sub-column then concatenated bytes.
+// appendBlobColumn writes a varint length sub-column then concatenated bytes.
 func appendBlobColumn(out []byte, blobs [][]byte) []byte {
 	lenBuf := getI64(len(blobs))
 	for i, b := range blobs {
 		(*lenBuf)[i] = int64(len(b))
 	}
-	out = appendIntColumn(out, *lenBuf, 32)
+	out = appendIntColumn(out, *lenBuf, 64)
 	putI64(lenBuf)
 	for _, b := range blobs {
 		out = append(out, b...)

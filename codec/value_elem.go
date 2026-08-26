@@ -1,4 +1,4 @@
-package colbin
+package codec
 
 import (
 	"reflect"

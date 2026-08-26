@@ -1,4 +1,4 @@
-package colbin
+package codec
 
 import (
 	"encoding/hex"
@@ -213,9 +213,9 @@ func TestReachesCycle(t *testing.T) {
 	}
 }
 
-// Non-cyclic types keep their exact pre-existing bytes: elision must not touch
-// anything that already round-tripped, since stored data depends on it.
-func TestWireFormatUnchangedForNonCyclicTypes(t *testing.T) {
+// Pin representative version-2 messages so future changes to the varint and
+// packed5 integration are explicit wire-format decisions.
+func TestWireFormatVersion2(t *testing.T) {
 	type textLine struct{ Text, Css, Tag string }
 	type content struct {
 		Title     string
@@ -235,17 +235,17 @@ func TestWireFormatUnchangedForNonCyclicTypes(t *testing.T) {
 		val  any
 		want string
 	}{
-		{section{}, "0101053902805b010005042802804204800503590280ef02801c0280ae048080d080ef068002800280a906800280072c04800280"},
-		{section{Type: "hero", Vals: []string{"a", "b"}}, "01010539020003000000016865726f5b010005042802804204800503590280ef02801c0280ae048080d080ef068002800280a906800280072c0400010000000102000000000001016162"},
+		{section{}, "0201053902005b0100050428024204000005035902ef021c02ae0400000000d00000ef060000000202a90600000002072c0400000002"},
+		{section{Type: "hero", Vals: []string{"a", "b"}}, "02010539023139243a5b0100050428024204000005035902ef021c02ae0400000000d00000ef060000000202a90600000002072c040000020210611062"},
 		{section{Type: "x", Content: &content{Title: "t", TextLines: []textLine{{Text: "l1"}}, IDs: []int32{1, 2, 3}, Limit: 7},
 			Css: map[string]string{"k": "v"}, Attrs: map[string]any{"n": int64(4)}},
-			"0101053902000000000001785b0005042802000000000001744204000000000001050359020001000000016c31ef02801c0280ae040002000000010000000000010203d0000600000001ef06000000000001020000000000016b0200000000000176a906000000000001020000000000016e0703082c04800280"},
-		{[]textLine{}, "010003590280ef02801c0280"},
-		{[]textLine{{Text: "a", Css: "c"}, {Tag: "p"}}, "01020359020000000000010061ef0200000000000100631c020000000000000170"},
-		{map[string][]textLine{"z": {{Text: "q"}}}, "0106000000000001020000000000017a040000000000010503590200000000000171ef02801c0280"},
-		{map[string][]textLine{}, "010680028004800503590280ef02801c0280"},
-		{[]*content{nil, {Title: "p"}}, "0104000100000001010205042802000000000001704204800503590280ef02801c0280ae048080d080"},
-		{[]*content{}, "0104800005042802804204800503590280ef02801c0280ae048080d080"},
+			"020105390210785b00050428021074420400000105035902206c31ef02001c0200ae040000030000010203d0000007ef0600000102106b021076a90600000102106e070300042c0400000002"},
+		{[]textLine{}, "0200035902ef021c02"},
+		{[]textLine{{Text: "a", Css: "c"}, {Tag: "p"}}, "0202035902106100ef021063001c02001070"},
+		{map[string][]textLine{"z": {{Text: "q"}}}, "020600000102107a04000001050359021071ef02001c0200"},
+		{map[string][]textLine{}, "02060000000204000005035902ef021c02"},
+		{[]*content{nil, {Title: "p"}}, "02040000020102050428021070420400000005035902ef021c02ae040000000000d0000000"},
+		{[]*content{}, "020400000000050428024204000005035902ef021c02ae0400000000d00000"},
 	}
 	for i, tc := range cases {
 		got, err := Marshal(tc.val)

@@ -1,4 +1,4 @@
-package colbin
+package codec
 
 import (
 	"fmt"
@@ -19,21 +19,21 @@ type fieldMeta struct {
 	offset   uintptr        // byte offset of the field within the struct
 	xf       *xunsafe.Field // xunsafe accessor for fast scalar get/set (struct fields only)
 	goKind   reflect.Kind   // exact kind for int/uint/float dispatch
-	intWidth uint8          // native bit width for ftInt fields (8/16/32/64)
+	bitWidth uint8          // native scalar bit width (8/16/32/64)
 
-	// Composite descriptors (Phase B). Elements of an array have no struct field,
+	// Composite descriptors. Elements of an array have no struct field,
 	// so scalar elements are accessed by direct pointer cast (see value_elem.go).
 	sub       *typeInfo    // ftStruct: nested sub-table (also for struct elements)
 	elem      *fieldMeta   // ftArray: element descriptor; ptr: the pointee descriptor
 	sliceType reflect.Type // ftArray: the slice type (to build slices on decode)
 	elemSize  uintptr      // ftArray: size of one element
 
-	// Nullability (Phase C). A pointer field is nullable: elem describes the pointee,
+	// Nullability. A pointer field is nullable: elem describes the pointee,
 	// accessed like an array element, and pointeeType allocates backing on decode.
 	nullable    bool
 	pointeeType reflect.Type
 
-	// Maps (Phase C). K restricted to scalar/string; V any supported type.
+	// Maps. K is restricted to scalar/string; V may be any supported type.
 	mapKey, mapVal         *fieldMeta
 	mapKeyType, mapValType reflect.Type
 	mapType                reflect.Type
@@ -242,20 +242,18 @@ func (st *buildState) describe(t reflect.Type) (fieldMeta, error) {
 
 func (st *buildState) describeKind(t reflect.Type) (fieldMeta, error) {
 	switch k := t.Kind(); k {
-	case reflect.Int8, reflect.Uint8:
-		return fieldMeta{fType: ftInt, goKind: k, intWidth: 8}, nil
+	case reflect.Int8, reflect.Uint8, reflect.Bool:
+		return fieldMeta{fType: ftInt, goKind: k, bitWidth: 8}, nil
 	case reflect.Int16, reflect.Uint16:
-		return fieldMeta{fType: ftInt, goKind: k, intWidth: 16}, nil
+		return fieldMeta{fType: ftInt, goKind: k, bitWidth: 16}, nil
 	case reflect.Int32, reflect.Uint32:
-		return fieldMeta{fType: ftInt, goKind: k, intWidth: 32}, nil
+		return fieldMeta{fType: ftInt, goKind: k, bitWidth: 32}, nil
 	case reflect.Int64, reflect.Uint64, reflect.Int, reflect.Uint:
-		return fieldMeta{fType: ftInt, goKind: k, intWidth: 64}, nil
-	case reflect.Bool:
-		return fieldMeta{fType: ftInt, goKind: k, intWidth: 8}, nil
+		return fieldMeta{fType: ftInt, goKind: k, bitWidth: 64}, nil
 	case reflect.Float32:
-		return fieldMeta{fType: ftFloat, goKind: k, intWidth: 32}, nil
+		return fieldMeta{fType: ftFloat, goKind: k, bitWidth: 32}, nil
 	case reflect.Float64:
-		return fieldMeta{fType: ftFloat, goKind: k, intWidth: 64}, nil
+		return fieldMeta{fType: ftFloat, goKind: k, bitWidth: 64}, nil
 	case reflect.String:
 		return fieldMeta{fType: ftString, goKind: k}, nil
 	case reflect.Slice:
@@ -282,7 +280,7 @@ func (st *buildState) describeKind(t reflect.Type) (fieldMeta, error) {
 		if err != nil {
 			return fieldMeta{}, err
 		}
-		return fieldMeta{fType: pd.fType, goKind: pd.goKind, intWidth: pd.intWidth,
+		return fieldMeta{fType: pd.fType, goKind: pd.goKind, bitWidth: pd.bitWidth,
 			sub: pd.sub, nullable: true, pointeeType: t.Elem(), elem: &pd}, nil
 	case reflect.Map:
 		kd, err := st.describe(t.Key())
