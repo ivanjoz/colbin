@@ -37,12 +37,11 @@ payload length too:
 bit  0     PACKED_5              0 = raw UTF-8 payload, 1 = packed stream
 bit  1     UPPERCASE_DOMINANT    default case of the packed stream
 bit  2     ENABLE_NUMBER_0_1023  opcode 31 is a 10-bit integer, not '-'
-bit  3     RESERVED              must be 0; decoders reject a 1
-bits 4-7   length code           payload byte length, or 15 = "see uvarint"
+bits 3-7   length code           payload byte length, or 31 = "see uvarint"
 ```
 
-Length code 15 is followed by an LEB128 uvarint. Codes 0..14 hold the length
-inline, so **every frame whose payload fits in 14 bytes costs exactly one byte
+Length code 31 is followed by an LEB128 uvarint. Codes 0..30 hold the length
+inline, so **every frame whose payload fits in 30 bytes costs exactly one byte
 of framing** — which is most of the strings this codec exists for. The length is
 a byte count in both modes, which is what makes a frame self-delimiting.
 

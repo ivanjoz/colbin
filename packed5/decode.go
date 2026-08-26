@@ -68,9 +68,6 @@ func frame(buf []byte) (header, error) {
 		return header{}, ErrTruncated
 	}
 	hdr := buf[0]
-	if hdr&flagReserved != 0 {
-		return header{}, ErrReservedFlag
-	}
 	pos := 1
 	length := int(hdr >> lenShift)
 	if length == lenEscape {
@@ -78,7 +75,7 @@ func frame(buf []byte) (header, error) {
 		if err != nil {
 			return header{}, err
 		}
-		// The escape must not re-encode a length the nibble could have held;
+		// The escape must not re-encode a length the header could have held;
 		// one length has one encoding, so a frame has one byte representation.
 		if v <= lenInline {
 			return header{}, ErrBadLength

@@ -14,11 +14,10 @@
 //	bit  0     PACKED_5             0 = raw UTF-8 payload, 1 = packed stream
 //	bit  1     UPPERCASE_DOMINANT   default case of the packed stream
 //	bit  2     ENABLE_NUMBER_0_1023 opcode 31 is a 10-bit integer, not '-'
-//	bit  3     RESERVED             must be 0; decoders reject a 1
-//	bits 4-7   length code          payload byte length, or 15 = "see uvarint"
+//	bits 3-7   length code          payload byte length, or 31 = "see uvarint"
 //
-// A length code of 15 is followed by the payload length as an LEB128 uvarint.
-// Codes 0..14 hold the length inline, so every frame whose payload fits in 14
+// A length code of 31 is followed by the payload length as an LEB128 uvarint.
+// Codes 0..30 hold the length inline, so every frame whose payload fits in 30
 // bytes costs exactly one byte of framing. The length is a *byte* count in both
 // modes, which is what makes the frame self-delimiting.
 //
@@ -73,9 +72,6 @@ var (
 	// ErrTruncated is returned when a frame ends before its declared payload,
 	// or a token's operand runs past the end of the bitstream.
 	ErrTruncated = errors.New("colbin: packed5 string truncated")
-	// ErrReservedFlag is returned when the reserved header bit is set, which a
-	// future revision of the format may use to change the layout.
-	ErrReservedFlag = errors.New("colbin: packed5 reserved header flag set")
 	// ErrReservedSymbol is returned for symbol indices 30 and 31 of opcode 29,
 	// which the current symbol table leaves unassigned.
 	ErrReservedSymbol = errors.New("colbin: packed5 reserved symbol index")
@@ -92,14 +88,13 @@ const (
 	flagPacked5   = 1 << 0
 	flagUppercase = 1 << 1
 	flagNumber    = 1 << 2
-	flagReserved  = 1 << 3
 
-	flagMask = 0x0F
-	lenShift = 4
-	// lenInline is the largest payload length the header nibble can hold; 15 is
-	// the escape code that defers to a uvarint.
-	lenInline = 14
-	lenEscape = 15
+	flagMask = 0x07
+	lenShift = 3
+	// lenInline is the largest payload length the header's five length bits can
+	// hold; 31 is the escape code that defers to a uvarint.
+	lenInline = 30
+	lenEscape = 31
 )
 
 // Base alphabet opcodes above the 26 letters.
@@ -240,7 +235,7 @@ func readUvarint(buf []byte) (int, int, error) {
 const maxLen = int(^uint32(0) >> 1)
 
 // frameOverhead is the number of framing bytes a payload of n bytes needs: the
-// header byte, plus a uvarint once the length outgrows the header nibble.
+// header byte, plus a uvarint once the length outgrows the header's length bits.
 func frameOverhead(n int) int {
 	if n <= lenInline {
 		return 1

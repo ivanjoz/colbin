@@ -374,7 +374,7 @@ func Size(s string) int {
 }
 
 // appendHeader writes the header byte and, when the payload length outgrows the
-// header nibble, the uvarint that carries it.
+// header's five length bits, the uvarint that carries it.
 func appendHeader(out []byte, flags byte, payloadLen int) []byte {
 	if payloadLen <= lenInline {
 		return append(out, flags|byte(payloadLen)<<lenShift)

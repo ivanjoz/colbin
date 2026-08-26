@@ -222,17 +222,18 @@ func TestRoundtripAllLengths(t *testing.T) {
 	}
 }
 
-// TestLengthPrefixForms pins the two length encodings: inline in the header
-// nibble up to 14 payload bytes, then a uvarint, growing to two bytes past 127.
+// TestLengthPrefixForms pins the two length encodings: inline in the header's
+// five length bits up to 30 payload bytes, then a uvarint, growing to two bytes
+// past 127.
 func TestLengthPrefixForms(t *testing.T) {
 	for _, tc := range []struct {
-		n       int
-		overNib bool
-	}{{1, false}, {14, false}, {15, true}, {16, true}, {127, true}, {128, true}, {1000, true}} {
+		n          int
+		overInline bool
+	}{{1, false}, {14, false}, {30, false}, {31, true}, {32, true}, {127, true}, {128, true}, {1000, true}} {
 		s := strings.Repeat("\xff", tc.n) // never packs, so payload == n
 		buf := roundtrip(t, s)
-		if got := buf[0]>>lenShift == lenEscape; got != tc.overNib {
-			t.Fatalf("n=%d: escape length prefix = %v, want %v", tc.n, got, tc.overNib)
+		if got := buf[0]>>lenShift == lenEscape; got != tc.overInline {
+			t.Fatalf("n=%d: escape length prefix = %v, want %v", tc.n, got, tc.overInline)
 		}
 		if want := frameOverhead(tc.n) + tc.n; len(buf) != want {
 			t.Fatalf("n=%d: frame %d bytes, want %d", tc.n, len(buf), want)

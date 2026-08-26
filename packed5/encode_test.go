@@ -659,14 +659,20 @@ func TestPackedBeatsRawWhereExpected(t *testing.T) {
 	}
 }
 
-// TestReservedFlagNeverSet checks the encoder leaves bit 3 clear, which is what
-// lets a future revision claim it.
-func TestReservedFlagNeverSet(t *testing.T) {
+// TestInlineLengthMatchesPayload checks that bit 3 really is part of the length
+// code: for any payload the five length bits can hold, the code equals the
+// payload byte count exactly and no uvarint follows.
+func TestInlineLengthMatchesPayload(t *testing.T) {
 	rng := rand.New(rand.NewPCG(15, 16))
 	for range 5000 {
 		s := randString(rng, alphabet, rng.IntN(30))
-		if buf := Append(nil, s); buf[0]&flagReserved != 0 {
-			t.Fatalf("%q: reserved flag set", s)
+		buf := Append(nil, s)
+		code := int(buf[0] >> lenShift)
+		if code == lenEscape {
+			continue // payload outgrew the header; covered by TestLengthPrefixForms
+		}
+		if got := len(buf) - 1; got != code {
+			t.Fatalf("%q: length code %d, payload %d bytes", s, code, got)
 		}
 	}
 }

@@ -24,19 +24,18 @@ func TestDecodeErrors(t *testing.T) {
 		want error
 	}{
 		{"empty buffer", nil, ErrTruncated},
-		{"reserved flag, raw", []byte{flagReserved, 'a'}, ErrReservedFlag},
-		{"reserved flag, packed", []byte{flagReserved | flagPacked5 | 1<<lenShift, 0}, ErrReservedFlag},
 		{"raw payload truncated", []byte{5 << lenShift, 'a', 'b'}, ErrTruncated},
 		{"raw payload missing", []byte{1 << lenShift}, ErrTruncated},
 		{"uvarint truncated", []byte{lenEscape << lenShift, 0x80}, ErrTruncated},
 		{"uvarint missing", []byte{lenEscape << lenShift}, ErrTruncated},
 		{"uvarint overlong bytes", []byte{lenEscape << lenShift,
 			0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01}, ErrBadLength},
-		// A length the header nibble could have held must not use the escape:
-		// one length, one encoding.
+		// A length the header's five length bits could have held must not use the
+		// escape: one length, one encoding.
 		{"uvarint non-canonical", []byte{lenEscape << lenShift, 14, 'a'}, ErrBadLength},
+		{"uvarint at inline boundary", []byte{lenEscape << lenShift, lenInline, 'a'}, ErrBadLength},
 		{"uvarint zero", []byte{lenEscape << lenShift, 0}, ErrBadLength},
-		{"escaped length truncated", []byte{lenEscape << lenShift, 20, 'a'}, ErrTruncated},
+		{"escaped length truncated", []byte{lenEscape << lenShift, lenInline + 1, 'a'}, ErrTruncated},
 		// Pad count larger than the bits that follow it.
 		{"pad past end", []byte{flagPacked5 | 1<<lenShift, 0x07}, ErrBadPadding},
 		// Opcode 29 with no room for its 5-bit index.
