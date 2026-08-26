@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"slices"
 	"unsafe"
 
 	"github.com/ivanjoz/colbin/packed5"
@@ -255,10 +256,16 @@ func appendFloatColumn(out []byte, vals []float64, width uint8) []byte {
 	if empty {
 		return out
 	}
-	for _, v := range vals {
-		if width == 64 {
+	// The column is a fixed width times a known count, so it is sized once here
+	// rather than grown underneath the append loop. Hoisting the width test out
+	// of the loop costs nothing and leaves each branch a straight copy.
+	out = slices.Grow(out, len(vals)*int(width)/8)
+	if width == 64 {
+		for _, v := range vals {
 			out = binary.LittleEndian.AppendUint64(out, math.Float64bits(v))
-		} else {
+		}
+	} else {
+		for _, v := range vals {
 			out = binary.LittleEndian.AppendUint32(out, math.Float32bits(float32(v)))
 		}
 	}

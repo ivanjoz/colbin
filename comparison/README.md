@@ -51,23 +51,27 @@ so none of the commands above require `protoc`.
 
 ## Development snapshot
 
-Medians of a local `-count=5` run on an i7-1355U with Go 1.27:
+Medians of a local `-count=6` run on an i7-1355U with Go 1.27:
 
 | operation | format | payload | time/op | bytes allocated/op | allocations/op |
 |---|---|---:|---:|---:|---:|
-| encode | Colbin | 226,559 B | 4.08 ms | 1,670,068 B | 4,769 |
-| encode | Protobuf | 324,822 B | 1.32 ms | 454,658 B | 8,929 |
-| encode | JSON v2 | 740,373 B | 2.63 ms | 777,472 B | 2,233 |
-| encode | CBOR | 563,866 B | 1.38 ms | 566,688 B | 3 |
-| decode | Colbin | 226,559 B | 2.50 ms | 2,207,309 B | 27,354 |
-| decode | Protobuf | 324,822 B | 2.08 ms | 1,501,765 B | 39,288 |
-| decode | JSON v2 | 740,373 B | 4.85 ms | 1,407,758 B | 30,000 |
-| decode | CBOR | 563,866 B | 3.82 ms | 1,432,629 B | 34,147 |
+| encode | Colbin | 226,559 B | 2.89 ms | 1,597,273 B | 300 |
+| encode | Protobuf | 324,822 B | 1.49 ms | 454,657 B | 8,929 |
+| encode | JSON v2 | 740,373 B | 2.85 ms | 777,473 B | 2,233 |
+| encode | CBOR | 563,866 B | 1.40 ms | 567,965 B | 3 |
+| decode | Colbin | 226,559 B | 2.58 ms | 2,403,687 B | 12,299 |
+| decode | Protobuf | 324,822 B | 2.21 ms | 1,501,700 B | 39,288 |
+| decode | JSON v2 | 740,373 B | 5.26 ms | 1,407,771 B | 30,000 |
+| decode | CBOR | 563,866 B | 4.16 ms | 1,432,652 B | 34,147 |
 
-For this fixture, Colbin produced the smallest payload, Protobuf and CBOR
-encoded fastest (their sample ranges overlap), and Protobuf decoded fastest.
+For this fixture, Colbin produced the smallest payload and allocated by far the
+least often on both sides; CBOR encoded fastest and Protobuf decoded fastest.
 Treat this as a development snapshot, not a universal result; use the commands
 above on the target machine and data.
+
+Compare formats only within one run. This machine throttles under a sustained
+benchmark, so absolute figures drift by around ten percent between sittings
+while the ratios between formats hold.
 
 ## Regenerate the bindings
 

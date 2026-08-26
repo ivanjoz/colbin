@@ -1,7 +1,7 @@
 package packed5
 
 import (
-	"sync"
+	"slices"
 	"unicode/utf8"
 )
 
@@ -67,22 +67,24 @@ type token struct {
 	kind uint8
 }
 
-// stackLimit is the input length up to which a scan runs entirely on the
-// stack. Packed-5 targets short strings, so the common case allocates nothing
-// beyond the caller's output slice.
-const stackLimit = 64
-
-// A scan emits at most two tokens per byte: a long toggle, then the letter that
-// triggered it.
-const scratchTokens = 2 * stackLimit
-
-// tokenPool backs strings past stackLimit, mirroring the parent package's
-// column scratch pools. Nothing needs clearing on reuse: scan truncates the
-// buffer and appends, so it only ever reads back what it just wrote.
-var tokenPool = sync.Pool{New: func() any { s := make([]token, 0, 2*stackLimit); return &s }}
-
 // isLetter reports whether c is an ASCII letter of either case.
-func isLetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
+//
+// Setting bit 5 folds 'A'..'Z' onto 'a'..'z' and moves nothing else into that
+// range, so one unsigned range test decides both cases at once. The classifier
+// runs on every input byte in both the planning and the writing pass, and the
+// four-comparison form was measurably visible in the encoder's profile.
+func isLetter(c byte) bool { return (c|0x20)-'a' < 26 }
+
+// isDigit reports whether c is an ASCII decimal digit. Unsigned wraparound
+// turns the pair of comparisons into one.
+func isDigit(c byte) bool { return c-'0' < 10 }
+
+// isUpper reports the case of a byte already known to be an ASCII letter: for
+// those, bit 5 is the case bit.
+func isUpper(c byte) bool { return c&0x20 == 0 }
+
+// letterIndex is the 0..25 alphabet position of an ASCII letter, either case.
+func letterIndex(c byte) uint32 { return uint32(c|0x20) - 'a' }
 
 // symbolAt returns the non-letter, non-space token for the byte at i with its
 // width in bytes and bit cost, or ok=false when the byte must be escaped.
@@ -120,26 +122,24 @@ func mustEscape(s string, i int, number bool) bool {
 	return !ok
 }
 
-// scan tokenises s under one setting of the two behavioural flags, appending
-// onto dst[:0] and returning the tokens with their total bit cost.
-func scan(dst []token, s string, upper, number bool) ([]token, int) {
-	toks, bits := dst[:0], 0
-	emit := func(t token, cost int) {
-		toks = append(toks, t)
-		bits += cost
-	}
+// writeStream performs the greedy walk and emits each token as bits at the
+// point it is decided.
+//
+// This is the same walk the reference tokeniser in tokens_test.go makes; the
+// token slice it produces only ever existed to carry the walk's output to the
+// writer, so materialising it cost a second pass and up to 2*len(s) slots of
+// scratch — a stack array for short strings and a pool for the rest. Both are
+// gone. TestWriteStreamMatchesTokenWriter pins the two against each other.
+func writeStream(w *bitWriter, s string, upper, number bool) {
 	cur := upper
 	for i := 0; i < len(s); {
 		c := s[i]
 		switch {
 		case isLetter(c):
-			isUp := c >= 'A' && c <= 'Z'
-			idx := uint16(c - 'a')
-			if isUp {
-				idx = uint16(c - 'A')
-			}
+			isUp := isUpper(c)
+			idx := letterIndex(c)
 			if isUp == cur {
-				emit(token{kind: edLetter, pay: idx}, costLetter)
+				w.writeBits(idx, 5)
 				i++
 				continue
 			}
@@ -147,27 +147,28 @@ func scan(dst []token, s string, upper, number bool) ([]token, int) {
 			// simple toggles cost the same as a pair of long ones, so the long
 			// form only wins from three.
 			run := 0
-			for j := i; j < len(s) && isLetter(s[j]) && (s[j] >= 'A' && s[j] <= 'Z') != cur; j++ {
+			for j := i; j < len(s) && isLetter(s[j]) && isUpper(s[j]) != cur; j++ {
 				run++
 			}
 			if run >= 3 {
-				emit(token{kind: edToggleLong}, costToggleLong)
+				w.writeBits(opCaseLong, 5)
 				cur = !cur
 				continue // re-read the letter, now in the matching mode
 			}
-			emit(token{kind: edLetterCased, pay: idx}, costLetterCased)
+			w.writeBits(opCaseSimple, 5)
+			w.writeBits(idx, 5)
 			i++
 		case c == ' ':
-			emit(token{kind: edSpace}, costSpace)
+			w.writeBits(opSpace, 5)
 			i++
-		case number && c >= '0' && c <= '9':
+		case number && isDigit(c):
 			// The longest prefix that fits in ten bits. A token may not carry a
 			// leading zero, since it decodes as a plain decimal integer and
 			// "00123" must not come back as "123"; a lone "0" is fine.
 			v, best, bestLen := 0, 0, 0
 			for l := 1; l <= numberMaxDigits && i+l <= len(s); l++ {
 				d := s[i+l-1]
-				if d < '0' || d > '9' || (l > 1 && s[i] == '0') {
+				if !isDigit(d) || (l > 1 && s[i] == '0') {
 					break
 				}
 				v = v*10 + int(d-'0')
@@ -177,26 +178,41 @@ func scan(dst []token, s string, upper, number bool) ([]token, int) {
 				best, bestLen = v, l
 			}
 			if bestLen == 1 {
-				emit(token{kind: edSimple, pay: uint16(asciiSimple[c])}, costSimple)
+				w.writeBits(opSimple, 5)
+				w.writeBits(uint32(asciiSimple[c]), 4)
 			} else {
-				emit(token{kind: edNumber, pay: uint16(best)}, costNumber)
+				w.writeBits(opNumber, 5)
+				w.writeBits(uint32(best), 10)
 			}
 			i += bestLen
 		default:
-			if t, w, cost, ok := symbolAt(s, i, number); ok {
-				emit(t, cost)
-				i += w
+			if t, width, _, ok := symbolAt(s, i, number); ok {
+				switch t.kind {
+				case edDash:
+					w.writeBits(opNumber, 5)
+				case edSymbol:
+					w.writeBits(opSymbol, 5)
+					w.writeBits(uint32(t.pay), 5)
+				default: // edSimple
+					w.writeBits(opSimple, 5)
+					w.writeBits(uint32(t.pay), 4)
+				}
+				i += width
 				continue
 			}
 			n := 1
 			for n < maxEscapeRun && i+n < len(s) && mustEscape(s, i+n, number) {
 				n++
 			}
-			emit(token{kind: edEscape, pay: uint16(n), src: int32(i)}, costEscapeBase+costEscapeByte*n)
+			w.writeBits(opSimple, 5)
+			w.writeBits(escapeCode, 4)
+			w.writeBits(uint32(n)-1, 2)
+			for k := range n {
+				w.writeBits(uint32(s[i+k]), 8)
+			}
 			i += n
 		}
 	}
-	return toks, bits
 }
 
 // plan computes the exact greedy-scan cost for all four flag combinations in
@@ -211,9 +227,9 @@ func plan(s string) (bits int, upper, number bool) {
 	for i := 0; i < len(s); {
 		c := s[i]
 		if isLetter(c) {
-			runUpper := c >= 'A' && c <= 'Z'
+			runUpper := isUpper(c)
 			j := i + 1
-			for j < len(s) && isLetter(s[j]) && (s[j] >= 'A' && s[j] <= 'Z') == runUpper {
+			for j < len(s) && isLetter(s[j]) && isUpper(s[j]) == runUpper {
 				j++
 			}
 			run := j - i
@@ -244,9 +260,9 @@ func plan(s string) (bits int, upper, number bool) {
 			continue
 		}
 
-		if c >= '0' && c <= '9' {
+		if isDigit(c) {
 			j := i + 1
-			for j < len(s) && s[j] >= '0' && s[j] <= '9' {
+			for j < len(s) && isDigit(s[j]) {
 				j++
 			}
 			plainBits += costSimple * (j - i)
@@ -326,18 +342,6 @@ func Append(out []byte, s string) []byte {
 		return append(appendHeader(out, 0, len(s)), s...)
 	}
 
-	var arr [scratchTokens]token
-	buf := arr[:0]
-	if need := 2 * len(s); need > len(arr) {
-		p := tokenPool.Get().(*[]token)
-		defer tokenPool.Put(p)
-		if cap(*p) < need {
-			*p = make([]token, 0, need)
-		}
-		buf = (*p)[:0]
-	}
-	toks, _ := scan(buf, s, upper, number)
-
 	flags := byte(flagPacked5)
 	if upper {
 		flags |= flagUppercase
@@ -347,11 +351,11 @@ func Append(out []byte, s string) []byte {
 	}
 	out = appendHeader(out, flags, payload)
 
-	w := bitWriter{buf: out}
+	// The stream is exactly payload bytes, so one growth replaces the repeated
+	// reallocation an unsized append would do while the tokens are written.
+	w := bitWriter{buf: slices.Grow(out, payload)}
 	w.writeBits(uint32(payload*8-padBitsWidth-bits), padBitsWidth)
-	for _, t := range toks {
-		writeToken(&w, s, t)
-	}
+	writeStream(&w, s, upper, number)
 	return w.flush()
 }
 
@@ -377,37 +381,4 @@ func appendHeader(out []byte, flags byte, payloadLen int) []byte {
 	}
 	out = append(out, flags|lenEscape<<lenShift)
 	return appendUvarint(out, payloadLen)
-}
-
-// writeToken emits one token of the chosen tokenisation.
-func writeToken(w *bitWriter, s string, t token) {
-	switch t.kind {
-	case edLetter:
-		w.writeBits(uint32(t.pay), 5)
-	case edLetterCased:
-		w.writeBits(opCaseSimple, 5)
-		w.writeBits(uint32(t.pay), 5)
-	case edSpace:
-		w.writeBits(opSpace, 5)
-	case edToggleLong:
-		w.writeBits(opCaseLong, 5)
-	case edSymbol:
-		w.writeBits(opSymbol, 5)
-		w.writeBits(uint32(t.pay), 5)
-	case edSimple:
-		w.writeBits(opSimple, 5)
-		w.writeBits(uint32(t.pay), 4)
-	case edDash:
-		w.writeBits(opNumber, 5)
-	case edNumber:
-		w.writeBits(opNumber, 5)
-		w.writeBits(uint32(t.pay), 10)
-	case edEscape:
-		w.writeBits(opSimple, 5)
-		w.writeBits(escapeCode, 4)
-		w.writeBits(uint32(t.pay)-1, 2)
-		for k := range int(t.pay) {
-			w.writeBits(uint32(s[int(t.src)+k]), 8)
-		}
-	}
 }

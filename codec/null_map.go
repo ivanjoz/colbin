@@ -69,12 +69,18 @@ func encodeMapColumn(out []byte, fm *fieldMeta, slotPtrs []unsafe.Pointer) []byt
 	// addressable, so the pointer-based element encoders can't read them directly).
 	keys := reflect.MakeSlice(reflect.SliceOf(fm.mapKeyType), total, total)
 	vals := reflect.MakeSlice(reflect.SliceOf(fm.mapValType), total, total)
+	// SetIterKey/SetIterValue write straight into the addressable backing slots.
+	// it.Key() and it.Value() would each box the entry into a freshly allocated
+	// reflect.Value first, which on a map-heavy corpus is the single largest
+	// source of allocations in the encoder. One iterator is reset per map for the
+	// same reason.
 	idx := 0
+	var it reflect.MapIter
 	for _, mv := range maps {
-		it := mv.MapRange()
+		it.Reset(mv)
 		for it.Next() {
-			keys.Index(idx).Set(it.Key())
-			vals.Index(idx).Set(it.Value())
+			keys.Index(idx).SetIterKey(&it)
+			vals.Index(idx).SetIterValue(&it)
 			idx++
 		}
 	}

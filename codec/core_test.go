@@ -2,8 +2,10 @@ package codec
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/ivanjoz/colbin/packed5"
@@ -125,5 +127,60 @@ func TestNativeWidthIntegerRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(out, in) {
 		t.Fatalf("got %#v want %#v", out, in)
+	}
+}
+
+// TestStringColumnDoesNotAliasInput covers the column arena: strings from one
+// column share a backing array, and that array must be the decoder's own, not
+// the input buffer. Mutating the input afterwards is what tells the two apart.
+func TestStringColumnDoesNotAliasInput(t *testing.T) {
+	type row struct {
+		A string `cb:"1"`
+		B string `cb:"2"`
+	}
+	want := []row{
+		{"hello world", "SKU-0421-azul"},
+		{"", "el niño comió jamón"},
+		{"\xff\x00 raw bytes", "x"},
+		{"a much longer value that will not fit the packed form at all, \xfe\xfd", "42"},
+	}
+	buf, err := Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []row
+	if err := Unmarshal(buf, &got); err != nil {
+		t.Fatal(err)
+	}
+	for i := range buf {
+		buf[i] = 0xAA
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("after clobbering the input: got %q, want %q", got, want)
+	}
+}
+
+// TestStringColumnSharedArena checks that sharing one array between a column's
+// strings leaves each with its own exact contents and length.
+func TestStringColumnSharedArena(t *testing.T) {
+	type row struct {
+		S string `cb:"1"`
+	}
+	want := make([]row, 200)
+	for i := range want {
+		want[i] = row{S: strings.Repeat("ab", i%17) + fmt.Sprint(i)}
+	}
+	buf, err := Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []row
+	if err := Unmarshal(buf, &got); err != nil {
+		t.Fatal(err)
+	}
+	for i := range want {
+		if got[i].S != want[i].S {
+			t.Fatalf("row %d: got %q, want %q", i, got[i].S, want[i].S)
+		}
 	}
 }

@@ -138,12 +138,10 @@ func (dec *decoder) decodeColumn(fm *fieldMeta, n int, ptrs []unsafe.Pointer) er
 		}
 	case ftString:
 		dec.readByte() // top flags byte (carries only the type)
-		for _, p := range ptrs {
-			s, err := dec.readPacked5String()
-			if err != nil {
-				return err
-			}
-			fm.xf.SetString(p, s)
+		if err := dec.readStringColumn(len(ptrs), func(i int, s string) {
+			fm.xf.SetString(ptrs[i], s)
+		}); err != nil {
+			return err
 		}
 	case ftBytes:
 		dec.readByte() // top flags byte (carries only the type)
@@ -227,12 +225,10 @@ func (dec *decoder) decodeElemColumn(elem *fieldMeta, elemType reflect.Type, ele
 		}
 	case ftString:
 		dec.readByte()
-		for _, p := range ptrs {
-			s, err := dec.readPacked5String()
-			if err != nil {
-				return err
-			}
-			*(*string)(p) = s
+		if err := dec.readStringColumn(len(ptrs), func(i int, s string) {
+			*(*string)(ptrs[i]) = s
+		}); err != nil {
+			return err
 		}
 	case ftBytes:
 		dec.readByte()
@@ -301,6 +297,44 @@ func cloneBytes(b []byte) []byte {
 	c := make([]byte, len(b))
 	copy(c, b)
 	return c
+}
+
+// readStringColumn decodes n consecutive packed5 frames into one backing array
+// and hands each string out as a slice of it, then calls set with the value for
+// each slot.
+//
+// Decoding frame by frame allocates a string per value, which on a string-heavy
+// payload is the largest single source of garbage in the decoder — and the cost
+// is not only the allocation but the GC scanning that many more objects. The
+// strings a column produces are retained or dropped together, so sharing one
+// array between them changes nothing about their lifetime in practice.
+//
+// The strings can only be cut after the arena has stopped growing, so the
+// offsets are recorded first and resolved in a second, allocation-free pass.
+func (dec *decoder) readStringColumn(n int, set func(i int, s string)) error {
+	offs := getI32(n + 1)
+	defer putI32(offs)
+	// Sized for the common short string; append grows it geometrically from here,
+	// which costs a handful of reallocations per column against one allocation
+	// per value.
+	arena := make([]byte, 0, n*16)
+	(*offs)[0] = 0
+	for i := range n {
+		next, consumed, err := packed5.AppendDecoded(arena, dec.data[dec.pos:])
+		if err != nil {
+			return err
+		}
+		arena = next
+		dec.pos += consumed
+		(*offs)[i+1] = int32(len(arena))
+	}
+	// arena is final, so pointers into it are stable. Sub-slicing a string
+	// shares its backing array without copying.
+	all := unsafe.String(unsafe.SliceData(arena), len(arena))
+	for i := range n {
+		set(i, all[(*offs)[i]:(*offs)[i+1]])
+	}
+	return nil
 }
 
 func (dec *decoder) readPacked5String() (string, error) {

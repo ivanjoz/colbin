@@ -15,11 +15,43 @@ func Decode(buf []byte) (string, int, error) {
 	if !h.packed {
 		return string(h.payload), h.n, nil
 	}
-	s, err := decodeStream(h.payload, h.upper, h.number)
+	// Size the buffer from the format's own expansion bound so appendStream never
+	// has to grow it, leaving the final string conversion as the only allocation.
+	// The scratch stays on the stack for short results: appendStream derives its
+	// result only from the buffer handed in, and that result dies here at the
+	// string copy, so escape analysis keeps the array in this frame.
+	var stack [decodeScratchBytes]byte
+	scratch := stack[:0]
+	if need := maxDecodedLen(len(h.payload)); need > len(stack) {
+		scratch = make([]byte, 0, need)
+	}
+	out, err := appendStream(scratch, h.payload, h.upper, h.number)
 	if err != nil {
 		return "", 0, err
 	}
-	return s, h.n, nil
+	return string(out), h.n, nil
+}
+
+// AppendDecoded decodes one frame from the front of buf, appending the decoded
+// bytes onto dst, and returns the extended dst with the frame length.
+//
+// It exists so a caller decoding a run of frames can gather them into a single
+// backing array and slice the strings out of it, rather than pay one allocation
+// per frame. Strings produced that way stay alive as long as any one of them
+// does, which suits a column of values that is retained as a unit.
+func AppendDecoded(dst, buf []byte) ([]byte, int, error) {
+	h, err := frame(buf)
+	if err != nil {
+		return dst, 0, err
+	}
+	if !h.packed {
+		return append(dst, h.payload...), h.n, nil
+	}
+	out, err := appendStream(dst, h.payload, h.upper, h.number)
+	if err != nil {
+		return dst, 0, err
+	}
+	return out, h.n, nil
 }
 
 // header is one parsed frame prefix: the payload it delimits, the total frame
@@ -72,12 +104,15 @@ func frame(buf []byte) (header, error) {
 // bits.
 func maxDecodedLen(payload int) int { return payload*12/5 + 4 }
 
-// decodeStackBytes is the result size that decodes without touching the heap
-// before the final string conversion. It covers payloads up to 105 bytes,
-// comfortably past the short strings Packed-5 targets.
-const decodeStackBytes = 256
+// decodeScratchBytes is the starting size of Decode's pooled scratch. It covers
+// payloads up to 105 bytes, comfortably past the short strings Packed-5 targets,
+// so the pool settles without growing.
+const decodeScratchBytes = 256
 
-// decodeStream walks the packed bitstream. Its whole state is the payload
+// appendStream walks the packed bitstream, appending the decoded bytes to dst.
+// It does not reserve capacity: one caller decodes a single frame into a buffer
+// it has already sized exactly, and the other is filling a column-wide arena
+// whose geometric growth would be undone by reserving the worst case per frame. Its whole state is the payload
 // position, the current case mode, and whether a simple toggle is pending.
 //
 // A pending simple toggle is cleared only by a letter, and a long toggle leaves
@@ -85,25 +120,18 @@ const decodeStackBytes = 256
 // letter it applies to, so neither case arises in a frame this package wrote;
 // they are defined so that a hand-built or corrupt stream still decodes
 // deterministically rather than by accident.
-func decodeStream(payload []byte, upper, number bool) (string, error) {
+func appendStream(dst, payload []byte, upper, number bool) ([]byte, error) {
 	r := bitReader{buf: payload, limit: len(payload) * 8}
 	pad, ok := r.read(padBitsWidth)
 	if !ok {
-		return "", ErrTruncated
+		return dst, ErrTruncated
 	}
 	if int(pad) > r.remaining() {
-		return "", ErrBadPadding
+		return dst, ErrBadPadding
 	}
 	r.limit -= int(pad)
 
-	// Size the buffer from the format's own expansion bound so the append loop
-	// never has to grow, leaving the final string conversion as the only
-	// allocation. Short results build on the stack and skip even that growth.
-	var stack [decodeStackBytes]byte
-	out := stack[:0]
-	if need := maxDecodedLen(len(payload)); need > len(stack) {
-		out = make([]byte, 0, need)
-	}
+	out := dst
 	cur, pending := upper, false
 
 	for r.remaining() >= 5 {
@@ -126,16 +154,16 @@ func decodeStream(payload []byte, upper, number bool) (string, error) {
 		case op == opSymbol:
 			idx, ok := r.read(5)
 			if !ok {
-				return "", ErrTruncated
+				return dst, ErrTruncated
 			}
 			if idx >= symReserved {
-				return "", ErrReservedSymbol
+				return dst, ErrReservedSymbol
 			}
 			out = append(out, symTable[idx]...)
 		case op == opSimple:
 			v, ok := r.read(4)
 			if !ok {
-				return "", ErrTruncated
+				return dst, ErrTruncated
 			}
 			if v != escapeCode {
 				out = append(out, simpleTable[v])
@@ -143,12 +171,12 @@ func decodeStream(payload []byte, upper, number bool) (string, error) {
 			}
 			cnt, ok := r.read(2)
 			if !ok {
-				return "", ErrTruncated
+				return dst, ErrTruncated
 			}
 			for range int(cnt) + 1 {
 				b, ok := r.read(8)
 				if !ok {
-					return "", ErrTruncated
+					return dst, ErrTruncated
 				}
 				out = append(out, byte(b))
 			}
@@ -159,7 +187,7 @@ func decodeStream(payload []byte, upper, number bool) (string, error) {
 			}
 			v, ok := r.read(10)
 			if !ok {
-				return "", ErrTruncated
+				return dst, ErrTruncated
 			}
 			out = strconv.AppendUint(out, uint64(v), 10)
 		}
@@ -168,7 +196,7 @@ func decodeStream(payload []byte, upper, number bool) (string, error) {
 	// encoder's own rounding within a token boundary, which cannot happen:
 	// padBits accounts for it exactly.
 	if r.remaining() != 0 {
-		return "", ErrTruncated
+		return dst, ErrTruncated
 	}
-	return string(out), nil
+	return out, nil
 }

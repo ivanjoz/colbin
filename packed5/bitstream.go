@@ -1,5 +1,7 @@
 package packed5
 
+import "encoding/binary"
+
 // LSB-first bit packing, matching the convention of the parent colbin package's
 // bitstream. It is reimplemented here, rather than imported, so that packed5
 // stays independent of its importer — the same reason varint carries its own
@@ -10,31 +12,46 @@ package packed5
 
 // bitWriter appends bits LSB-first onto buf. buf is the caller's output slice,
 // so the frame header can be appended first and the stream written in place.
+//
+// The accumulator is 64 bits wide and drains four bytes at a time. Tokens are 5
+// to 15 bits, so a byte-at-a-time drain would run its loop on nearly every
+// write; this way roughly one write in four touches buf at all. Holding up to
+// 31 pending bits plus a 24-bit write needs 55 bits, so the accumulator never
+// overflows.
 type bitWriter struct {
 	buf     []byte
-	current uint32 // pending bits not yet flushed to buf; fewer than 8 between calls
+	current uint64 // pending bits not yet drained to buf; fewer than 32
 	nbits   uint8
 }
 
 // writeBits appends the low width bits of v (width <= 24).
 func (w *bitWriter) writeBits(v uint32, width uint8) {
-	w.current |= (v & (1<<width - 1)) << w.nbits
+	w.current |= uint64(v&(1<<width-1)) << w.nbits
 	w.nbits += width
-	for w.nbits >= 8 {
-		w.buf = append(w.buf, byte(w.current))
-		w.current >>= 8
-		w.nbits -= 8
+	if w.nbits >= 32 {
+		w.buf = binary.LittleEndian.AppendUint32(w.buf, uint32(w.current))
+		w.current >>= 32
+		w.nbits -= 32
 	}
 }
 
-// flush emits any partial trailing byte, zero-padded in its high bits, and
-// returns the buffer.
+// flush emits the pending bits, zero-padded in the high bits of the last byte,
+// and returns the buffer.
+//
+// Draining in 32-bit units does not overshoot: a four-byte drain happens only
+// once 32 bits are pending, so for a stream of T bits the buffer grows by
+// 4*floor(T/32) here plus ceil((T mod 32)/8) below, which is exactly ceil(T/8).
 func (w *bitWriter) flush() []byte {
-	if w.nbits > 0 {
+	for w.nbits > 0 {
 		w.buf = append(w.buf, byte(w.current))
-		w.current = 0
-		w.nbits = 0
+		w.current >>= 8
+		if w.nbits <= 8 {
+			w.nbits = 0
+			break
+		}
+		w.nbits -= 8
 	}
+	w.current = 0
 	return w.buf
 }
 

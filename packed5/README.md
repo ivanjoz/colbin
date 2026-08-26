@@ -107,8 +107,10 @@ One left-to-right pass, following the specification's rules:
 
 The two behavioural header flags are not guessed. `UPPERCASE_DOMINANT` and
 `ENABLE_NUMBER_0_1023` change what the scan emits, so a single planning pass
-computes the exact greedy cost of all four candidate settings. The encoder then
-tokenises only the cheapest setting.
+computes the exact greedy cost of all four candidate settings. Knowing the
+winner and its exact bit count, the encoder then walks the string a second time
+and writes the bits as it goes: there is no token list in between, and the frame
+is sized before a single bit is written.
 
 Counting letters to pick the dominant case is the obvious shortcut, and it is
 wrong often enough to matter: in `SKU-0421-azul` the lowercase letters win 4 to
@@ -169,45 +171,51 @@ the fallback working as intended: quote-and-brace-heavy JSON has no packed
 representation that beats its bytes, so the frame is the raw string plus two
 framing bytes.
 
-Throughput on an i7-1355U, Go 1.26, over ~1MB corpora of short strings:
+Throughput on an i7-1355U, Go 1.27, over ~1MB corpora of short strings:
 
 ```text
-                        encode      decode    packed
-name      "Lima norte"  16 ms/MB   7.4 ms/MB   0.79
-sku    "SKU-0421-azul"  24 ms/MB   7.9 ms/MB   0.89
-spanish  "el niño ..."  13 ms/MB   5.4 ms/MB   0.73
-sentence  5 words       18 ms/MB   6.6 ms/MB   0.73
-paragraph 258 bytes     11 ms/MB   5.0 ms/MB   0.64
+                           encode      decode    packed
+name      "Lima norte"  5.5 ms/MB   7.0 ms/MB      0.79
+sku    "SKU-0421-azul"  6.3 ms/MB   6.9 ms/MB      0.89
+spanish  "el niño ..."  4.7 ms/MB   4.5 ms/MB      0.73
+sentence  5 words       6.1 ms/MB   5.6 ms/MB      0.73
+paragraph 258 bytes     3.0 ms/MB   4.0 ms/MB      0.64
 ```
 
-So roughly **16 ms/MB to encode and 6 ms/MB to decode** — about 63 MB/s and
-170 MB/s. The `sku` row is the slow end because a decimal run costs it four
-candidate scans instead of two.
+So roughly **5 ms/MB to encode and 6 ms/MB to decode** — about 200 MB/s and
+170 MB/s. The `sku` row is the slow end of encoding: a decimal run makes the
+number-mode half of the planning pass do real work, and its dense case changes
+give the writing pass the most to decide.
 
 Per-call figures, for the short strings the codec targets:
 
 ```text
-BenchmarkAppend/len5             75.7 ns/op     0 B/op   0 allocs/op
-BenchmarkAppend/len10             128 ns/op     0 B/op   0 allocs/op
-BenchmarkAppend/len22             266 ns/op     0 B/op   0 allocs/op
-BenchmarkAppend/len43             415 ns/op     0 B/op   0 allocs/op
+BenchmarkAppend/len5             22.6 ns/op     0 B/op   0 allocs/op
+BenchmarkAppend/len10            39.3 ns/op     0 B/op   0 allocs/op
+BenchmarkAppend/len22            97.0 ns/op     0 B/op   0 allocs/op
+BenchmarkAppend/len43             125 ns/op     0 B/op   0 allocs/op
 
-BenchmarkDecode/len5             31.4 ns/op     5 B/op   1 allocs/op
-BenchmarkDecode/len10            55.6 ns/op    16 B/op   1 allocs/op
-BenchmarkDecode/len22             103 ns/op    24 B/op   1 allocs/op
-BenchmarkDecode/len43             164 ns/op    48 B/op   1 allocs/op
+BenchmarkDecode/len5             34.1 ns/op     5 B/op   1 allocs/op
+BenchmarkDecode/len10            55.5 ns/op    16 B/op   1 allocs/op
+BenchmarkDecode/len22            93.7 ns/op    24 B/op   1 allocs/op
+BenchmarkDecode/len43             161 ns/op    48 B/op   1 allocs/op
 ```
 
-Encoding allocates nothing at any length: the scan runs on the stack up to 64
-bytes and out of a `sync.Pool` past it, mirroring the parent package's column
-scratch pools. The stack scratch is zeroed on every call, so keeping it small
-matters more than it looks — one token buffer serves every candidate scan, and
-`token` is eight bytes.
+Encoding allocates nothing at any length, and needs no scratch to do it: the
+planning pass carries four running costs in registers, and the writing pass goes
+straight to the output slice, which the plan has already sized exactly. Neither
+pass builds a token list, so there is no stack buffer to zero and no pool to
+draw from.
 
 The single decode allocation is the returned string. Results up to 256 bytes are
 built on the stack; the buffer is sized from the format's own expansion bound
 (the three-byte `€` symbol at 3 bytes per 10 bits, so at most 2.4x), so the
 append loop never has to grow.
+
+`AppendDecoded` is the same decoder writing onto a caller's buffer instead. A
+caller reading a run of frames can gather them all into one backing array and
+cut the strings out of it, trading one allocation per value for one per run;
+`colbin` decodes string columns that way.
 
 ## Tests
 
@@ -231,7 +239,7 @@ append loop never has to grow.
   random buffers (of which about 48000 decode, 7000 through the packed path);
   and a decompression-bomb bound driven by the two densest tokens.
 - **Concurrency.** 16 goroutines encoding and decoding long strings at once,
-  under `-race`, over the shared scratch pool.
+  under `-race`.
 - **Fuzzing.** `FuzzRoundtrip` and `FuzzDecode`. 635k and 10.2M executions
   respectively with no failures.
 
