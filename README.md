@@ -72,81 +72,57 @@ self-describing about field names (see [Field ids](#field-ids)).
 
 ## Modes
 
-**Bit 0 of the first byte** selects the format, and the two branches share
-nothing else:
+**Bit 0 of the first byte** selects the format:
 
 ```
 bit 0 == 0    standard mode — columnar, one column per field, any record count
 bit 0 == 1    compact mode  — bit-level, one to three records
 ```
 
-A standard message continues with a version byte and a columnar body. A compact
-message has no version field, no record count and no column count, because it
-needs none of them.
+`Marshal` picks the mode and `Unmarshal` dispatches on that bit, so neither is
+something callers choose.
+
+### Standard mode
+
+The default, and what the rest of this document mostly describes. Records are
+transposed and written **column by column**: all N values of one field sit
+together, which is what lets the `varint` codec find a delta or frame-of-reference
+transform across them and what makes similar strings pack well. Every column
+carries a field id and a type byte, and the message carries a version byte, a
+record count and a column count. Spread over hundreds of records that framing is
+noise.
 
 Because bit 0 is the discriminator, **every standard version byte is even**:
-`0x02` for the binary form and `0x04` for JSON mode. An odd one would be read as
-a compact message.
-
-`Marshal` picks the mode and `Unmarshal` dispatches on that bit, so neither is
-something callers choose. `MarshalJSON` is always standard mode — a compact
-message has no room for a schema section, and at these sizes the schema is the
-larger cost anyway.
+`0x02` for the binary form and `0x04` for JSON mode.
 
 ### Compact mode
 
-At one to three records the columnar layout has nothing to amortise its framing
-over. A one-record message otherwise pays a version byte, a record count, a
-column count, and a field id *plus* a type byte for every column — all to
-describe a single value each. Compact mode drops all of it.
+At one to three records there is nothing to spread that framing over — a
+one-record message pays a field id *plus* a type byte per column to describe a
+single value each. So compact mode drops the version byte, the record count, the
+column count and the type bytes, and writes a four-bit header followed by one
+LSB-first bitstream of `[field_id][value]` runs. A field holding its zero value
+is omitted entirely.
 
-Its header is **four bits**, after which the whole message is one LSB-first
-bitstream with no alignment anywhere until a final pad to a byte boundary:
+Arrays of primitives still delegate to the same `varint` and `packed5` codecs, so
+an array field costs the same in either mode.
 
-| bit | field | meaning |
-|---|---|---|
-| 0 | mode | always `1` |
-| 1 | `ALL_POSITIVE` | every signed integer in the message is `>= 0` |
-| 2-3 | shape | `0` lone struct · `1`/`2`/`3` array of that many records |
-
-Shape `0` and shape `1` both carry one record and differ only in whether it
-renders as an object or an array of one — which the binary path takes from the
-destination Go type, but a JSON reader would need told.
-
-`ALL_POSITIVE` decides how a signed value becomes its unsigned payload: set, the
-payload is the **magnitude**; clear, the **zigzag**. That is worth one bit on
-every integer in the message, and the pre-scan it requires is free at three
-records.
-
-A record is then a run of `[field_id:8][value]` pairs closed by id `255` — the
-same id the standard mode reserves as a terminator. **A field holding its zero
-value is omitted entirely**: the key run *is* the presence information, so an
-absent field costs nothing beyond the terminator the record already owes.
-
-Integers use a varint whose first unit is one bit narrower than LEB128's,
-spending that bit on a selector for a one-time four-bit offset. Arrays of
-primitives delegate to the same `varint` and `packed5` codecs the columnar mode
-uses, so an array field costs the same in either mode — a run of correlated ids
-still gets the delta transform. See [`compact/README.md`](compact/README.md).
+Layout in [Wire format](#compact-mode-1); the codec in
+[`compact/README.md`](compact/README.md).
 
 ### How the mode is chosen
 
 Compact mode is used when the record count is 1 to 3 **and** every field is a
-scalar, string, `[]byte`, or an array of those. Excluded, each for a reason:
+scalar, string, `[]byte`, or an array of those. Nested structs, arrays of structs,
+pointers, maps, `any`, and `[]int`/`[]uint` elements fall back to standard mode —
+chiefly because a struct holding 100 sub-structs carries 100 records' worth of
+columnar data, so the premise fails. The test is structural and memoised per type;
+a slice's *length* does not enter it.
 
-| excluded | why |
-|---|---|
-| nested `struct`, array of `struct` | a struct holding 100 sub-structs carries 100 records' worth of columnar data; the amortisation premise fails |
-| `*T` (nullable) | omitting a zero-valued field cannot then distinguish `nil` from `&0` the way the null bitmap does |
-| `map`, `any` | no compact representation |
-| `[]int`, `[]uint` elements | platform-dependent width that never reaches the wire, so a 64-bit writer and a 32-bit reader would disagree silently |
-
-The test is purely structural and memoised per type — a slice's *length* does not
-matter, because an array field delegates to the same codecs either way.
-
-At **one record** compact always wins, so it is taken without building the
-alternative. At **two or three** the answer depends on how many fields are zero,
-which no cheap predictor gets right, so both are built and the smaller kept.
+At one record compact always wins and is taken directly. At two or three the
+answer turns on how many fields are zero, so both are built and the smaller kept.
+`MarshalJSON` is always standard mode — a compact message has no room for a
+schema section.
 
 | | standard | compact | `encoding/json` |
 |---|---:|---:|---:|
@@ -368,6 +344,17 @@ header  := mode(bit 0 = 1) | ALL_POSITIVE(bit 1) | shape(bits 2-3)
 
 record  := ( [field_id:8] value )* [255:8]              // 255 closes the record
 ```
+
+| bit | field | meaning |
+|---|---|---|
+| 0 | mode | always `1` |
+| 1 | `ALL_POSITIVE` | every signed integer in the message is `>= 0`, so its payload is the magnitude rather than the zigzag — one bit saved on each |
+| 2-3 | shape | `0` lone struct · `1`/`2`/`3` array of that many records |
+
+Shape `0` and `1` both carry one record and differ only in whether it renders as
+an object or an array of one, which the binary path takes from the destination Go
+type but a JSON reader would need told. Id `255` closing a record is the same id
+the standard mode reserves as a terminator.
 
 Everything after the four header bits is one LSB-first bitstream; nothing is byte
 aligned until the final pad, which is never read back because a record ends at
