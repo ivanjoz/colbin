@@ -100,26 +100,38 @@ type kmParams struct {
 // widest residual. Returns false if no pair fits (unreachable for 64-bit input,
 // since k=1 with code 7 gives cap(9) = 64).
 func search(hist *[65]int32) (kmParams, bool) {
+	// encLen is monotonic in the residual bit length. A cumulative histogram
+	// lets each candidate score the ranges assigned to its k..M byte lengths,
+	// instead of calling encLen for all 65 buckets and re-walking k..M each time.
+	var cumulative [65]int32
+	var totalCount int32
+	for b, n := range hist {
+		totalCount += n
+		cumulative[b] = totalCount
+	}
+
 	var best kmParams
 	found := false
 	for k := minK; k <= maxK; k++ {
 		for code := range uint8(8) {
 			m := k + dCodes[code]
-			size, fits := 0, true
-			for b := 0; b <= 64; b++ {
-				n := hist[b]
-				if n == 0 {
-					continue
-				}
-				l := encLen(uint8(b), k, m)
-				if l == 0 {
-					fits = false
-					break
+			maxBits := int(capBits(m, k, m))
+			if maxBits < 64 && cumulative[maxBits] != totalCount {
+				continue
+			}
+
+			size, previousCap := 0, -1
+			for l := k; l <= m; l++ {
+				hi := min(int(capBits(l, k, m)), 64)
+				n := cumulative[hi]
+				if previousCap >= 0 {
+					n -= cumulative[previousCap]
 				}
 				size += int(l) * int(n)
-			}
-			if !fits {
-				continue
+				previousCap = hi
+				if hi == 64 {
+					break
+				}
 			}
 			if !found || size < best.size {
 				best, found = kmParams{k: k, code: code, m: m, size: size}, true

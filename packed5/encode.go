@@ -16,11 +16,10 @@ import (
 //     unrepresentable bytes up to the escape's four-byte limit.
 //
 // The two behavioural header flags are not guessed. UPPERCASE_DOMINANT and
-// ENABLE_NUMBER_0_1023 change what the scan emits, so the scan is simply run
-// once per candidate setting and the cheapest kept: two passes for most
-// strings, four for those holding a decimal run. Counting letters to pick the
-// dominant case is the obvious shortcut and it is wrong often enough to matter
-// — what decides the flag is the number of case *runs*, not of letters.
+// ENABLE_NUMBER_0_1023 change what the scan emits, so plan computes the exact
+// cost of all four settings in one pass and picks the cheapest. Counting letters
+// to pick the dominant case is the obvious shortcut and it is wrong often enough
+// to matter — what decides the flag is the number of case *runs*, not of letters.
 //
 // This is not a size-optimal encoder. The optimum is a shortest path over
 // (offset, case mode) nodes, which is exact but roughly 2.3x slower; measured
@@ -200,42 +199,110 @@ func scan(dst []token, s string, upper, number bool) ([]token, int) {
 	return toks, bits
 }
 
-// worthNumberMode reports whether s holds a decimal run of at least two digits,
-// the only thing NUMBER_0_1023 can profit from. A single digit costs 15 bits as
-// an integer against 9 as a simple symbol, so without such a run the flag can
-// only lose: it also gives up the 5-bit '-' on opcode 31. Skipping those two
-// candidate scans is the difference between two passes and four.
-func worthNumberMode(s string) bool {
-	run := 0
-	for i := range len(s) {
-		if s[i] >= '0' && s[i] <= '9' {
-			run++
-			if run >= 2 {
-				return true
+// plan computes the exact greedy-scan cost for all four flag combinations in
+// one pass. Case costs depend only on homogeneous ASCII-letter runs; number mode
+// affects only decimal runs and the spelling of '-'. Keeping those two parts
+// separate avoids materialising tokens for candidates that will be discarded.
+func plan(s string) (bits int, upper, number bool) {
+	lowerCaseBits, upperCaseBits := 0, 0
+	lowerMode, upperMode := false, true
+	plainBits, numberBits := 0, 0
+
+	for i := 0; i < len(s); {
+		c := s[i]
+		if isLetter(c) {
+			runUpper := c >= 'A' && c <= 'Z'
+			j := i + 1
+			for j < len(s) && isLetter(s[j]) && (s[j] >= 'A' && s[j] <= 'Z') == runUpper {
+				j++
+			}
+			run := j - i
+			if runUpper == lowerMode {
+				lowerCaseBits += costLetter * run
+			} else if run >= 3 {
+				lowerCaseBits += costToggleLong + costLetter*run
+				lowerMode = runUpper
+			} else {
+				lowerCaseBits += costLetterCased * run
+			}
+			if runUpper == upperMode {
+				upperCaseBits += costLetter * run
+			} else if run >= 3 {
+				upperCaseBits += costToggleLong + costLetter*run
+				upperMode = runUpper
+			} else {
+				upperCaseBits += costLetterCased * run
+			}
+			i = j
+			continue
+		}
+
+		if c == ' ' {
+			plainBits += costSpace
+			numberBits += costSpace
+			i++
+			continue
+		}
+
+		if c >= '0' && c <= '9' {
+			j := i + 1
+			for j < len(s) && s[j] >= '0' && s[j] <= '9' {
+				j++
+			}
+			plainBits += costSimple * (j - i)
+			for i < j {
+				v, bestLen := 0, 0
+				for l := 1; l <= numberMaxDigits && i+l <= j; l++ {
+					if l > 1 && s[i] == '0' {
+						break
+					}
+					v = v*10 + int(s[i+l-1]-'0')
+					if v > numberMax {
+						break
+					}
+					bestLen = l
+				}
+				if bestLen == 1 {
+					numberBits += costSimple
+				} else {
+					numberBits += costNumber
+				}
+				i += bestLen
 			}
 			continue
 		}
-		run = 0
-	}
-	return false
-}
 
-// plan scans s under every candidate flag setting and returns the cheapest,
-// along with the flags that produced it. buf is scratch, reused by every
-// candidate; the tokens are deliberately not returned, since each scan
-// overwrites the one before it. The caller re-scans the winning setting when it
-// actually needs the tokens.
-func plan(buf []token, s string) (bits int, upper, number bool) {
-	_, bits = scan(buf, s, false, false)
-	try := func(u, n bool) {
-		if _, b := scan(buf, s, u, n); b < bits {
-			bits, upper, number = b, u, n
+		_, width, cost, ok := symbolAt(s, i, false)
+		if ok {
+			plainBits += cost
+			if c == '-' {
+				numberBits += costSimple
+			} else {
+				numberBits += cost
+			}
+			i += width
+			continue
 		}
+
+		n := 1
+		for n < maxEscapeRun && i+n < len(s) && mustEscape(s, i+n, false) {
+			n++
+		}
+		cost = costEscapeBase + costEscapeByte*n
+		plainBits += cost
+		numberBits += cost
+		i += n
 	}
-	try(true, false)
-	if worthNumberMode(s) {
-		try(false, true)
-		try(true, true)
+
+	bits = lowerCaseBits + plainBits
+	if candidate := upperCaseBits + plainBits; candidate < bits {
+		bits, upper = candidate, true
+	}
+	if candidate := lowerCaseBits + numberBits; candidate < bits {
+		bits, upper, number = candidate, false, true
+	}
+	if candidate := upperCaseBits + numberBits; candidate < bits {
+		bits, upper, number = candidate, true, true
 	}
 	return bits, upper, number
 }
@@ -253,6 +320,12 @@ func Append(out []byte, s string) []byte {
 	if len(s) == 0 {
 		return append(out, 0) // raw, empty payload
 	}
+	bits, upper, number := plan(s)
+	payload := payloadBytes(bits)
+	if frameOverhead(payload)+payload >= frameOverhead(len(s))+len(s) {
+		return append(appendHeader(out, 0, len(s)), s...)
+	}
+
 	var arr [scratchTokens]token
 	buf := arr[:0]
 	if need := 2 * len(s); need > len(arr) {
@@ -262,12 +335,6 @@ func Append(out []byte, s string) []byte {
 			*p = make([]token, 0, need)
 		}
 		buf = (*p)[:0]
-	}
-
-	bits, upper, number := plan(buf, s)
-	payload := payloadBytes(bits)
-	if frameOverhead(payload)+payload >= frameOverhead(len(s))+len(s) {
-		return append(appendHeader(out, 0, len(s)), s...)
 	}
 	toks, _ := scan(buf, s, upper, number)
 
@@ -293,18 +360,7 @@ func Size(s string) int {
 	if len(s) == 0 {
 		return 1
 	}
-	var arr [scratchTokens]token
-	buf := arr[:0]
-	if need := 2 * len(s); need > len(arr) {
-		p := tokenPool.Get().(*[]token)
-		defer tokenPool.Put(p)
-		if cap(*p) < need {
-			*p = make([]token, 0, need)
-		}
-		buf = (*p)[:0]
-	}
-
-	bits, _, _ := plan(buf, s)
+	bits, _, _ := plan(s)
 	payload := payloadBytes(bits)
 	raw := frameOverhead(len(s)) + len(s)
 	if packed := frameOverhead(payload) + payload; packed < raw {

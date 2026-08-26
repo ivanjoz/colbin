@@ -32,6 +32,33 @@ func TestIntColumnRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAllZeroFloat64s(t *testing.T) {
+	for _, n := range []int{0, 1, 31, 32, 33, 1023, 1024, 1025, 4096} {
+		vals := make([]float64, n)
+		if !allZeroFloat64s(vals) {
+			t.Fatalf("n=%d: zero slice reported non-zero", n)
+		}
+		if n == 0 {
+			continue
+		}
+		for _, at := range []int{0, n / 2, n - 1} {
+			vals[at] = 1
+			if allZeroFloat64s(vals) {
+				t.Fatalf("n=%d at=%d: non-zero value missed", n, at)
+			}
+			vals[at] = 0
+		}
+		vals[n-1] = math.NaN()
+		if allZeroFloat64s(vals) {
+			t.Fatalf("n=%d: NaN reported as zero", n)
+		}
+		vals[n-1] = math.Copysign(0, -1)
+		if !allZeroFloat64s(vals) {
+			t.Fatalf("n=%d: negative zero reported non-zero", n)
+		}
+	}
+}
+
 func TestPacked5StringColumnIntegration(t *testing.T) {
 	type row struct {
 		Text string `cb:"1"`

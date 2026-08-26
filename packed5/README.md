@@ -106,10 +106,9 @@ One left-to-right pass, following the specification's rules:
   unrepresentable bytes up to the escape's four-byte limit.
 
 The two behavioural header flags are not guessed. `UPPERCASE_DOMINANT` and
-`ENABLE_NUMBER_0_1023` change what the scan emits, so the scan simply runs once
-per candidate setting and the cheapest wins — two passes for most strings, four
-for those holding a decimal run, since `worthNumberMode` proves the number flag
-cannot pay without a run of at least two digits.
+`ENABLE_NUMBER_0_1023` change what the scan emits, so a single planning pass
+computes the exact greedy cost of all four candidate settings. The encoder then
+tokenises only the cheapest setting.
 
 Counting letters to pick the dominant case is the obvious shortcut, and it is
 wrong often enough to matter: in `SKU-0421-azul` the lowercase letters win 4 to

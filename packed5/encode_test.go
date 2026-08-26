@@ -120,11 +120,7 @@ func atoi(s string) int {
 // optimalBits is the best any encoder for this format could do, over the flag
 // settings the shipped encoder is allowed to consider.
 func optimalBits(s string) int {
-	b := refBits(s, false)
-	if worthNumberMode(s) {
-		b = min(b, refBits(s, true))
-	}
-	return b
+	return min(refBits(s, false), refBits(s, true))
 }
 
 // optimalSize is optimalBits as a frame length, for comparison against Size.
@@ -149,9 +145,44 @@ func encodedBits(s string, number bool) int {
 // scanBits is what the shipped encoder actually charges for s, across all the
 // candidate flag settings it tries.
 func scanBits(s string) int {
-	buf := make([]token, 0, 2*len(s)+2)
-	bits, _, _ := plan(buf, s)
+	bits, _, _ := plan(s)
 	return bits
+}
+
+// TestPlanMatchesCandidateScans checks that the single planning pass preserves
+// both the exact cost and the strict tie-breaking order of the four former
+// candidate scans, including arbitrary invalid UTF-8 input.
+func TestPlanMatchesCandidateScans(t *testing.T) {
+	rng := rand.New(rand.NewPCG(41, 43))
+	for n := 0; n <= 512; n++ {
+		for range 20 {
+			b := make([]byte, n)
+			for i := range b {
+				b[i] = byte(rng.Uint32())
+			}
+			s := string(b)
+			buf := make([]token, 0, 2*len(s)+2)
+			_, wantBits := scan(buf, s, false, false)
+			wantUpper, wantNumber := false, false
+			for _, candidate := range []struct {
+				upper, number bool
+			}{
+				{true, false},
+				{false, true},
+				{true, true},
+			} {
+				if _, bits := scan(buf, s, candidate.upper, candidate.number); bits < wantBits {
+					wantBits = bits
+					wantUpper, wantNumber = candidate.upper, candidate.number
+				}
+			}
+			gotBits, gotUpper, gotNumber := plan(s)
+			if gotBits != wantBits || gotUpper != wantUpper || gotNumber != wantNumber {
+				t.Fatalf("length %d: plan = (%d,%v,%v), scans = (%d,%v,%v)",
+					n, gotBits, gotUpper, gotNumber, wantBits, wantUpper, wantNumber)
+			}
+		}
+	}
 }
 
 // ------------------------------------------------------- distance from optimal
@@ -282,24 +313,6 @@ func TestKnownGapCaseAcrossSymbols(t *testing.T) {
 	}
 	if got, opt := Size(s), optimalSize(s); got-opt != 1 {
 		t.Errorf("%q: %d bytes against an optimum of %d", s, got, opt)
-	}
-}
-
-// TestNumberModeGateIsSound backs the worthNumberMode shortcut, which halves
-// the number of candidate scans: whenever it says no, enabling the flag
-// genuinely cannot produce a smaller stream.
-func TestNumberModeGateIsSound(t *testing.T) {
-	rng := rand.New(rand.NewPCG(13, 14))
-	for _, pool := range [][]string{alphabet, {"0", "-", "a", "."}, {"1", "x", "-"}} {
-		for range 3000 {
-			s := randString(rng, pool, rng.IntN(20))
-			if worthNumberMode(s) {
-				continue
-			}
-			if on, off := refBits(s, true), refBits(s, false); on < off {
-				t.Fatalf("%q: gate rejected number mode but it saves %d bits", s, off-on)
-			}
-		}
 	}
 }
 

@@ -246,13 +246,7 @@ func encodeElemColumn(out []byte, elem *fieldMeta, ptrs []unsafe.Pointer) []byte
 // Empty (all-zero) columns carry only the flags byte. The precision bit records
 // 32 vs 64 (the decoder also knows from the Go type).
 func appendFloatColumn(out []byte, vals []float64, width uint8) []byte {
-	empty := true
-	for _, v := range vals {
-		if v != 0 {
-			empty = false
-			break
-		}
-	}
+	empty := allZeroFloat64s(vals)
 	var prec uint8
 	if width == 64 {
 		prec = 1

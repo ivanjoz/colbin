@@ -474,6 +474,50 @@ func BenchmarkArrayDecodeInt16(b *testing.B) { benchDecode(b, mkSeq[int16](1024,
 func BenchmarkArrayDecodeInt32(b *testing.B) { benchDecode(b, mkSeq[int32](1024, 1<<20)) }
 func BenchmarkArrayDecodeInt64(b *testing.B) { benchDecode(b, mkSeq[int64](1024, 1<<30)) }
 
+// TestSearchMatchesReference guards the cumulative-histogram scorer against the
+// direct bucket-by-bucket definition. Exact parameter equality matters because
+// ties must retain the format's established first-candidate choice.
+func TestSearchMatchesReference(t *testing.T) {
+	reference := func(hist *[65]int32) (kmParams, bool) {
+		var best kmParams
+		found := false
+		for k := minK; k <= maxK; k++ {
+			for code := range uint8(8) {
+				m := k + dCodes[code]
+				size, fits := 0, true
+				for bits, n := range hist {
+					if n == 0 {
+						continue
+					}
+					l := encLen(uint8(bits), k, m)
+					if l == 0 {
+						fits = false
+						break
+					}
+					size += int(l) * int(n)
+				}
+				if fits && (!found || size < best.size) {
+					best, found = kmParams{k: k, code: code, m: m, size: size}, true
+				}
+			}
+		}
+		return best, found
+	}
+
+	rng := rand.New(rand.NewPCG(31, 37))
+	for range 10_000 {
+		var hist [65]int32
+		for range rng.IntN(1000) {
+			hist[rng.IntN(len(hist))]++
+		}
+		got, gotOK := search(&hist)
+		want, wantOK := reference(&hist)
+		if gotOK != wantOK || got != want {
+			t.Fatalf("search mismatch: got (%+v, %v), want (%+v, %v)", got, gotOK, want, wantOK)
+		}
+	}
+}
+
 // TestArrayTypedSizeReport shows what encoding the same logical values as a
 // narrower type buys, which is the point of handling each width natively.
 func TestArrayTypedSizeReport(t *testing.T) {

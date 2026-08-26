@@ -43,8 +43,11 @@ func (w *bitWriter) flush() []byte {
 // fail instead of returning zeros.
 type bitReader struct {
 	buf   []byte
-	bit   int // absolute bit offset of the next unread bit
-	limit int // total readable bits
+	acc   uint64 // unread bits, with the next field in the low bits
+	bit   int    // number of payload bits already consumed
+	limit int    // total readable bits
+	pos   int    // next byte of buf not yet loaded into acc
+	nbits uint8  // number of valid low bits in acc
 }
 
 // remaining is how many payload bits are still unread.
@@ -56,13 +59,17 @@ func (r *bitReader) read(width uint8) (uint32, bool) {
 	if r.bit+int(width) > r.limit {
 		return 0, false
 	}
-	i := r.bit >> 3
-	off := uint(r.bit & 7)
-	// off <= 7 and width <= 24, so at most four bytes are touched.
-	var acc uint32
-	for n := 0; n*8 < int(off)+int(width); n++ {
-		acc |= uint32(r.buf[i+n]) << (8 * n)
+	// After every read fewer than eight bits remain, so this loop loads only the
+	// new bytes needed by the next field. The previous implementation rebuilt an
+	// overlapping word from the backing slice on every call.
+	for r.nbits < width {
+		r.acc |= uint64(r.buf[r.pos]) << r.nbits
+		r.pos++
+		r.nbits += 8
 	}
+	v := uint32(r.acc & (uint64(1)<<width - 1))
+	r.acc >>= width
+	r.nbits -= width
 	r.bit += int(width)
-	return (acc >> off) & (1<<width - 1), true
+	return v, true
 }

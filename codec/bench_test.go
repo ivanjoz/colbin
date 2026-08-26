@@ -1,6 +1,7 @@
 package codec
 
 import (
+	"fmt"
 	"math/rand"
 	"reflect"
 	"testing"
@@ -125,6 +126,19 @@ func TestSizeReport(t *testing.T) {
 // --- benchmarks: throughput reported via b.SetBytes (encoded size) ---
 
 const benchN = 1000
+
+func BenchmarkAllZeroFloat64s(b *testing.B) {
+	for _, n := range []int{64, 256, 1024, 4096} {
+		vals := make([]float64, n)
+		b.Run(fmt.Sprintf("n%d", n), func(b *testing.B) {
+			for b.Loop() {
+				if !allZeroFloat64s(vals) {
+					b.Fatal("zero column reported non-zero")
+				}
+			}
+		})
+	}
+}
 
 func BenchmarkColbinEncodeScalar(b *testing.B) {
 	recs := randScalarRecords(benchN, rand.New(rand.NewSource(1)))
