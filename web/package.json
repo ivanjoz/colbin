@@ -1,0 +1,28 @@
+{
+  "name": "colbin-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "asbuild": "asc assembly/index.ts --config asconfig.json --target release",
+    "asbuild:debug": "asc assembly/index.ts --config asconfig.json --target debug",
+    "vectors": "go run ./vectors",
+    "test": "bun run vectors && bun run asbuild:test && bun run asbuild && node --test tests/*.test.mjs",
+    "dev": "bun run asbuild && vite dev",
+    "build": "bun run asbuild && vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "asbuild:test": "asc assembly/test-exports.ts --outFile build/test.wasm --runtime incremental --exportRuntime --debug"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "^3.0.10",
+    "@sveltejs/kit": "^2.55.0",
+    "@sveltejs/vite-plugin-svelte": "^7.0.0",
+    "@tailwindcss/vite": "^4.1.13",
+    "assemblyscript": "^0.28.2",
+    "svelte": "^5.46.0",
+    "svelte-check": "^4.3.2",
+    "tailwindcss": "^4.1.13",
+    "typescript": "^5.9.2",
+    "vite": "^8.0.0"
+  }
+}
