@@ -239,13 +239,13 @@ export class Decoder {
         if (d == null) return false
         def.ids.push(id)
         def.names.push(name.take())
-        def.descs.push(d!)
+        def.descs.push(d)
       }
     }
 
     const root = this.desc()
     if (root == null) return false
-    section.root = root!
+    section.root = root
 
     if (this.r.pos != schemaEnd) {
       this.fail('the schema section does not end where its length says it does')
@@ -304,14 +304,14 @@ export class Decoder {
         span.type = typeName(section.root)
         span.nullable = section.root.nullable
         span.start = this.r.pos
-        this.spans = span!.children
+        this.spans = span.children
       }
       const one = this.column(section.root, 1)
       if (span != null) {
         const children = this.spans!
         this.spans = null
-        span!.end = this.r.pos
-        span!.children = children
+        span.end = this.r.pos
+        span.children = children
         this.valueSpan = span
       }
       return one
@@ -375,20 +375,20 @@ export class Decoder {
         span.nullable = desc.nullable
         span.start = this.r.pos - 1 // the field id byte belongs to the column
         parentSpans = this.spans
-        this.spans = span!.children
+        this.spans = span.children
       }
 
       const values = this.column(desc, n)
 
       if (span != null) {
         this.spans = parentSpans
-        span!.end = this.r.pos
-        parentSpans!.push(span!)
+        span.end = this.r.pos
+        parentSpans!.push(span)
       }
       if (values == null) return null
       for (let i = 0; i < n; i++) {
         unchecked(rows[i]).keys!.push(name)
-        unchecked(rows[i]).items!.push(unchecked(values![i]))
+        unchecked(rows[i]).items!.push(unchecked(values[i]))
       }
     }
     return rows
@@ -403,7 +403,7 @@ export class Decoder {
       const out = new Array<Val>(n)
       const unsigned = isUnsigned(d.kind)
       for (let i = 0; i < n; i++) {
-        const v = unchecked(raw![i])
+        const v = unchecked(raw[i])
         if (d.kind == SK_BOOL) unchecked((out[i] = scalarVal(V_BOOL, v != 0 ? 1 : 0)))
         else unchecked((out[i] = scalarVal(unsigned ? V_UINT : V_INT, v)))
       }
@@ -440,7 +440,7 @@ export class Decoder {
       if (lengths == null) return null
       const out = new Array<Val>(n)
       for (let i = 0; i < n; i++) {
-        const l = unchecked(lengths![i])
+        const l = unchecked(lengths[i])
         if (l < 0 || !this.plausible(l, 'byte-column length')) return null
         const v = new Val()
         v.tag = V_BYTES
@@ -461,7 +461,7 @@ export class Decoder {
       for (let i = 0; i < n; i++) {
         const v = this.anyValue(0)
         if (v == null) return null
-        unchecked((out[i] = v!))
+        unchecked((out[i] = v))
       }
       return out
     }
@@ -518,7 +518,7 @@ export class Decoder {
     if (lengths == null) return null
     let total: i64 = 0
     for (let i = 0; i < n; i++) {
-      const l = unchecked(lengths![i])
+      const l = unchecked(lengths[i])
       if (l < 0) {
         this.fail('negative array length')
         return null
@@ -538,7 +538,7 @@ export class Decoder {
     const out = new Array<Val>(n)
     let at = 0
     for (let i = 0; i < n; i++) {
-      const l = <i32>unchecked(lengths![i])
+      const l = <i32>unchecked(lengths[i])
       if (l == 0) {
         // An empty slice and nil are the same on the wire, and both render null.
         unchecked((out[i] = NULL_VAL))
@@ -560,7 +560,7 @@ export class Decoder {
     if (lengths == null) return null
     let total: i64 = 0
     for (let i = 0; i < n; i++) {
-      const l = unchecked(lengths![i])
+      const l = unchecked(lengths[i])
       if (l < 0) {
         this.fail('negative map length')
         return null
@@ -583,7 +583,7 @@ export class Decoder {
     const out = new Array<Val>(n)
     let at = 0
     for (let i = 0; i < n; i++) {
-      const l = <i32>unchecked(lengths![i])
+      const l = <i32>unchecked(lengths[i])
       if (l == 0) {
         unchecked((out[i] = NULL_VAL))
         continue
@@ -651,7 +651,7 @@ export class Decoder {
 
     let k = 0
     for (let i = 0; i < n; i++) {
-      unchecked((out[i] = unchecked(present[i]) == 1 ? unchecked(dense![k++]) : NULL_VAL))
+      unchecked((out[i] = unchecked(present[i]) == 1 ? unchecked(dense[k++]) : NULL_VAL))
     }
     return out
   }
@@ -671,7 +671,7 @@ export class Decoder {
     if (tag == 3 || tag == 4) {
       const one = this.intColumn(1, 64)
       if (one == null) return null
-      return scalarVal(tag == 3 ? V_INT : V_UINT, unchecked(one![0]))
+      return scalarVal(tag == 3 ? V_INT : V_UINT, unchecked(one[0]))
     }
     if (tag == 5) {
       if (!this.r.has(8)) {
@@ -722,7 +722,7 @@ export class Decoder {
         }
         const item = this.anyValue(depth + 1)
         if (item == null) return null
-        items.push(item!)
+        items.push(item)
       }
       v.items = items
       if (tag == 9) v.keys = keys
@@ -903,7 +903,7 @@ export function decodeValues(buf: Uint8Array, diag: Diag): Decoded | null {
   if (rows == null) return null
 
   const out = new Decoded()
-  out.rows = rows!
+  out.rows = rows
   out.valueMode = (dec.section.flags & SCH_RECORDS) == 0
   out.single = (dec.section.flags & SCH_SINGLE_STRUCT) != 0
   if (out.single && !out.valueMode && out.rows.length != 1) {
@@ -926,10 +926,10 @@ export function decodeMessage(buf: Uint8Array, diag: Diag): Uint8Array | null {
   if (decoded == null) return null
 
   const w = new Writer(256)
-  const rows = decoded!.rows
-  if (decoded!.valueMode) {
+  const rows = decoded.rows
+  if (decoded.valueMode) {
     writeValue(w, unchecked(rows[0]))
-  } else if (decoded!.single) {
+  } else if (decoded.single) {
     writeValue(w, unchecked(rows[0]))
   } else {
     w.writeByte(0x5b)
@@ -998,7 +998,7 @@ export function inspectMessage(buf: Uint8Array, diag: Diag): Uint8Array | null {
   const w = new Writer(512)
   writeAscii(w, '{"totalBytes":' + buf.length.toString())
   writeAscii(w, ',"schemaBytes":' + schemaEnd.toString())
-  writeAscii(w, ',"recordCount":' + rows!.length.toString())
+  writeAscii(w, ',"recordCount":' + rows.length.toString())
   const shape = (dec.section.flags & SCH_RECORDS) == 0
     ? 'value'
     : ((dec.section.flags & SCH_SINGLE_STRUCT) != 0 ? 'object' : 'array')

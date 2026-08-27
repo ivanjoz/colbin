@@ -56,9 +56,9 @@ export function encode(len: i32, verify: i32): i32 {
   if (message == null) return -1
 
   if (verify != 0) {
-    const decoded = decodeValues(message!, diag)
+    const decoded = decodeValues(message, diag)
     if (decoded == null) return -1
-    if (!new Verifier(doc!, diag).check(schema!.records, decoded!)) return -1
+    if (!new Verifier(doc, diag).check(schema.records, decoded)) return -1
   }
 
   result = message
