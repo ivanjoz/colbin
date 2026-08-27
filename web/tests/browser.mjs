@@ -190,6 +190,25 @@ try {
   const hover = await evaluate("document.querySelectorAll('.hex .cell.hit').length")
   check('hovering a column highlights its bytes', hover > 0, 'highlighted ' + hover)
 
+  // The gzip toggle swaps what the two bars measure; it must not stack a
+  // second pair, which is what made the panel tall enough to scroll.
+  await click('Clients')
+  await wait(1200)
+  const barState =
+    "(() => ({" +
+    "bars: document.querySelectorAll('.bar-row').length," +
+    "ratio: document.querySelector('.headline strong').textContent," +
+    "labels: Array.from(document.querySelectorAll('.bar-row .label')).map(l => l.textContent)" +
+    "}))()"
+  const raw = await evaluate(barState)
+  await evaluate("document.querySelector('.gzip-toggle input').click()")
+  await wait(300)
+  const gz = await evaluate(barState)
+  check('raw shows two bars', raw.bars === 2, 'got ' + raw.bars)
+  check('gzip replaces them rather than adding', gz.bars === 2, 'got ' + gz.bars)
+  check('gzip relabels the bars', gz.labels.every((l) => /gz$/.test(l)), gz.labels.join(','))
+  check('gzip restates the ratio', gz.ratio !== raw.ratio, raw.ratio + ' -> ' + gz.ratio)
+
   check('no console errors', consoleErrors.length === 0, consoleErrors.join(' | '))
 } finally {
   ws.close()

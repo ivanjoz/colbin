@@ -135,32 +135,30 @@
     </section>
 
     <section class="result">
-      <div class="pane-head">
-        <h2>Message</h2>
-        <span class="meta">
-          {#if status === 'working'}encoding…{:else if status === 'ready'}{encodeMs.toFixed(1)} ms{/if}
-        </span>
-      </div>
-
       <div class="scroll">
         <Diagnostics {error} {warnings} />
 
+        {#if status === 'working' && !report}
+          <p class="sub">encoding…</p>
+        {/if}
+
         {#if report && message}
+          <!-- The ratio is this pane's heading: it says what the pane is for, so
+               the pane does not also need a row that says "Message". -->
           <SizeBars
             {jsonBytes}
             messageBytes={message.length}
             {jsonGzip}
             {messageGzip}
+            timing={status === 'working' ? 'encoding…' : `${encodeMs.toFixed(1)} ms`}
             bind:showGzip
-          />
-
-          <div class="facts">
+          >
             <span>{report.recordCount} records</span>
             <span>{report.columns.length} columns</span>
             <span title="The schema section: field names and the type facts the columns leave out. It describes the type, so it does not grow with the record count.">
               schema {bytes(report.schemaBytes)}
             </span>
-          </div>
+          </SizeBars>
 
           <h3>Columns</h3>
           <p class="sub">Hover a column to find its bytes in the message.</p>
@@ -324,14 +322,6 @@
   .scroll {
     overflow: auto;
     flex: 1;
-  }
-
-  .facts {
-    display: flex;
-    gap: 14px;
-    font-size: 12px;
-    color: var(--dim);
-    margin: 10px 0 0;
   }
 
   h3 {
