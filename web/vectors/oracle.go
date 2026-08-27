@@ -342,22 +342,34 @@ func encodeJSON(text string) ([]byte, error) {
 
 	records := []jsonValue{}
 	single := false
+	valueMode := false
 	switch root.kind {
 	case "array":
 		if len(root.arr) == 0 {
 			return nil, fmt.Errorf("an empty array has no shape to infer")
 		}
+		allObjects := true
 		for _, e := range root.arr {
 			if e.kind != "object" {
-				return nil, fmt.Errorf("value mode is not implemented")
+				allObjects = false
+				break
 			}
 		}
-		records = root.arr
+		if !allObjects {
+			// An array of anything else is one value, not a batch of records.
+			valueMode = true
+			records = []jsonValue{root}
+		} else {
+			records = root.arr
+		}
 	case "object":
 		records = []jsonValue{root}
 		single = true
+	case "null":
+		return nil, fmt.Errorf("null has no shape to infer")
 	default:
-		return nil, fmt.Errorf("value mode is not implemented")
+		valueMode = true
+		records = []jsonValue{root}
 	}
 
 	o := newObs()
@@ -369,7 +381,7 @@ func encodeJSON(text string) ([]byte, error) {
 		return nil, err
 	}
 
-	if single {
+	if single || valueMode {
 		v := reflect.New(recordType).Elem()
 		if err := fill(v, records[0]); err != nil {
 			return nil, err

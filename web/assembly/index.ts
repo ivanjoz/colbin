@@ -10,7 +10,7 @@
 // lastError() to hand back.
 
 import { Diag, lineOf } from './diag'
-import { decodeMessage, decodeValues } from './decode'
+import { decodeMessage, decodeValues, inspectMessage } from './decode'
 import { encodeMessage } from './encode'
 import { inferSchema } from './infer'
 import { parseJSON } from './json'
@@ -73,6 +73,19 @@ export function decode(len: i32): i32 {
   diag.reset()
   source = new Uint8Array(0) // offsets refer to the message, not to any source
   const text = decodeMessage(input.subarray(0, len), diag)
+  if (text == null) return -1
+  result = text
+  return text.length
+}
+
+/**
+ * The column tree of a message as JSON, with each column's byte span.
+ * Returns its length, or -1 with a diagnostic in lastError().
+ */
+export function inspect(len: i32): i32 {
+  diag.reset()
+  source = new Uint8Array(0)
+  const text = inspectMessage(input.subarray(0, len), diag)
   if (text == null) return -1
   result = text
   return text.length

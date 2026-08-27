@@ -111,10 +111,27 @@ function scalarVal(tag: u8, num: i64): Val {
   return v
 }
 
+/** Where one column's bytes are, and what they hold. */
+export class Span {
+  name: string = ''
+  id: i32 = -1
+  type: string = ''
+  nullable: bool = false
+  start: i32 = 0
+  end: i32 = 0
+  children: Array<Span> = []
+}
+
 export class Decoder {
   r: Reader
   diag: Diag
   section: Section = new Section()
+
+  /** Non-null while inspecting: the span list the current subTable fills. */
+  spans: Array<Span> | null = null
+
+  /** Value mode has no named columns, so its one span is kept here. */
+  valueSpan: Span | null = null
 
   constructor(buf: Uint8Array, diag: Diag) {
     this.r = new Reader(buf)
@@ -278,8 +295,26 @@ export class Decoder {
   decodeBody(): Array<Val> | null {
     const section = this.section
     if ((section.flags & SCH_RECORDS) == 0) {
-      this.diag.fail(D_UNSUPPORTED, this.r.pos, '', 'value-mode messages are not implemented yet')
-      return null
+      // Value mode: one element column holding one value, and no record count
+      // in front of it because there is no record to count.
+      let span: Span | null = null
+      if (this.spans != null) {
+        span = new Span()
+        span.name = '(value)'
+        span.type = typeName(section.root)
+        span.nullable = section.root.nullable
+        span.start = this.r.pos
+        this.spans = span!.children
+      }
+      const one = this.column(section.root, 1)
+      if (span != null) {
+        const children = this.spans!
+        this.spans = null
+        span!.end = this.r.pos
+        span!.children = children
+        this.valueSpan = span
+      }
+      return one
     }
     const count = this.uvarint()
     if (count < 0 || !this.plausible(count, 'record count')) return null
@@ -325,9 +360,32 @@ export class Decoder {
         this.fail('field id ' + id.toString() + ' is not in the schema')
         return null
       }
-      const values = this.column(unchecked(def.descs[slot]), n)
-      if (values == null) return null
+      const desc = unchecked(def.descs[slot])
       const name = unchecked(def.names[slot])
+
+      // The span is opened before the column is read and closed after, so a
+      // nested column's bytes land inside its parent's rather than beside them.
+      let span: Span | null = null
+      let parentSpans: Array<Span> | null = null
+      if (this.spans != null) {
+        span = new Span()
+        span.name = String.UTF8.decodeUnsafe(name.dataStart, <usize>name.length, false)
+        span.id = <i32>id
+        span.type = typeName(desc)
+        span.nullable = desc.nullable
+        span.start = this.r.pos - 1 // the field id byte belongs to the column
+        parentSpans = this.spans
+        this.spans = span!.children
+      }
+
+      const values = this.column(desc, n)
+
+      if (span != null) {
+        this.spans = parentSpans
+        span!.end = this.r.pos
+        parentSpans!.push(span!)
+      }
+      if (values == null) return null
       for (let i = 0; i < n; i++) {
         unchecked(rows[i]).keys!.push(name)
         unchecked(rows[i]).items!.push(unchecked(values![i]))
@@ -833,6 +891,8 @@ function writeValue(w: Writer, v: Val): void {
 export class Decoded {
   rows: Array<Val> = []
   single: bool = false
+  /** The message holds one value rather than a table of records. */
+  valueMode: bool = false
 }
 
 /** Reads a message into its values, without rendering anything. */
@@ -844,8 +904,9 @@ export function decodeValues(buf: Uint8Array, diag: Diag): Decoded | null {
 
   const out = new Decoded()
   out.rows = rows!
+  out.valueMode = (dec.section.flags & SCH_RECORDS) == 0
   out.single = (dec.section.flags & SCH_SINGLE_STRUCT) != 0
-  if (out.single && out.rows.length != 1) {
+  if (out.single && !out.valueMode && out.rows.length != 1) {
     dec.fail('a lone-struct message must carry exactly one record')
     return null
   }
@@ -866,7 +927,9 @@ export function decodeMessage(buf: Uint8Array, diag: Diag): Uint8Array | null {
 
   const w = new Writer(256)
   const rows = decoded!.rows
-  if (decoded!.single) {
+  if (decoded!.valueMode) {
+    writeValue(w, unchecked(rows[0]))
+  } else if (decoded!.single) {
     writeValue(w, unchecked(rows[0]))
   } else {
     w.writeByte(0x5b)
@@ -876,5 +939,72 @@ export function decodeMessage(buf: Uint8Array, diag: Diag): Uint8Array | null {
     }
     w.writeByte(0x5d)
   }
+  return w.take()
+}
+
+/** A column's type, as the inspector shows it. */
+function typeName(d: Desc): string {
+  if (d.ft == FT_INT) {
+    if (d.kind == SK_BOOL) return 'bool'
+    return (isUnsigned(d.kind) ? 'uint' : 'int') + bitWidthOfKind(d.kind).toString()
+  }
+  if (d.ft == FT_FLOAT) return 'float' + bitWidthOfKind(d.kind).toString()
+  if (d.ft == FT_STRING) return 'string'
+  if (d.ft == FT_BYTES) return 'bytes'
+  if (d.ft == FT_ARRAY) return '[]' + typeName(d.elem!)
+  if (d.ft == FT_STRUCT) return 'struct'
+  if (d.ft == FT_MAP) return 'map'
+  return 'any'
+}
+
+function writeSpans(w: Writer, spans: Array<Span>): void {
+  w.writeByte(0x5b)
+  for (let i = 0; i < spans.length; i++) {
+    if (i > 0) w.writeByte(0x2c)
+    const s = unchecked(spans[i])
+    writeAscii(w, '{"name":')
+    writeJSONString(w, Uint8Array.wrap(String.UTF8.encode(s.name, false)))
+    writeAscii(w, ',"id":' + s.id.toString())
+    writeAscii(w, ',"type":"' + s.type + '"')
+    writeAscii(w, ',"nullable":' + (s.nullable ? 'true' : 'false'))
+    writeAscii(w, ',"start":' + s.start.toString())
+    writeAscii(w, ',"end":' + s.end.toString())
+    writeAscii(w, ',"bytes":' + (s.end - s.start).toString())
+    writeAscii(w, ',"children":')
+    writeSpans(w, s.children)
+    w.writeByte(0x7d)
+  }
+  w.writeByte(0x5d)
+}
+
+/**
+ * The column tree of a message, with the byte span of every column.
+ *
+ * Driven by the decoder rather than by a second walk, so it cannot drift from
+ * what decoding actually reads — and so the spans are a check on the decoder
+ * too: if they do not tile the buffer, something is being read twice or skipped.
+ */
+export function inspectMessage(buf: Uint8Array, diag: Diag): Uint8Array | null {
+  const dec = new Decoder(buf, diag)
+  if (!dec.parseSection()) return null
+  const schemaEnd = dec.r.pos
+
+  const top = new Array<Span>()
+  dec.spans = top
+  const rows = dec.decodeBody()
+  if (rows == null) return null
+  if (dec.valueSpan != null) top.push(dec.valueSpan!)
+
+  const w = new Writer(512)
+  writeAscii(w, '{"totalBytes":' + buf.length.toString())
+  writeAscii(w, ',"schemaBytes":' + schemaEnd.toString())
+  writeAscii(w, ',"recordCount":' + rows!.length.toString())
+  const shape = (dec.section.flags & SCH_RECORDS) == 0
+    ? 'value'
+    : ((dec.section.flags & SCH_SINGLE_STRUCT) != 0 ? 'object' : 'array')
+  writeAscii(w, ',"shape":"' + shape + '"')
+  writeAscii(w, ',"columns":')
+  writeSpans(w, top)
+  w.writeByte(0x7d)
   return w.take()
 }

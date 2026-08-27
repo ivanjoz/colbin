@@ -1,0 +1,36 @@
+:root {
+  --bg: #0f1117;
+  --panel: #161922;
+  --panel-2: #1c2029;
+  --line: #262b36;
+  --text: #d8dbe4;
+  --dim: #8b93a7;
+  --accent: #6ea8fe;
+  --good: #5fd39a;
+  --warn: #e5c07b;
+  --bad: #e88b8b;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+a {
+  color: var(--accent);
+}
+
+code,
+pre {
+  font-family: var(--mono);
+}

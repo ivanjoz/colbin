@@ -328,6 +328,7 @@ it is what phase 2 gates on.
 | `ftArray` | yes | including arrays of structs |
 | nullable | yes | null or absent key |
 | `ftBytes` | **no** | JSON has no bytes type; inventing a `"base64:"` convention would be inventing format semantics the library does not have |
+| value mode | yes | a top level that is not a batch of records: a bare scalar, an array of scalars, an array of arrays |
 | `ftMap` | **no** | a JSON object is a struct here; a map needs a declared key type |
 | `ftAny` | **no** | §4.1 |
 | compact mode | phase 5 | affects only the binary-mode size number; `MarshalJSON` is always standard mode |
@@ -480,10 +481,20 @@ Examples, chosen to cover §3 and §4 rather than to flatter the format:
 The last five exist to be honest. A demo that ships only its best cases is one
 nobody believes twice.
 
-Plain Svelte 5 runes and Tailwind — **no `@genix/ui`**. That library earned its
-place in the facturago demo, which needed tables, editable cells and form inputs;
-this needs two panes, a tree and a hex dump, and would inherit the
-dependency-optimizer and orphaned-asset work for nothing.
+Plain Svelte 5 runes and scoped CSS — **no `@genix/ui`, and no Tailwind either**.
+The plan called for Tailwind; the page turned out to be two panes, a tree and a
+hex dump, so component-scoped CSS says the same thing with one less dependency
+and one less config file. genix-ui earned its place in the facturago demo, which
+needed tables, editable cells and form inputs, and would have brought the
+dependency-optimizer and orphaned-asset work with it for nothing here.
+
+**One thing the page had to get right to stay honest.** The examples are
+pretty-printed so they can be read and edited, and comparing colbin against
+*that* would have flattered it by two or three times — the lone-object example
+came out looking like a win. The size comparison is therefore against the
+minified JSON, computed with a string-aware scanner rather than
+`JSON.parse` + `stringify`, since parsing would round any integer past 2^53 and
+that is the failure the page exists to show.
 
 ---
 
@@ -495,10 +506,10 @@ more than a complete codec with nothing to look at.
 
 | # | Phase | Done when |
 |---|---|---|
-| 1 | Scaffold: SvelteKit static, `asc` build, Pages, CI. Placeholder page loading a trivial module. | `colbin.un.pe` serves it; the wasm instantiates; headless Chrome reports no console errors |
-| 2 | Module core: `bitstream`, `varint`, `packed5`, JSON scanner, §3 inference, §4 enforcement, schema section, int/bool/string columns. Level-1 and level-2 vectors for those types. | layer vectors byte-identical; the products example matches the oracle; §4.5's property holds over 10 k generated inputs; **under 50 KB gzipped** |
-| 3 | The page: examples, editor, inspector, hex view, diagnostics, download. | Chrome drives 4 examples end to end; §6's notes appear where they apply |
-| 4 | Breadth. Encode: float64, uint64, nested struct, array of struct, nullable, value mode. Decode: also `ftBytes`, `ftMap`, `ftAny`, plus §4.3's bounds checking and the fuzz target. | every example matches the oracle; level 3 passes both directions; the fuzzer finds no trap in 10 M cases |
+| 1 | ✅ Scaffold: SvelteKit static, `asc` build, Pages, CI. | the site builds; the wasm instantiates; headless Chrome reports no console errors. **Not yet deployed** — §14 is the caller's to do |
+| 2 | ✅ Module core: `bitstream`, `varint`, `packed5`, JSON scanner, §3 inference, §4 enforcement, schema section, int/bool/string columns. Level-1 and level-2 vectors for those types. | layer vectors byte-identical; the products example matches the oracle; **32.5 KB gzipped** against the 50 KB budget |
+| 3 | ✅ The page: examples, editor, inspector, hex view, diagnostics, download, upload. | Chrome drives all 10 examples end to end with no console errors |
+| 4 | ✅ Breadth. Encode: float64, uint64, nested struct, array of struct, nullable, value mode. Decode: also `ftBytes`, `ftMap`, `ftAny`, plus §4.3's bounds checking and the fuzz target. | every example matches the oracle; level 3 passes both directions; the fuzzer finds no trap |
 | 5 | Compact mode, so the binary-mode number is right at 1–3 records; upload/drop. | a 1-record message is 12 B (appendix A.1) |
 | 6 | Publish `@ivanjoz/colbin`; README section. | `npm i @ivanjoz/colbin` decodes a Go-produced message in Node |
 

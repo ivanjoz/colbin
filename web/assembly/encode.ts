@@ -13,7 +13,7 @@
 import { Writer } from './bytes'
 import { Diag, D_UNSUPPORTED } from './diag'
 import { Doc, K_FLOAT, K_UINT } from './json'
-import { SHAPE_SINGLE, Schema } from './infer'
+import { SHAPE_SINGLE, SHAPE_VALUE, Schema } from './infer'
 import {
   FT_ARRAY,
   FT_FLOAT,
@@ -128,10 +128,23 @@ export class Encoder {
 
   encode(schema: Schema): Uint8Array | null {
     const builder = new SchemaBuilder()
-    const rootIndex = builder.structIndex(schema.root)
+    const valueMode = schema.shape == SHAPE_VALUE
+
+    // The root descriptor is built first because it is what populates the
+    // struct table, and the table has to be written before it.
+    const rootDesc = new Writer(16)
+    if (valueMode) {
+      builder.appendDesc(rootDesc, schema.root)
+    } else {
+      const rootIndex = builder.structIndex(schema.root)
+      // The root struct is never nullable or elided, so its descriptor is the
+      // bare class plus its table index.
+      rootDesc.writeByte(FT_STRUCT)
+      writeUvarint(rootDesc, <u64>rootIndex)
+    }
 
     const section = new Writer(128)
-    let flags = SCH_RECORDS
+    let flags: u8 = valueMode ? 0 : SCH_RECORDS
     if (schema.shape == SHAPE_SINGLE) flags |= SCH_SINGLE_STRUCT
     section.writeByte(flags)
     writeUvarint(section, <u64>builder.defs.length)
@@ -139,22 +152,25 @@ export class Encoder {
       const def = unchecked(builder.defs[i])!
       section.writeBytes(def.buf, 0, def.len)
     }
-    // The root struct is never nullable or elided, so its descriptor is the
-    // bare class plus its table index.
-    section.writeByte(FT_STRUCT)
-    writeUvarint(section, <u64>rootIndex)
+    section.writeBytes(rootDesc.buf, 0, rootDesc.len)
 
     const out = new Writer(256)
     out.writeByte(JSON_FORMAT_VERSION)
     writeUvarint(out, <u64>section.len)
     out.writeBytes(section.buf, 0, section.len)
 
-    writeUvarint(out, <u64>schema.records.length)
     const nodes = new Int32Array(schema.records.length)
     for (let i = 0; i < schema.records.length; i++) {
       unchecked((nodes[i] = unchecked(schema.records[i])))
     }
-    this.subTable(out, schema.root, nodes)
+    if (valueMode) {
+      // One element column holding one value: no record count, because there is
+      // no record to count.
+      this.elemColumn(out, schema.root, nodes)
+    } else {
+      writeUvarint(out, <u64>schema.records.length)
+      this.subTable(out, schema.root, nodes)
+    }
     if (!this.diag.ok) return null
     return out.take()
   }

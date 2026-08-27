@@ -9,7 +9,7 @@ import { Diag, lineOf } from './diag'
 import { Doc, K_FLOAT, K_STRING, parseJSON } from './json'
 import { Schema, inferSchema } from './infer'
 import { encodeMessage } from './encode'
-import { decodeMessage, decodeValues } from './decode'
+import { decodeMessage, decodeValues, inspectMessage } from './decode'
 import { Verifier } from './verify'
 import { Field, Type, assignFieldIDs } from './schema'
 
@@ -351,4 +351,15 @@ export function encodeVerified(len: i32): i32 {
   if (!new Verifier(doc, lastDiag).check(schema.records, decoded)) return -lastDiag.code
   memory.copy(OUT.dataStart, msg.dataStart, <usize>msg.length)
   return msg.length
+}
+
+/** A colbin message at inPtr -> the inspector's JSON at outPtr. */
+export function inspectMsg(len: i32): i32 {
+  const buf = new Uint8Array(len)
+  memory.copy(buf.dataStart, IN.dataStart, <usize>len)
+  lastDiag.reset()
+  const text = inspectMessage(buf, lastDiag)
+  if (text == null) return -lastDiag.code
+  memory.copy(OUT.dataStart, text.dataStart, <usize>text.length)
+  return text.length
 }

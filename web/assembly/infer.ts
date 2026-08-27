@@ -128,12 +128,13 @@ export class Inferrer {
         }
       }
       if (!allObjects) {
-        this.diag.fail(D_UNSUPPORTED, unchecked(doc.off[root]),
-          '', 'value mode (an array that is not an array of objects) is not implemented yet')
-        return null
+        // An array of anything else is one value, not a batch of records.
+        schema.shape = SHAPE_VALUE
+        schema.records.push(root)
+      } else {
+        schema.shape = SHAPE_RECORDS
+        for (let i = 0; i < n; i++) schema.records.push(doc.childAt(root, i))
       }
-      schema.shape = SHAPE_RECORDS
-      for (let i = 0; i < n; i++) schema.records.push(doc.childAt(root, i))
     } else if (kind == K_OBJECT) {
       schema.shape = SHAPE_SINGLE
       schema.records.push(root)
@@ -141,9 +142,10 @@ export class Inferrer {
       this.diag.fail(D_CONFLICT, unchecked(doc.off[root]), '', 'null has no shape to infer')
       return null
     } else {
-      this.diag.fail(D_UNSUPPORTED, unchecked(doc.off[root]),
-        '', 'value mode (a top-level value that is not an object or an array of objects) is not implemented yet')
-      return null
+      // A bare scalar. One value, one column, and framing with nothing to
+      // amortise it over -- which is a case worth being able to show.
+      schema.shape = SHAPE_VALUE
+      schema.records.push(root)
     }
 
     // Pass one: observe every record without deciding anything.

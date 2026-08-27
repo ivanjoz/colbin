@@ -8,7 +8,7 @@ import { load, vectors, hex } from './harness.mjs'
 const wasm = await load()
 const cases = await vectors('messages.json')
 
-const IMPLEMENTED = new Set(['scalar', 'float', 'nested', 'array', 'nullable'])
+const IMPLEMENTED = new Set(['scalar', 'float', 'nested', 'array', 'nullable', 'value'])
 
 function out(len) {
   return Buffer.from(wasm.u8.subarray(wasm.exports.outPtr(), wasm.exports.outPtr() + len)).toString()

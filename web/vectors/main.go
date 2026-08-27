@@ -769,6 +769,18 @@ func messageCases() []messageCase {
 		{"array", "empty-arrays", `[{"v":[]},{"v":[]}]`},
 		{"array", "nested-arrays", `[{"v":[[1,2],[3]]}]`},
 
+		// value mode: a top level that is not a batch of records
+		{"value", "scalar-array", `[1,2,3,4,5]`},
+		{"value", "string-array", `["a","bb","ccc"]`},
+		{"value", "bool-array", `[true,false,true]`},
+		{"value", "float-array", `[1.5,2.5]`},
+		{"value", "array-of-arrays", `[[1,2],[3]]`},
+		{"value", "bare-int", `42`},
+		{"value", "bare-string", `"hello"`},
+		{"value", "bare-bool", `true`},
+		{"value", "bare-float", `2.5`},
+		{"value", "big-scalar-array", `[100000,100007,100014,100021,100028]`},
+
 		// nullable
 		{"nullable", "explicit-null", `[{"a":1},{"a":null}]`},
 		{"nullable", "missing-key", `[{"a":1,"b":2},{"a":3}]`},

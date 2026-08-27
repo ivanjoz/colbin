@@ -449,6 +449,38 @@ go test ./comparison -run '^$' -bench . -benchmem -count=5
 See [`comparison/README.md`](comparison/README.md) for the model coverage,
 current snapshot, and Protobuf regeneration instructions.
 
+## In the browser
+
+[`web/`](web/) holds an AssemblyScript port of the codec, compiled to
+WebAssembly, and a page that runs it: paste JSON, and it derives a schema,
+encodes it, and shows which column cost what.
+
+It takes JSON with **no schema attached** — no Go type, no `.proto` — derives one
+from the data, and enforces it: a field whose type changes between records is
+refused with the record and the field named, rather than widened or dropped into
+an `any` column. The output is JSON mode, so `DecodeJSON` above reads it.
+
+```
+web/assembly/   the port: varint, packed5, the columnar body, the schema section
+web/vectors/    Go: the golden frames and the reflect.StructOf oracle
+web/src/        the page
+```
+
+The port is checked against this package at three levels, not against itself:
+every `varint` and `packed5` frame byte for byte, every whole message against
+`MarshalJSON`, and a cross round trip through `DecodeJSON`. Run it with
+`bun run test` in `web/`.
+
+Two differences from the Go implementation are deliberate. The decoder
+bounds-checks every count and offset rather than trusting them, because
+AssemblyScript has neither the unconditional bounds check nor the `recover` that
+turns a bad index here into an error. And decoding preserves the key order the
+message carries, where `DecodeJSON` sorts alphabetically — so encode then decode
+returns the caller's own key order.
+
+Not yet deployed; see [`web/PLAN.md`](web/PLAN.md) for the design and what is
+still open.
+
 ## Files
 
 | file | role |
@@ -463,6 +495,7 @@ current snapshot, and Protobuf regeneration instructions.
 | `varint/` | adaptive integer-array codec used by integer and length columns |
 | `packed5/` | self-delimiting string codec used by every string path |
 | `comparison/` | 21-model Colbin, Protobuf, JSON v2, and CBOR comparison corpus |
+| `web/` | the AssemblyScript port, its vectors, and the browser playground |
 | `colbin_test.go` | public API integration test |
 
 ## Limitations
