@@ -106,7 +106,7 @@
      size it bought, and it saves the pane a header of its own. */
   .timing {
     margin-left: auto;
-    font-size: 12px;
+    font-size: 13px;
     font-variant-numeric: tabular-nums;
   }
 
@@ -118,12 +118,12 @@
   }
 
   .label {
-    font-size: 12px;
+    font-size: 14px;
     color: var(--dim);
   }
 
   .track {
-    height: 10px;
+    height: 12px;
     background: #12141c;
     border-radius: 5px;
     overflow: hidden;
@@ -146,7 +146,8 @@
 
   .value {
     text-align: right;
-    font-size: 12px;
+    font-size: 13px;
+    font-family: var(--mono);
     font-variant-numeric: tabular-nums;
     color: var(--dim);
   }
@@ -157,14 +158,14 @@
     justify-content: space-between;
     flex-wrap: wrap;
     gap: 4px 12px;
-    margin-top: 4px;
+    margin-top: 8px;
   }
 
   .facts {
     display: flex;
     flex-wrap: wrap;
     gap: 4px 14px;
-    font-size: 12px;
+    font-size: 14px;
     color: var(--dim);
     min-width: 0;
   }
@@ -174,7 +175,7 @@
     align-items: center;
     gap: 6px;
     flex: none;
-    font-size: 12px;
+    font-size: 14px;
     color: var(--dim);
     cursor: pointer;
   }

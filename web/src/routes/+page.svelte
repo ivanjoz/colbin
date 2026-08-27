@@ -245,7 +245,7 @@
   .upload span {
     display: block;
     text-align: center;
-    font-size: 12px;
+    font-size: 14px;
     padding: 7px;
     border: 1px dashed var(--line);
     border-radius: 5px;
@@ -288,7 +288,7 @@
   }
 
   .meta {
-    font-size: 12px;
+    font-size: 14px;
     color: var(--dim);
     font-variant-numeric: tabular-nums;
   }
@@ -303,7 +303,7 @@
     border-radius: 6px;
     padding: 10px;
     font-family: var(--mono);
-    font-size: 12px;
+    font-size: 14px;
     line-height: 1.6;
   }
 
@@ -312,7 +312,7 @@
   }
 
   .note {
-    font-size: 12px;
+    font-size: 14px;
     color: var(--dim);
     line-height: 1.55;
     margin: 8px 0 0;
@@ -327,6 +327,7 @@
      to eight bytes a line rather than scrolling sideways. */
   .panels {
     display: grid;
+    margin-top: 22px;
     grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
     gap: 6px 18px;
     align-items: start;
@@ -341,13 +342,13 @@
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--dim);
-    margin: 18px 0 2px;
+    margin: 0 0 4px;
   }
 
   .sub {
     font-size: 11px;
     color: var(--dim);
-    margin: 0 0 6px;
+    margin: 0 0 10px;
     line-height: 1.5;
   }
 
@@ -361,8 +362,8 @@
 
   .download {
     font: inherit;
-    font-size: 12px;
-    padding: 3px 10px;
+    font-size: 14px;
+    padding: 6px 12px;
     border-radius: 4px;
     border: 0;
     background: var(--accent);

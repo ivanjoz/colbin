@@ -73,7 +73,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    height: 24px;
+    height: 28px;
     padding: 0 8px;
     border: 1px solid var(--line);
     border-radius: 4px;
