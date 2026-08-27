@@ -26,6 +26,15 @@ body {
   font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
+/* The header and the shell divide the viewport between them, rather than the
+   shell guessing the header's height — the guess was two pixels short, which
+   is enough for a scrollbar the page has no use for. */
+body {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
 a {
   color: var(--accent);
 }

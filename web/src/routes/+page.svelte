@@ -14,7 +14,6 @@
 
   let message = $state<Uint8Array | undefined>()
   let report = $state<Report | undefined>()
-  let decoded = $state('')
   let error = $state<Diagnostic | undefined>()
   let warnings = $state<string[]>([])
   let jsonGzip = $state(0)
@@ -23,7 +22,6 @@
 
   let hovered = $state<Column | undefined>()
   let showGzip = $state(false)
-  let showDecoded = $state(false)
 
   // Compared against the compact form: the examples are pretty-printed to be
   // readable, and measuring against that would flatter colbin by two or three
@@ -57,7 +55,6 @@
       warnings = []
       message = undefined
       report = undefined
-      decoded = ''
       status = 'failed'
       return
     }
@@ -66,9 +63,8 @@
     warnings = encoded.warnings
     message = encoded.value
 
-    const [inspected, back] = await Promise.all([inspect(encoded.value), decode(encoded.value)])
+    const inspected = await inspect(encoded.value)
     report = inspected.ok ? inspected.value : undefined
-    decoded = back.ok ? back.value : ''
     status = 'ready'
     ;[jsonGzip, messageGzip] = await Promise.all([gzipSize(source), gzipSize(encoded.value)])
   }
@@ -169,26 +165,14 @@
               <ColumnTree columns={report.columns} total={report.totalBytes} bind:hovered />
             </div>
             <div class="panel">
-              <h3>Bytes</h3>
+              <div class="panel-head">
+                <h3>Bytes</h3>
+                <button class="download" onclick={download}>Download .cbj</button>
+              </div>
               <p class="sub">The version byte and schema are dimmed.</p>
               <HexView data={message} schemaBytes={report.schemaBytes} {hovered} />
             </div>
           </div>
-
-          <div class="actions">
-            <button onclick={download}>Download .cbj</button>
-            <button class="ghost" onclick={() => (showDecoded = !showDecoded)}>
-              {showDecoded ? 'Hide' : 'Show'} decoded JSON
-            </button>
-          </div>
-
-          {#if showDecoded}
-            <p class="sub">
-              This is the message read back. Keys keep the order they were first seen in; absent keys
-              and empty arrays come back as null, because a dense column cannot tell them apart.
-            </p>
-            <pre class="decoded">{decoded}</pre>
-          {/if}
         {/if}
       </div>
     </section>
@@ -199,7 +183,8 @@
   .shell {
     display: grid;
     grid-template-columns: 230px 1fr;
-    height: calc(100vh - 43px);
+    flex: 1;
+    min-height: 0;
   }
 
   aside {
@@ -278,12 +263,16 @@
     /* The message side carries two panels now, so it gets the wider share. */
     grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
     min-width: 0;
+    min-height: 0;
   }
 
   section {
     display: flex;
     flex-direction: column;
     min-width: 0;
+    /* Without this a grid item is at least as tall as its content, and the
+       panes push the shell past the viewport instead of scrolling inside. */
+    min-height: 0;
     padding: 12px;
   }
 
@@ -306,6 +295,7 @@
 
   textarea {
     flex: 1;
+    min-height: 60px;
     resize: none;
     background: var(--panel-2);
     color: var(--text);
@@ -361,39 +351,23 @@
     line-height: 1.5;
   }
 
-  .actions {
+  /* The download sits on the Bytes heading: it is the bytes, in a file. */
+  .panel-head {
     display: flex;
+    align-items: baseline;
+    justify-content: space-between;
     gap: 8px;
-    margin-top: 16px;
   }
 
-  .actions button {
+  .download {
     font: inherit;
-    font-size: 13px;
-    padding: 7px 12px;
-    border-radius: 5px;
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 4px;
     border: 0;
     background: var(--accent);
     color: #0f1117;
     cursor: pointer;
-  }
-
-  .actions button.ghost {
-    background: none;
-    border: 1px solid var(--line);
-    color: var(--text);
-  }
-
-  .decoded {
-    background: var(--panel-2);
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    padding: 10px;
-    font-size: 12px;
-    max-height: 220px;
-    overflow: auto;
-    white-space: pre-wrap;
-    word-break: break-all;
-    margin: 0;
+    white-space: nowrap;
   }
 </style>

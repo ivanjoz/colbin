@@ -14,6 +14,7 @@
 
 <style>
   header {
+    flex: none;
     display: flex;
     align-items: baseline;
     gap: 12px;

@@ -108,18 +108,18 @@ const click = (text) =>
       ".find(b => b.textContent.includes(" + JSON.stringify(text) + ")).click()"
   )
 
-const showDecoded = () =>
-  evaluate(
-    "Array.from(document.querySelectorAll('.actions button'))" +
-      ".find(b => /decoded/i.test(b.textContent))?.click()"
-  )
-
-const decodedText = () => evaluate("document.querySelector('.decoded')?.textContent ?? ''")
-
 try {
   await send('Runtime.enable')
   await send('Log.enable')
   await send('Page.enable')
+  // A fixed viewport, so the layout checks below mean the same thing on every
+  // machine that runs them.
+  await send('Emulation.setDeviceMetricsOverride', {
+    width: 1280,
+    height: 800,
+    deviceScaleFactor: 1,
+    mobile: false,
+  })
   await send('Page.navigate', { url: origin })
   await wait(2500)
 
@@ -164,22 +164,6 @@ try {
     (await evaluate("document.querySelector('.headline').classList.contains('is-loss')")) === true
   )
 
-  await click('Nulls')
-  await wait(600)
-  await showDecoded()
-  await wait(300)
-  const nulls = (await decodedText()).replace(/\s/g, '')
-  check('an absent key comes back as null', /"id":3,"note":null/.test(nulls), nulls)
-
-  await click('2^53')
-  await wait(600)
-  const big = await decodedText()
-  check(
-    'an integer past 2^53 survives the round trip',
-    big.includes('7295013456321098765'),
-    big.slice(0, 140)
-  )
-
   await click('Metric points')
   await wait(700)
   await evaluate(
@@ -219,6 +203,23 @@ try {
   check('gzip replaces them rather than adding', gz.bars === 2, 'got ' + gz.bars)
   check('gzip relabels the bars', gz.labels.every((l) => /gz$/.test(l)), gz.labels.join(','))
   check('gzip restates the ratio', gz.ratio !== raw.ratio, raw.ratio + ' -> ' + gz.ratio)
+
+  // The one control the message pane has left.
+  check(
+    'the download button is on the Bytes heading',
+    (await evaluate("!!document.querySelector('.panel-head .download')")) === true
+  )
+
+  // The shell fills the viewport exactly: no scrollbar on the page itself, and
+  // nothing clipped behind one that is not there.
+  const overflow = await evaluate(
+    '(() => ({' +
+      'w: document.documentElement.scrollWidth, h: document.body.scrollHeight,' +
+      'winW: window.innerWidth, winH: window.innerHeight' +
+      '}))()'
+  )
+  check('the page does not scroll sideways', overflow.w <= overflow.winW, JSON.stringify(overflow))
+  check('the page does not scroll down', overflow.h <= overflow.winH, JSON.stringify(overflow))
 
   check('no console errors', consoleErrors.length === 0, consoleErrors.join(' | '))
 } finally {
