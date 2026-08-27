@@ -88,7 +88,7 @@
     top: 0;
     bottom: 0;
     min-width: 2px;
-    background: var(--accent);
+    background: #3b6aae;
     opacity: 0.55;
   }
 
@@ -107,7 +107,7 @@
 
   .name {
     font-family: var(--mono);
-    font-size: 12px;
+    font-size: 16px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
