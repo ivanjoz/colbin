@@ -17,6 +17,32 @@ function attempt(bytes) {
   return wasm.exports.decodeMsg(bytes.length)
 }
 
+/**
+ * Byte positions to corrupt in a message.
+ *
+ * Exhaustive up to a budget, sampled above it. A 25 KB vector has 75 000
+ * single-byte mutations on its own, which turned this file from half a second
+ * into minutes; the guarantee being tested is "corrupt input yields a
+ * diagnostic", and spreading the same number of probes over the whole corpus
+ * tests it better than exhausting one member of it.
+ *
+ * The sample is deliberately front- and back-loaded: the version byte, the
+ * schema section and the first column headers are where a mutation reaches the
+ * counts and offsets that PLAN.md 4.3 is about, and the tail is where
+ * truncation-shaped failures live.
+ */
+const PROBE_BUDGET = 192
+
+function probePositions(length) {
+  if (length <= PROBE_BUDGET) return Array.from({ length }, (_, i) => i)
+  const hits = new Set()
+  for (let i = 0; i < 64 && i < length; i++) hits.add(i)
+  for (let i = Math.max(0, length - 16); i < length; i++) hits.add(i)
+  const stride = Math.max(1, Math.floor(length / (PROBE_BUDGET - hits.size)))
+  for (let i = 0; i < length; i += stride) hits.add(i)
+  return [...hits].sort((a, b) => a - b)
+}
+
 // Deterministic, so a failure is reproducible from the seed alone.
 function rng(seed) {
   let s = seed >>> 0
@@ -26,12 +52,15 @@ function rng(seed) {
   }
 }
 
-test('every single-byte corruption of every vector is survivable', () => {
+test('single-byte corruption is survivable', () => {
   let errors = 0
   let decoded = 0
+  let exhaustive = 0
   for (const c of cases) {
     const original = Uint8Array.from(Buffer.from(c.message, 'hex'))
-    for (let i = 0; i < original.length; i++) {
+    const positions = probePositions(original.length)
+    if (positions.length === original.length) exhaustive++
+    for (const i of positions) {
       for (const mask of [0x01, 0x80, 0xff]) {
         const mutated = Uint8Array.from(original)
         mutated[i] ^= mask
@@ -42,13 +71,14 @@ test('every single-byte corruption of every vector is survivable', () => {
     }
   }
   // Both outcomes are legitimate; what matters is that neither threw.
-  assert.ok(errors + decoded > 3000, `only ${errors + decoded} mutations ran`)
+  assert.ok(errors + decoded > 5000, `only ${errors + decoded} mutations ran`)
+  assert.ok(exhaustive >= cases.length - 4, `${exhaustive}/${cases.length} vectors covered exhaustively`)
 })
 
-test('truncation at every length is survivable', () => {
+test('truncation is survivable', () => {
   for (const c of cases) {
     const original = Uint8Array.from(Buffer.from(c.message, 'hex'))
-    for (let len = 0; len < original.length; len++) {
+    for (const len of probePositions(original.length)) {
       attempt(original.subarray(0, len))
     }
   }

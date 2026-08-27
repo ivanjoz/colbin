@@ -127,7 +127,7 @@ try {
     "Array.from(document.querySelectorAll('aside button')).map(b => b.textContent.trim())"
   )
   console.log('Driving ' + names.length + ' examples')
-  check('every example is listed', names.length === 10, 'got ' + names.length)
+  check('every example is listed', names.length === 11, 'got ' + names.length)
 
   for (let i = 0; i < names.length; i++) {
     await evaluate("document.querySelectorAll('aside button')[" + i + '].click()')

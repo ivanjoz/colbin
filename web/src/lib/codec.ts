@@ -80,6 +80,15 @@ function instantiate(module: WebAssembly.Module): Exports {
   return instance.exports as unknown as Exports
 }
 
+/**
+ * A copy of the module's output.
+ *
+ * The view is built here rather than kept anywhere, and that is load-bearing: a
+ * call that grows the module's memory detaches every existing ArrayBuffer view,
+ * so a cached one throws on next use. It only bites above the initial memory
+ * size, which is why an example with a thousand records is the one that would
+ * find it.
+ */
 function bytesOf(e: Exports, length: number): Uint8Array {
   const at = e.resultPtr()
   return new Uint8Array(e.memory.buffer).slice(at, at + length)
@@ -92,6 +101,8 @@ function readError(e: Exports): Diagnostic {
 }
 
 function write(e: Exports, input: Uint8Array): number {
+  // alloc first, then take the view: allocating may grow memory, which detaches
+  // any view taken before it.
   const ptr = e.alloc(input.length)
   new Uint8Array(e.memory.buffer).set(input, ptr)
   return input.length

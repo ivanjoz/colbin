@@ -38,7 +38,69 @@ function metrics(n: number): string {
   return JSON.stringify(rows, null, 2)
 }
 
+
+/**
+ * A client table: 1000 records, nine fields.
+ *
+ * This is the shape the format is built for, and each column wins differently.
+ * `id` and `updated` climb steadily, so the varint codec stores the step rather
+ * than the value. `categoryID` and `age` are small integers with a narrow
+ * spread. `name`, `city` and `email` repeat their vocabulary, which is what
+ * packed5 is for, and `telephone` is digits, which it packs ten to a token.
+ *
+ * Generated from a fixed seed so the example is the same on every load, and so
+ * the same document can be checked byte for byte against Go.
+ */
+function clients(n: number): string {
+  // A small LCG rather than Math.random: an example that changes on every
+  // reload cannot be compared against anything.
+  let seed = 20260826
+  const next = () => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0
+    return seed
+  }
+  const pick = <T>(list: T[]): T => list[next() % list.length]
+
+  const first = ['María', 'José', 'Ana', 'Luis', 'Carmen', 'Jorge', 'Rosa', 'Miguel', 'Elena', 'Carlos']
+  const last = ['García', 'Rodríguez', 'Fernández', 'Quispe', 'Mamani', 'Torres', 'Ramos', 'Flores', 'Díaz', 'Vargas']
+  const cities = ['Lima', 'Arequipa', 'Trujillo', 'Cusco', 'Piura', 'Chiclayo', 'Iquitos', 'Tacna']
+
+  // Records were updated over a fortnight, in roughly the order they were made.
+  let updated = 1756200000
+
+  const rows: string[] = []
+  for (let i = 0; i < n; i++) {
+    const nombre = `${pick(first)} ${pick(last)}`
+    const slug = nombre
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(' ', '.')
+    updated += next() % 1200
+    rows.push(
+      JSON.stringify({
+        id: 100000 + i,
+        categoryID: 1 + (next() % 8),
+        name: nombre,
+        telephone: `+51 9${String(10000000 + (next() % 89999999))}`,
+        email: `${slug}${i}@example.pe`,
+        city: pick(cities),
+        age: 18 + (next() % 62),
+        active: next() % 5 !== 0,
+        updated,
+      })
+    )
+  }
+  return `[\n  ${rows.join(',\n  ')}\n]`
+}
+
 export const examples: Example[] = [
+  {
+    key: 'clients',
+    title: 'Clients, 1000 records',
+    note: 'Nine fields over a thousand rows, and every column wins for a different reason. id and updated climb steadily, so the varint codec stores the step instead of the value; categoryID and age are small integers; name, city and email repeat their vocabulary, which is what packed5 is for. Hover a column to see where its bytes went.',
+    json: clients(1000),
+  },
   {
     key: 'products',
     title: 'Products, 200 records',

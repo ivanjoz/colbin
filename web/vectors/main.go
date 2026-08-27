@@ -748,6 +748,7 @@ func messageCases() []messageCase {
 		{"scalar", "many-fields", `[{"a":1,"b":2,"c":3,"d":4,"e":5,"f":6,"g":7,"h":8,"i":9,"j":10}]`},
 		{"scalar", "zero-values", `[{"i":0,"s":"","b":false}]`},
 		{"scalar", "products-20", productsJSON(20)},
+		{"scalar", "clients-1000", clientsJSON(1000)},
 		{"scalar", "metrics-50", metricsJSON(50)},
 
 		// float
@@ -827,4 +828,44 @@ func metricsJSON(n int) string {
 		parts[i] = fmt.Sprintf(`{"t":%d,"host":"node-%02d","up":%v}`, 1756200000+i*15, i%12, i%7 != 0)
 	}
 	return "[" + strings.Join(parts, ",") + "]"
+}
+
+// clientsJSON mirrors the clients example on the page, down to the seed, so the
+// document a reader is shown is the same one checked byte for byte against
+// MarshalJSON here.
+func clientsJSON(n int) string {
+	seed := uint32(20260826)
+	next := func() uint32 {
+		seed = seed*1664525 + 1013904223
+		return seed
+	}
+	pick := func(list []string) string { return list[int(next())%len(list)] }
+
+	first := []string{"María", "José", "Ana", "Luis", "Carmen", "Jorge", "Rosa", "Miguel", "Elena", "Carlos"}
+	last := []string{"García", "Rodríguez", "Fernández", "Quispe", "Mamani", "Torres", "Ramos", "Flores", "Díaz", "Vargas"}
+	cities := []string{"Lima", "Arequipa", "Trujillo", "Cusco", "Piura", "Chiclayo", "Iquitos", "Tacna"}
+
+	// Accents are stripped for the email local part, the same way the page does
+	// it with NFD normalisation.
+	deaccent := strings.NewReplacer(
+		"á", "a", "é", "e", "í", "i", "ó", "o", "ú", "u", "ñ", "n",
+		"Á", "a", "É", "e", "Í", "i", "Ó", "o", "Ú", "u", "Ñ", "n",
+	)
+
+	updated := 1756200000
+	rows := make([]string, n)
+	for i := 0; i < n; i++ {
+		name := pick(first) + " " + pick(last)
+		slug := strings.Replace(deaccent.Replace(strings.ToLower(name)), " ", ".", 1)
+		updated += int(next()) % 1200
+		categoryID := 1 + int(next())%8
+		telephone := fmt.Sprintf("+51 9%d", 10000000+int(next())%89999999)
+		city := pick(cities)
+		age := 18 + int(next())%62
+		active := int(next())%5 != 0
+		rows[i] = fmt.Sprintf(
+			`{"id":%d,"categoryID":%d,"name":%q,"telephone":%q,"email":%q,"city":%q,"age":%d,"active":%v,"updated":%d}`,
+			100000+i, categoryID, name, telephone, slug+strconv.Itoa(i)+"@example.pe", city, age, active, updated)
+	}
+	return "[\n  " + strings.Join(rows, ",\n  ") + "\n]"
 }
