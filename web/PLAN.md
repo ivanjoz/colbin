@@ -659,7 +659,36 @@ rounded — and this runs for the rest.
 Checked against Go over 527 number vectors: the hand-picked boundaries, 450
 random float64s rendered three ways each, and 40 subnormals. All bit-identical.
 
-### A.6 Encoding cost, for context
+### A.6 What the schemaless path costs, and what the self-check costs
+
+Measured after the port, on 1000 product records (107 KB of JSON), best of 12
+runs of 20:
+
+| | time |
+|---|---:|
+| the module: parse + infer + encode | **6.07 ms** |
+| the module, with the §4.5 self-check | 11.65 ms |
+| the Go oracle: the same task, reflection-based | 5.31 ms |
+| Go `MarshalJSON` on a typed struct, no parsing, no inference | 0.17 ms |
+
+Two things worth reading off this.
+
+**The columnar encode is not the cost; being schemaless is.** Go does the same
+end-to-end job in 5.31 ms — within 15% of the WebAssembly module — while Go's
+typed path, which is handed a struct and skips both parsing and inference, is
+35x faster than either. So the module is not slow *because it is
+AssemblyScript*; the parse and the two inference passes dominate, and they cost
+what they cost in Go too. That also means optimising the AS columnar writer
+would buy very little until the tree and the observation pass are cheaper —
+which is what §12 says to measure before touching.
+
+**The self-check costs 92%**, matching the "roughly one decode, so call it 2x"
+the §4.5 estimate assumed. On by default is therefore a real price, and a
+defensible one: it is the difference between believing the encoder and checking
+it, and the very first thing it caught was a genuine bug (a duplicate key
+encoding its first value while everything downstream expected its last).
+
+### A.7 Encoding cost, for context
 
 Not a design input, recorded because it will be asked. 1000 records:
 `colbin.MarshalJSON` 168 µs against `json.Marshal` 330 µs — half the time and a

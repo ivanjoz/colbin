@@ -10,10 +10,11 @@
 // lastError() to hand back.
 
 import { Diag, lineOf } from './diag'
-import { decodeMessage } from './decode'
+import { decodeMessage, decodeValues } from './decode'
 import { encodeMessage } from './encode'
 import { inferSchema } from './infer'
 import { parseJSON } from './json'
+import { Verifier } from './verify'
 import { Writer } from './bytes'
 
 /** Held in a global so the collector cannot reclaim it between calls. */
@@ -36,8 +37,13 @@ export function resultPtr(): usize {
 /**
  * JSON to a colbin JSON-mode message.
  * Returns the message length, or -1 with a diagnostic in lastError().
+ *
+ * verify != 0 makes the encoder read its own output back and compare it against
+ * the input before returning, which is what turns "a decodable message or an
+ * error, never anything else" from an argument into a check (PLAN.md §4.5). It
+ * costs about one decode. Pass 0 only after measuring and deciding.
  */
-export function encode(len: i32): i32 {
+export function encode(len: i32, verify: i32): i32 {
   diag.reset()
   const src = input.subarray(0, len)
   source = src
@@ -48,6 +54,12 @@ export function encode(len: i32): i32 {
   if (schema == null) return -1
   const message = encodeMessage(doc, schema, diag)
   if (message == null) return -1
+
+  if (verify != 0) {
+    const decoded = decodeValues(message!, diag)
+    if (decoded == null) return -1
+    if (!new Verifier(doc!, diag).check(schema!.records, decoded!)) return -1
+  }
 
   result = message
   return message.length

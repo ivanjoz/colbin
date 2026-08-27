@@ -84,17 +84,17 @@ class Section {
 
 // Decoded values. A tagged union, because a column of one type can still hold a
 // nested shape and JSON needs the whole record before it can render a row.
-const V_NULL: u8 = 0
-const V_BOOL: u8 = 1
-const V_INT: u8 = 2
-const V_UINT: u8 = 3
-const V_FLOAT: u8 = 4
-const V_STRING: u8 = 5
-const V_BYTES: u8 = 6
-const V_ARRAY: u8 = 7
-const V_OBJECT: u8 = 8
+export const V_NULL: u8 = 0
+export const V_BOOL: u8 = 1
+export const V_INT: u8 = 2
+export const V_UINT: u8 = 3
+export const V_FLOAT: u8 = 4
+export const V_STRING: u8 = 5
+export const V_BYTES: u8 = 6
+export const V_ARRAY: u8 = 7
+export const V_OBJECT: u8 = 8
 
-class Val {
+export class Val {
   tag: u8 = V_NULL
   num: i64 = 0
   bytes: Uint8Array | null = null
@@ -829,6 +829,29 @@ function writeValue(w: Writer, v: Val): void {
   writeScalar(w, v)
 }
 
+/** A decoded message: the records, and whether it renders as a lone object. */
+export class Decoded {
+  rows: Array<Val> = []
+  single: bool = false
+}
+
+/** Reads a message into its values, without rendering anything. */
+export function decodeValues(buf: Uint8Array, diag: Diag): Decoded | null {
+  const dec = new Decoder(buf, diag)
+  if (!dec.parseSection()) return null
+  const rows = dec.decodeBody()
+  if (rows == null) return null
+
+  const out = new Decoded()
+  out.rows = rows!
+  out.single = (dec.section.flags & SCH_SINGLE_STRUCT) != 0
+  if (out.single && out.rows.length != 1) {
+    dec.fail('a lone-struct message must carry exactly one record')
+    return null
+  }
+  return out
+}
+
 /**
  * A message to JSON text.
  *
@@ -838,23 +861,18 @@ function writeValue(w: Writer, v: Val): void {
  * the caller's own key order.
  */
 export function decodeMessage(buf: Uint8Array, diag: Diag): Uint8Array | null {
-  const dec = new Decoder(buf, diag)
-  if (!dec.parseSection()) return null
-  const rows = dec.decodeBody()
-  if (rows == null) return null
+  const decoded = decodeValues(buf, diag)
+  if (decoded == null) return null
 
   const w = new Writer(256)
-  if ((dec.section.flags & SCH_SINGLE_STRUCT) != 0) {
-    if (rows!.length != 1) {
-      dec.fail('a lone-struct message must carry exactly one record')
-      return null
-    }
-    writeValue(w, unchecked(rows![0]))
+  const rows = decoded!.rows
+  if (decoded!.single) {
+    writeValue(w, unchecked(rows[0]))
   } else {
     w.writeByte(0x5b)
-    for (let i = 0; i < rows!.length; i++) {
+    for (let i = 0; i < rows.length; i++) {
       if (i > 0) w.writeByte(0x2c)
-      writeValue(w, unchecked(rows![i]))
+      writeValue(w, unchecked(rows[i]))
     }
     w.writeByte(0x5d)
   }

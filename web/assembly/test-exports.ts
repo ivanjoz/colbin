@@ -9,7 +9,8 @@ import { Diag, lineOf } from './diag'
 import { Doc, K_FLOAT, K_STRING, parseJSON } from './json'
 import { Schema, inferSchema } from './infer'
 import { encodeMessage } from './encode'
-import { decodeMessage } from './decode'
+import { decodeMessage, decodeValues } from './decode'
+import { Verifier } from './verify'
 import { Field, Type, assignFieldIDs } from './schema'
 
 const IN = new Uint8Array(1 << 20)
@@ -330,4 +331,24 @@ export function decodeMsg(len: i32): i32 {
   if (text == null) return -lastDiag.code
   memory.copy(OUT.dataStart, text.dataStart, <usize>text.length)
   return text.length
+}
+
+/** Encode with the self-check on, so the tests exercise the path the ABI uses. */
+export function encodeVerified(len: i32): i32 {
+  const src = new Uint8Array(len)
+  memory.copy(src.dataStart, IN.dataStart, <usize>len)
+  lastDiag.reset()
+  lastSrc = src
+  const doc = parseJSON(src, lastDiag)
+  if (doc == null) return -lastDiag.code
+  lastDoc = doc
+  const schema = inferSchema(doc, lastDiag)
+  if (schema == null) return -lastDiag.code
+  const msg = encodeMessage(doc, schema, lastDiag)
+  if (msg == null) return -lastDiag.code
+  const decoded = decodeValues(msg, lastDiag)
+  if (decoded == null) return -lastDiag.code
+  if (!new Verifier(doc, lastDiag).check(schema.records, decoded)) return -lastDiag.code
+  memory.copy(OUT.dataStart, msg.dataStart, <usize>msg.length)
+  return msg.length
 }

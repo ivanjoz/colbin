@@ -213,3 +213,22 @@ test('field order is first-seen across records, not per record', () => {
   assert.equal(fieldName(p, d, 0), 'b')
   assert.equal(fieldName(p, d, 1), 'a')
 })
+
+// A duplicate key keeps its last value, as JSON.parse does, and the scanner
+// resolves it before inference sees the object - so a key whose type changes
+// within one object is not a conflict, it is one value.
+test('a duplicate key keeps its last value, and its last type', () => {
+  assert.equal(infer('[{"a":1,"a":"x"}]'), SHAPE.RECORDS)
+  const [p, d] = P()
+  assert.equal(wasm.exports.schemaFieldCount(p, d), 1)
+  const [pa, da] = P(0)
+  assert.equal(wasm.exports.schemaFt(pa, da), FT.STRING)
+})
+
+test('a duplicate key keeps the first position', () => {
+  assert.equal(infer('[{"a":1,"b":2,"a":3}]'), SHAPE.RECORDS)
+  const [p, d] = P()
+  assert.equal(wasm.exports.schemaFieldCount(p, d), 2)
+  assert.equal(fieldName(p, d, 0), 'a')
+  assert.equal(fieldName(p, d, 1), 'b')
+})

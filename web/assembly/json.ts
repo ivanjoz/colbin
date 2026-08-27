@@ -33,6 +33,13 @@ export const MAX_INPUT: i32 = 64 * 1024 * 1024
  */
 export const MAX_SIGNIFICAND: i32 = 800
 
+/**
+ * Keys scanned when resolving a duplicate. Every object becomes a struct, and a
+ * struct may hold at most 254 fields, so an object wider than this is refused
+ * before its duplicates could matter.
+ */
+const DEDUP_SCAN_LIMIT: i32 = 512
+
 export class Doc {
   src: Uint8Array
   kind: Array<u8> = []
@@ -202,6 +209,7 @@ export class Parser {
     this.pos++ // {
     // Children are appended to shared arrays, so a nested value would interleave
     // with ours. They are gathered locally and copied in on the way out.
+    const out = this.doc.text
     const keysA: Array<i32> = []
     const keysB: Array<i32> = []
     const kids: Array<i32> = []
@@ -233,9 +241,33 @@ export class Parser {
 
       const v = this.value()
       if (!this.diag.ok) return -1
-      keysA.push(keyAt)
-      keysB.push(keyLen)
-      kids.push(v)
+
+      // A duplicate key keeps its last value, as JSON.parse does. Resolving it
+      // here rather than in every consumer is what keeps the rule in one place:
+      // inference would otherwise see both values and call a changed type a
+      // conflict, and the encoder would write whichever it happened to find
+      // first. The scan is capped because any object this wide is refused by
+      // the 254-field limit before it can be encoded, so its duplicate
+      // semantics never reach the wire.
+      let replaced = false
+      if (kids.length <= DEDUP_SCAN_LIMIT) {
+        for (let k = 0; k < kids.length; k++) {
+          if (unchecked(keysB[k]) != keyLen) continue
+          if (memory.compare(
+                out.buf.dataStart + <usize>unchecked(keysA[k]),
+                out.buf.dataStart + <usize>keyAt,
+                <usize>keyLen) == 0) {
+            unchecked((kids[k] = v))
+            replaced = true
+            break
+          }
+        }
+      }
+      if (!replaced) {
+        keysA.push(keyAt)
+        keysB.push(keyLen)
+        kids.push(v)
+      }
 
       this.skipSpace()
       const c = this.peek()

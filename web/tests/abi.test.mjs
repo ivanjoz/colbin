@@ -29,7 +29,7 @@ function instantiate() {
       const src = Buffer.from(text, 'utf8')
       const ptr = e.alloc(src.length)
       new Uint8Array(e.memory.buffer).set(src, Number(ptr))
-      const len = e.encode(src.length)
+      const len = e.encode(src.length, 1)
       if (len < 0) {
         const errLen = e.lastError()
         const at = Number(e.resultPtr())
