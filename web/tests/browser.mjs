@@ -190,10 +190,21 @@ try {
   const hover = await evaluate("document.querySelectorAll('.hex .cell.hit').length")
   check('hovering a column highlights its bytes', hover > 0, 'highlighted ' + hover)
 
-  // The gzip toggle swaps what the two bars measure; it must not stack a
-  // second pair, which is what made the panel tall enough to scroll.
   await click('Clients')
   await wait(1200)
+
+  // Side by side, the hover has to reach a column whose bytes are far past the
+  // first kilobyte — otherwise the dump lights up nothing and reads as broken.
+  await evaluate(
+    "Array.from(document.querySelectorAll('.tree .row')).find(r => /email/.test(r.textContent))" +
+      ".dispatchEvent(new MouseEvent('mouseenter', {bubbles: true}))"
+  )
+  await wait(200)
+  const far = await evaluate("document.querySelectorAll('.hex .cell.hit').length")
+  check('hovering a column past the window moves it there', far > 0, 'highlighted ' + far)
+
+  // The gzip toggle swaps what the two bars measure; it must not stack a
+  // second pair, which is what made the panel tall enough to scroll.
   const barState =
     "(() => ({" +
     "bars: document.querySelectorAll('.bar-row').length," +

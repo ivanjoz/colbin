@@ -160,12 +160,20 @@
             </span>
           </SizeBars>
 
-          <h3>Columns</h3>
-          <p class="sub">Hover a column to find its bytes in the message.</p>
-          <ColumnTree columns={report.columns} total={report.totalBytes} bind:hovered />
-
-          <h3>Bytes</h3>
-          <HexView data={message} schemaBytes={report.schemaBytes} {hovered} />
+          <!-- Side by side, because the two halves are one gesture: hover a
+               column on the left, its bytes light up on the right. -->
+          <div class="panels">
+            <div class="panel">
+              <h3>Columns</h3>
+              <p class="sub">Hover a column to find its bytes in the message.</p>
+              <ColumnTree columns={report.columns} total={report.totalBytes} bind:hovered />
+            </div>
+            <div class="panel">
+              <h3>Bytes</h3>
+              <p class="sub">The version byte and schema are dimmed.</p>
+              <HexView data={message} schemaBytes={report.schemaBytes} {hovered} />
+            </div>
+          </div>
 
           <div class="actions">
             <button onclick={download}>Download .cbj</button>
@@ -267,7 +275,8 @@
 
   main {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    /* The message side carries two panels now, so it gets the wider share. */
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
     min-width: 0;
   }
 
@@ -322,6 +331,19 @@
   .scroll {
     overflow: auto;
     flex: 1;
+  }
+
+  /* Two columns when there is room, one when there is not — the hex dump drops
+     to eight bytes a line rather than scrolling sideways. */
+  .panels {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 6px 18px;
+    align-items: start;
+  }
+
+  .panel {
+    min-width: 0;
   }
 
   h3 {

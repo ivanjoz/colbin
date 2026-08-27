@@ -6,14 +6,33 @@
 
   // Enough to read, not so much that a 200-record message renders 30k spans.
   const LIMIT = 1024
-  const shown = $derived(data.subarray(0, LIMIT))
+
+  // The dump sits beside the column list, so how many bytes fit on a line is a
+  // property of the space it got, not a constant. 16 is the habit; 8 keeps it
+  // readable when the pane is halved rather than making it scroll sideways.
+  let width = $state(0)
+  const CELL = 17 // one "xx" cell at 12px in the mono face, measured
+  const GUTTER = 46 // the offset column, its margin, and a little slack
+  const fitted = $derived([32, 16, 8].find((n) => width - GUTTER >= n * CELL))
+  // Eight to a line is the floor; below that the offsets go rather than the
+  // bytes, since what this view is for is seeing a hovered column light up.
+  const perRow = $derived(fitted ?? 8)
+  const showOffsets = $derived(fitted !== undefined)
+
+  // The window follows the hover. A 50 KB message shows its first kilobyte by
+  // default, and every column past that would light up nothing at all — which,
+  // beside a list inviting the hover, would read as the highlight being broken.
+  const from = $derived(
+    !hovered || hovered.start < LIMIT ? 0 : Math.floor(hovered.start / perRow) * perRow
+  )
+  const shown = $derived(data.subarray(from, from + LIMIT))
 
   const rows = $derived(
-    Array.from({ length: Math.ceil(shown.length / 16) }, (_, r) => ({
-      offset: r * 16,
-      cells: Array.from(shown.subarray(r * 16, r * 16 + 16)).map((b, i) => ({
+    Array.from({ length: Math.ceil(shown.length / perRow) }, (_, r) => ({
+      offset: from + r * perRow,
+      cells: Array.from(shown.subarray(r * perRow, r * perRow + perRow)).map((b, i) => ({
         hex: b.toString(16).padStart(2, '0'),
-        at: r * 16 + i,
+        at: from + r * perRow + i,
       })),
     }))
   )
@@ -24,21 +43,38 @@
     if (at < schemaBytes) return 'schema'
     return ''
   }
+
+  // …and scrolls to it, since the box shows about twenty lines of the thousand
+  // a large message has.
+  let box: HTMLDivElement | undefined = $state()
+  $effect(() => {
+    if (!hovered || !box) return
+    const line = box.querySelector('.line') as HTMLElement | null
+    if (!line) return
+    const row = Math.floor((hovered.start - from) / perRow)
+    box.scrollTop = Math.max(0, row * line.offsetHeight - box.clientHeight / 3)
+  })
 </script>
 
-<div class="hex">
+<div class="hex" bind:this={box} bind:clientWidth={width}>
   {#each rows as row (row.offset)}
     <div class="line">
-      <span class="offset">{row.offset.toString(16).padStart(4, '0')}</span>
+      {#if showOffsets}
+        <span class="offset">{row.offset.toString(16).padStart(4, '0')}</span>
+      {/if}
       {#each row.cells as cell (cell.at)}
         <span class="cell {kind(cell.at)}">{cell.hex}</span>
       {/each}
     </div>
   {/each}
-  {#if data.length > LIMIT}
-    <p class="more">…{data.length - LIMIT} more bytes</p>
-  {/if}
 </div>
+{#if data.length > shown.length}
+  <!-- Outside the scroller, or it sits a thousand lines down where the reader
+       who needs it will never look. -->
+  <p class="more">
+    showing {shown.length} of {data.length} bytes, from {from.toString(16).padStart(4, '0')}
+  </p>
+{/if}
 
 <style>
   .hex {
@@ -46,7 +82,7 @@
     font-size: 12px;
     line-height: 1.6;
     overflow: auto;
-    max-height: 260px;
+    max-height: 300px;
   }
 
   .line {
@@ -82,6 +118,7 @@
   }
 
   .more {
+    font-size: 11px;
     color: var(--dim);
     margin: 6px 0 0;
   }
