@@ -119,7 +119,7 @@
 
   .bytes {
     flex: none;
-    font-size: 11px;
+    font-size: 12px;
     font-variant-numeric: tabular-nums;
     color: var(--dim);
   }

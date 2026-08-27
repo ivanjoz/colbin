@@ -110,7 +110,7 @@
       {/each}
     </ul>
     <p class="hint">
-      Every example is editable. The five at the bottom are cases colbin does badly on, or refuses.
+      Every example is editable. You can paste your own JSON payload.
     </p>
     <label class="upload">
       <input type="file" accept=".cbj,.cb,application/octet-stream" onchange={upload} />
@@ -149,9 +149,12 @@
             timing={status === 'working' ? 'encoding…' : `${encodeMs.toFixed(1)} ms`}
             bind:showGzip
           >
-            <span>{report.recordCount} records</span>
-            <span>{report.columns.length} columns</span>
-            <span title="The schema section: field names and the type facts the columns leave out. It describes the type, so it does not grow with the record count.">
+            <span class="fact">{report.recordCount} records</span>
+            <span class="fact">{report.columns.length} columns</span>
+            <span
+              class="fact"
+              title="The schema section: field names and the type facts the columns leave out. It describes the type, so it does not grow with the record count."
+            >
               schema {bytes(report.schemaBytes)}
             </span>
           </SizeBars>
@@ -196,7 +199,7 @@
 
   aside h2,
   .pane-head h2 {
-    font-size: 11px;
+    font-size: 12px;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--dim);
@@ -232,7 +235,7 @@
   }
 
   .hint {
-    font-size: 11px;
+    font-size: 13px;
     color: var(--dim);
     line-height: 1.5;
     margin: 12px 0;
@@ -323,6 +326,15 @@
     flex: 1;
   }
 
+  /* The facts read as one line, so they are separated rather than merely
+     spaced. The rule lives here because the spans do: SizeBars renders them
+     through a snippet and cannot reach them with a scoped selector. */
+  .fact + .fact::before {
+    content: '·';
+    margin-right: 14px; /* mirrors the flex gap on the other side of the dot */
+    opacity: 0.55;
+  }
+
   /* Two columns when there is room, one when there is not — the hex dump drops
      to eight bytes a line rather than scrolling sideways. */
   .panels {
@@ -338,7 +350,7 @@
   }
 
   h3 {
-    font-size: 11px;
+    font-size: 12px;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--dim);
@@ -346,7 +358,7 @@
   }
 
   .sub {
-    font-size: 11px;
+    font-size: 12px;
     color: var(--dim);
     margin: 0 0 10px;
     line-height: 1.5;

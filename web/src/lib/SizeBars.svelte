@@ -168,6 +168,9 @@
     font-size: 14px;
     color: var(--dim);
     min-width: 0;
+    background-color: #00000036;
+    padding: 4px 14px;
+    border-radius: 8px;
   }
 
   .gzip-toggle {
@@ -182,7 +185,7 @@
 
   .gzip-note {
     margin: 2px 0 0;
-    font-size: 11px;
+    font-size: 12px;
     color: var(--dim);
     line-height: 1.5;
   }
