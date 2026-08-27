@@ -370,7 +370,7 @@
   .download-row {
     display: flex;
     justify-content: flex-end;
-    margin: 6px 0 -14px;
+    margin: 8px 0 -24px 6px ;
   }
 
   .download {

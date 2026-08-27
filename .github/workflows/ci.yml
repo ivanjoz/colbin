@@ -1,53 +1,158 @@
-name: CI
+name: ci
 
+# Tests the codec, compiles it to WebAssembly, publishes the module, and serves
+# the page that runs it at colbin.un.pe.
+#
+# One workflow rather than a CI one and a Pages one. The site *is* the module —
+# every number it shows comes from the .wasm compiled here — so as two, the
+# module was compiled on both sides of the same push and the page could deploy
+# from a commit whose tests were still running.
 on:
   push:
     branches: [main]
+    tags: ['v*']
+    # An ignore list rather than an allow list: the vectors the tests run
+    # against are generated from the Go codecs, so every Go file is a build
+    # input, and naming them would silently stop testing the day one is added.
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
   pull_request:
+  workflow_dispatch:
+
+# One deploy at a time, and never cancel one half-done: a cancelled Pages
+# deployment can leave the site serving a partial build. Pull requests share the
+# group, so they queue behind a deploy rather than racing it.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
 
 jobs:
-  go:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
         with:
-          go-version: '1.24'
+          # From go.mod, so the toolchain the tests ran under locally is the one
+          # that generates the vectors here.
+          go-version-file: go.mod
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Cache Bun packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('web/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      # Cheapest signal first: none of it needs the browser toolchain.
       - run: go vet ./...
       - run: go test ./...
       - name: gofmt
+        # gofmt -l exits 0 whether or not it lists anything, so the check is the
+        # emptiness of its output, not its status.
         run: |
           unformatted="$(gofmt -l .)"
           if [ -n "$unformatted" ]; then
             echo "not gofmt'd:"; echo "$unformatted"; exit 1
           fi
 
-  codec:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
+      - name: Install
         working-directory: web
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
-      # The vectors are generated from the Go codecs, so this step is what makes
-      # the tests a comparison with colbin rather than with themselves.
-      - run: bun run test
-      - run: bun run check
+        run: bun install --frozen-lockfile
 
-  site:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
+      # Compiles both WebAssembly modules, regenerates the vectors from the Go
+      # codecs, and runs the suite against them. The vectors are what make this
+      # a comparison with colbin rather than with itself: a module that agrees
+      # with its own output would pass a round-trip test and fail here.
+      - name: Test the module against vectors generated from the Go codecs
         working-directory: web
+        run: bun run test
+
+      - name: Type-check
+        working-directory: web
+        run: bun run check
+
+      - name: Build the site
+        working-directory: web
+        run: bun run build
+
+      # Headless Chrome drives every example end to end against the module that
+      # is about to be published. Any console error fails the run.
+      - name: Drive the page
+        working-directory: web
+        run: node tests/browser.mjs
+
+      - name: Verify Pages metadata
+        # Both files are tracked under web/static and copied out by the adapter,
+        # so this asserts rather than creates them. Losing the CNAME would
+        # unbind the custom domain and move the site to a /colbin prefix, where
+        # every asset 404s because paths.base is empty — a failure worth having
+        # here rather than in production.
+        run: |
+          test "$(cat web/build-site/CNAME)" = 'colbin.un.pe'
+          test -f web/build-site/.nojekyll
+          test -s web/build-site/colbin.wasm
+
+      # The module on its own, for anyone who wants it without the page. The
+      # site publishes the same bytes at https://colbin.un.pe/colbin.wasm; this
+      # is the copy that outlives the deploy it shipped in.
+      - name: Publish the module
+        uses: actions/upload-artifact@v7
+        with:
+          name: colbin-wasm
+          path: web/build-site/colbin.wasm
+          if-no-files-found: error
+
+      # A pull request stops here: everything above is a check, and a fork's
+      # token has no write access to Pages regardless of what is declared.
+      - name: Configure Pages
+        if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@v6
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v5
+        if: github.event_name != 'pull_request'
+        with:
+          path: web/build-site
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
-      - run: bun run build
-      # Headless Chrome drives every example. Any console error fails the run.
-      - run: node tests/browser.mjs
+      - id: deployment
+        uses: actions/deploy-pages@v5
+
+  # A tagged commit publishes the module as a release asset, taken from the
+  # build above rather than compiled again, so the bytes released are the bytes
+  # the tests ran against. If a tag push is ever swallowed by the paths-ignore
+  # filter above, running this workflow by hand on the tag reaches the same job.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: colbin-wasm
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" colbin.wasm \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes

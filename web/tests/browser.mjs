@@ -6,6 +6,7 @@
 
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
+import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -33,11 +34,27 @@ const server = createServer(async (req, res) => {
 await new Promise((resolve) => server.listen(0, resolve))
 const origin = 'http://127.0.0.1:' + server.address().port
 
+// This machine and the CI runner do not agree on what Chrome is called, and a
+// missing binary otherwise surfaces twelve seconds later as "did not come up".
+function chromeBinary() {
+  if (process.env.CHROME_PATH) return process.env.CHROME_PATH
+  const names = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']
+  const dirs = (process.env.PATH ?? '').split(':').filter(Boolean)
+  for (const name of names) {
+    for (const dir of dirs) if (existsSync(join(dir, name))) return join(dir, name)
+  }
+  throw new Error('no Chrome found on PATH; set CHROME_PATH')
+}
+
 const chrome = spawn(
-  'google-chrome',
+  chromeBinary(),
   ['--headless', '--no-sandbox', '--disable-gpu', '--remote-debugging-port=9333', 'about:blank'],
   { stdio: 'ignore' }
 )
+chrome.on('error', (err) => {
+  console.error('could not start Chrome: ' + err.message)
+  process.exit(1)
+})
 
 async function target() {
   for (let i = 0; i < 60; i++) {

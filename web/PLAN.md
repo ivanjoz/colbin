@@ -573,14 +573,22 @@ Open, cheap to change:
 
 ## 14. Before the first deploy
 
-Two things this repository cannot do for itself:
+`.github/workflows/ci.yml` does the rest of it: one workflow tests the codec,
+compiles the module, drives the page in headless Chrome, publishes the `.wasm`
+as an artifact, and deploys the site. `actions/configure-pages` runs with
+`enablement: true`, so it turns Pages on with source *GitHub Actions* rather
+than waiting for someone to tick it, and `static/CNAME` ships in the build
+output, so the custom domain field fills itself in.
 
-1. **DNS** — a `CNAME` record for `colbin` → `ivanjoz.github.io`.
-2. **Enable Pages** with source *GitHub Actions*, set the custom domain to
-   `colbin.un.pe`, tick *Enforce HTTPS* once the DNS check passes.
+What is left is the part that lives outside the repository:
 
-`static/CNAME` ships in the build output, so step 2's domain field is already
-filled in when the first deploy lands.
+1. **DNS** — a `CNAME` record for `colbin` in the `un.pe` zone, pointing at
+   `ivanjoz.github.io`.
+2. **Enforce HTTPS** — tick it once GitHub's DNS check passes, which is minutes
+   to hours after the record propagates.
+
+A tag matching `v*` additionally publishes `colbin.wasm` as a release asset,
+taken from the same build the tests ran against rather than compiled again.
 
 ---
 
