@@ -5,7 +5,7 @@
 
 <header>
   <span class="brand">colbin</span>
-  <span class="tagline">a columnar binary format for arrays of records — running here as WebAssembly</span>
+  <span class="tagline">high performant columnar binary format. JSON compatible CBOR alternative</span>
   <span class="spacer"></span>
   <a href="https://github.com/ivanjoz/colbin" rel="noreferrer">GitHub</a>
 </header>

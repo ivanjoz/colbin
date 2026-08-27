@@ -159,6 +159,10 @@
             </span>
           </SizeBars>
 
+          <div class="download-row">
+            <button class="download" onclick={download}>Download .cbj</button>
+          </div>
+
           <!-- Side by side, because the two halves are one gesture: hover a
                column on the left, its bytes light up on the right. -->
           <div class="panels">
@@ -168,10 +172,7 @@
               <ColumnTree columns={report.columns} total={report.totalBytes} bind:hovered />
             </div>
             <div class="panel">
-              <div class="panel-head">
-                <h3>Bytes</h3>
-                <button class="download" onclick={download}>Download .cbj</button>
-              </div>
+              <h3>Bytes</h3>
               <p class="sub">The version byte and schema are dimmed.</p>
               <HexView data={message} schemaBytes={report.schemaBytes} {hovered} />
             </div>
@@ -364,18 +365,18 @@
     line-height: 1.5;
   }
 
-  /* The download sits on the Bytes heading: it is the bytes, in a file. */
-  .panel-head {
+  /* Its own line, pulled up into the space the panels leave below the facts,
+     so it reads as a break between the two rather than costing a whole one. */
+  .download-row {
     display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 8px;
+    justify-content: flex-end;
+    margin: 6px 0 -14px;
   }
 
   .download {
     font: inherit;
     font-size: 14px;
-    padding: 6px 12px;
+    padding: 6px 16px;
     border-radius: 4px;
     border: 0;
     background: var(--accent);

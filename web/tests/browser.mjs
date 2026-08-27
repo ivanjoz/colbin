@@ -206,8 +206,8 @@ try {
 
   // The one control the message pane has left.
   check(
-    'the download button is on the Bytes heading',
-    (await evaluate("!!document.querySelector('.panel-head .download')")) === true
+    'the download button is on its own row above the panels',
+    (await evaluate("!!document.querySelector('.download-row .download')")) === true
   )
 
   // The shell fills the viewport exactly: no scrollbar on the page itself, and
