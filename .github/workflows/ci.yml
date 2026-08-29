@@ -65,6 +65,31 @@ jobs:
             echo "not gofmt'd:"; echo "$unformatted"; exit 1
           fi
 
+      # The Rust decoder (rust/). Its corpus is generated from the Go codecs
+      # that just passed, so regenerating it here and failing on a diff is what
+      # catches a Go-side format change nobody ported — the committed vectors
+      # are only as good as the day they were written.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Cache Cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Regenerate the Rust vectors from the Go codecs
+        run: |
+          go run ./rust/vectors
+          git diff --exit-code rust/vectors/vectors.json
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
       - name: Install
         working-directory: web
         run: bun install --frozen-lockfile
