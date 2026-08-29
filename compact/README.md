@@ -9,7 +9,7 @@ its per-column framing over.
 ```go
 import "github.com/ivanjoz/colbin/compact"
 
-w := compact.NewWriter(nil, compact.ShapeStruct, true)
+w := compact.NewWriter(nil, compact.ShapeStruct, true, compact.Keys8)
 w.Key(0x35); w.Int(1234)
 w.Key(0x9a); w.Str("Usuario1")
 w.End()
@@ -41,7 +41,7 @@ count, because it needs none of them.
 
 ## Header
 
-Four bits, after which the message is one LSB-first bitstream with **no
+Five bits, after which the message is one LSB-first bitstream with **no
 alignment anywhere** until a final pad to a byte boundary.
 
 | bits | field | meaning |
@@ -49,6 +49,7 @@ alignment anywhere** until a final pad to a byte boundary.
 | 0 | mode | always `1` |
 | 1 | `ALL_POSITIVE` | every signed integer in the message is `>= 0` |
 | 2-3 | shape | `0` lone struct · `1`/`2`/`3` array of that many records |
+| 4 | `NARROW_KEYS` | field ids are 4 bits wide rather than 8 |
 
 Shape `0` and shape `1` both carry one record; they differ only in whether it
 renders as an object or an array of one, which the binary path takes from the
@@ -56,13 +57,64 @@ destination Go type but a JSON reader needs told.
 
 ## Records
 
-A record is a run of `[key:8][value]` pairs closed by `TerminatorKey` (255,
-the id the standard mode already reserves). A field holding its zero value is
-**omitted entirely** — the key run *is* the presence information, so an absent
-field costs nothing beyond the terminator the record already owes.
+A record is a run of `[key][value]` pairs closed by the terminator key. A field
+holding its zero value is **omitted entirely** — the key run *is* the presence
+information, so an absent field costs nothing beyond the terminator the record
+already owes.
 
 Keys are on the wire so a reader can resolve fields by id rather than position,
 and so it can `Skip` a field its type does not know.
+
+## Key width
+
+A key is 8 bits by default — the standard mode's field id unchanged, with `255`
+closing the record, which is the id that mode already reserves. When every id a
+message writes is `MaxNarrowKey` (14) or less, the header's `NARROW_KEYS` bit
+selects a **4-bit key** instead, with `15` closing the record: the same
+arrangement one nibble down.
+
+| | key | terminator | ids |
+|---|---|---|---|
+| `Keys8` | 8 bits | 255 | 0..254 |
+| `Keys4` | 4 bits | 15 | 0..14 |
+
+A record of `f` present fields spends `4*(f+1)` fewer bits — the fields plus the
+terminator — against one bit for the whole message. It pays for itself on the
+first field of the first record, and at seven fields it is four bytes:
+
+| 7-field struct, one record | bytes |
+|---|---|
+| standard mode | 35 B |
+| compact, `Keys8` | 21 B |
+| compact, `Keys4` | **17 B** (−19%) |
+
+**Ids decide it, not the field count.** A `cb` tag that only renames a field
+leaves its id to an FNV hash of the name, which lands anywhere in 0..254 and puts
+the whole type back on the wide key. Narrow keys want the ids written out:
+
+```go
+type SaleOrderProductStats struct {
+    Quantity                int32 `cb:"1,minimal"`
+    QuantityPendingDelivery int32 `cb:"2"`
+    SubQuantity             int16 `cb:"3"`
+    ...
+}
+```
+
+`Reader.Key` reports a narrow terminator as `TerminatorKey` rather than as 15, so
+the loop that closes a record is written once and reads the same at either width.
+Nothing is lost by folding them: `Keys4` reserves 15 exactly as `Keys8` reserves
+255, so no field can hold it. In the other direction `Writer.Key` **panics** on an
+id above `MaxNarrowKey` under `Keys4` — truncating it would silently rename the
+field or forge a terminator, and the writer has no error to return mid-message.
+
+The flag is in the header rather than derived from the caller's type on both
+sides, which would have cost nothing at all. A derived width breaks the moment
+the two ends disagree about the type: a service that adds a field with a large id
+would start reading its own older narrow messages at the wrong width and decode
+garbage, where the header bit makes that message decode correctly and any genuine
+id mismatch report itself as one. One bit is the price of that, and it is only
+ever visible when it pushes the final pad into another byte.
 
 ## Integers
 
@@ -103,6 +155,7 @@ divisible by 7.
 
 | kind | encoding |
 |---|---|
+| key | 8 bits, or 4 with `NARROW_KEYS` |
 | int | varint over magnitude or zigzag, per `ALL_POSITIVE` |
 | uint | varint over the value; never zigzagged |
 | bool | **1 bit** |
@@ -173,24 +226,57 @@ terminator bits are needed at the message level.
 
 ## Sizes, measured
 
-Against the standard mode and `encoding/json`, same `Usuario` records:
+Against the standard mode and `encoding/json`, the same `Usuario` records. Their
+`cb` tags name their fields rather than number them, so the ids are hashed and
+the keys are wide:
 
 | | standard | compact | json |
 |---|---|---|---|
-| n=1 | 34 B | **24 B** (−29%) | 76 B |
-| n=1, three fields zero | 28 B | **12 B** (−57%) | — |
+| n=1 | 34 B | **25 B** (−26%) | 76 B |
+| n=1, three fields zero | 28 B | **13 B** (−54%) | — |
 | n=2 | 50 B | 50 B (tie) | 154 B |
 | n=3 | 62 B | 65 B (**+5%**) | 220 B |
 
-**Compact mode loses at n=3.** Keys are the reason: compact pays 6 bytes of
-framing per record (5 keys + terminator) where the columnar mode pays its 5 keys
-once and amortises them. That is the deliberate trade — keys buy `Skip` and
+**Compact mode loses at n=3 on hashed ids.** Keys are the reason: compact pays 6
+bytes of framing per record (5 keys + terminator) where the columnar mode pays
+its 5 keys once and amortises them. That is the deliberate trade — keys buy `Skip` and
 resolution by id, and they are worth it exactly while there is one record to
 carry them.
+
+Numbering those same five fields `cb:"1"`..`cb:"5"` halves that framing, and the
+trade changes shape — the crossover moves past n=3 entirely:
+
+| | standard | compact, hashed ids | compact, `cb:"1"`.. |
+|---|---|---|---|
+| n=1 | 34 B | 25 B | **22 B** (−35%) |
+| n=1, three fields zero | 28 B | 13 B | **11 B** (−61%) |
+| n=2 | 50 B | 50 B | **44 B** (−12%) |
+| n=3 | 62 B | 65 B | **57 B** (−8%) |
+
+Keys are still 6 per record against the columnar mode's 5 once, but at half width
+that is 3 bytes a record instead of 6, and the columnar mode's type bytes no
+longer buy it back inside three records.
 
 So: **use compact unconditionally at n=1, and at n=2-3 encode both and keep the
 smaller.** At these sizes the double encode costs a few hundred nanoseconds and
 makes the mode bit self-tuning rather than a guess.
+
+## Reuse
+
+`Writer.Reset` and `Reader.Reset` re-aim an existing writer or reader at another
+message, which is what makes both poolable. What they keep is the scratch buffer
+each grew: the writer's holds the `packed5` frame and the `varint` array it
+builds before shifting into the bitstream, and the reader's holds the bytes it
+shifts an unaligned frame into. Those are the allocations a per-message
+writer pays again every time.
+
+`Reset(out, ...)` appends to `out` exactly as `NewWriter` does, so a caller
+passing `buf[:0]` reuses its own buffer and drops the last allocation with it.
+`Reader.Reset` releases the previous message even when it rejects the new one, so
+`Reset(nil)` is how a pooled reader lets go of what it just read.
+
+`codec` drives both from `sync.Pool`, which is why encoding a record through a
+`colbin.Codec[T]` onto a buffer the caller keeps allocates nothing at all.
 
 ## Errors
 

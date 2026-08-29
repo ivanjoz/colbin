@@ -64,3 +64,57 @@ func TestPublicFacadeJSONMode(t *testing.T) {
 		t.Fatalf("name = %v, want uno", got)
 	}
 }
+
+// A struct numbered `cb:"1"`.. and driven through a cached Codec: the shape this
+// is built for, one record per message and many of them.
+type stats struct {
+	Quantity                int32 `cb:"1,quantity"`
+	QuantityPendingDelivery int32 `cb:"2,quantityPendingDelivery"`
+	SubQuantity             int16 `cb:"3,subQuantity"`
+	TotalAmount             int32 `cb:"4,totalAmount"`
+}
+
+var statsCodec = colbin.MustCodec[stats]()
+
+func TestPublicFacadeCodec(t *testing.T) {
+	records := []stats{
+		{Quantity: 480, QuantityPendingDelivery: 120, SubQuantity: 12, TotalAmount: 145900},
+		{Quantity: 1},
+		{},
+	}
+
+	buf := make([]byte, 0, 64)
+	for i, rec := range records {
+		var err error
+		if buf, err = statsCodec.Append(buf[:0], &rec); err != nil {
+			t.Fatal(err)
+		}
+
+		var out stats
+		if err := statsCodec.Unmarshal(buf, &out); err != nil {
+			t.Fatal(err)
+		}
+		if out != rec {
+			t.Fatalf("record %d: got %#v, want %#v", i, out, rec)
+		}
+		// The same bytes the package functions would have written and read.
+		want, err := colbin.Marshal(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(buf) != string(want) {
+			t.Fatalf("record %d: codec wrote %x, Marshal wrote %x", i, buf, want)
+		}
+		out = stats{}
+		if err := colbin.Unmarshal(buf, &out); err != nil {
+			t.Fatal(err)
+		}
+		if out != rec {
+			t.Fatalf("record %d via Unmarshal: got %#v, want %#v", i, out, rec)
+		}
+	}
+
+	if _, err := colbin.NewCodec[[]stats](); err == nil {
+		t.Error("NewCodec on a non-struct returned no error")
+	}
+}

@@ -32,5 +32,12 @@ export async function vectors(name) {
   return JSON.parse(await readFile(join(root, 'tests/vectors', name), 'utf8'))
 }
 
+// The tiers this port's ENCODER can reproduce byte for byte. Decoding is not
+// gated: every vector, of every tier, must read back correctly. omitempty is
+// missing here because the module writes dense columns -- Go's SetOmitEmpty has
+// no counterpart in the encoder yet -- and a tier that is off is skipped loudly
+// rather than passing.
+export const ENCODES = new Set(['scalar', 'float', 'nested', 'array', 'nullable', 'value'])
+
 export const hex = (bytes) => Buffer.from(bytes).toString('hex')
 export const unhex = (s) => Uint8Array.from(Buffer.from(s, 'hex'))

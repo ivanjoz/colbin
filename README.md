@@ -70,6 +70,85 @@ slices, use value mode. `Unmarshal` needs a non-nil pointer to the corresponding
 destination. Decoding requires a **compatible Go type** — the format is not
 self-describing about field names (see [Field ids](#field-ids)).
 
+### Sparse records: `SetOmitEmpty`
+
+A column is positional — N records, N values — and a value that happens to be
+zero still takes its slot. The integer codec floors at a byte per element, so a
+thousand records of an untouched field cost a thousand bytes to say nothing, and
+a wide struct pays that once per unset field.
+
+```go
+colbin.SetOmitEmpty(true)   // once, at startup
+```
+
+With it on, a column holding nothing but empty values — `0`, `false`, `""`, an
+empty slice, `nil` — is written as its **type byte alone**, with no payload.
+Float columns have always done this; the flag extends it to the integer and
+string columns, and through them to everything framed by a length sub-column, so
+`[]byte`, arrays and maps collapse too.
+
+| ten-field struct, one field set | dense | omit-empty |
+|---|---:|---:|
+| 100 records | 933 B | **127 B** (−86%) |
+| 1000 records | 9034 B | **1028 B** (−89%) |
+
+It also lets **compact mode carry pointer fields**, which it otherwise refuses:
+compact mode says a field is present by naming it, so `nil` has to mean absent.
+A four-field struct of pointers goes from 30 B columnar to 18 B compact, and to
+3 B when they are all nil.
+
+That is the one thing the flag costs, and why it is opt-in:
+
+> a `*T` pointing at `T`'s zero value decodes back as `nil`.
+
+Nothing else changes — slices already lost nil-versus-empty in both directions
+before the flag existed, and a zero scalar is a zero scalar. **Decoding needs no
+configuration**: both forms are self-describing per column, so a reader never has
+to be set to match its writer. A message written with the flag on does carry its
+own version byte (`0x06`, or `0x08` in JSON mode), so a decoder that predates the
+flag rejects it rather than misreading it.
+
+### Many small messages: `Codec[T]`
+
+`Marshal` works the type out from scratch on every call — what it is, what its
+fields are, where they sit, which mode carries them. Over one message holding a
+thousand records that is nothing; over a thousand messages holding one record
+each it is most of the cost. `Codec[T]` resolves it once and holds it:
+
+```go
+var statsCodec = colbin.MustCodec[SaleOrderProductStats]()
+
+buf := make([]byte, 0, 64)
+for _, rec := range records {
+    buf, _ = statsCodec.Append(buf[:0], &rec)  // no allocation per record
+    send(buf)
+}
+
+var out SaleOrderProductStats
+err := statsCodec.Unmarshal(data, &out)
+```
+
+The record arrives as `*T` rather than as `any`, which is the other half of it:
+an interface boxes the value, and a struct behind one is not addressable, so it
+has to be copied before its fields can be read at all.
+
+10 000 records, each its own message, on the seven-field struct above:
+
+| | time | allocations |
+|---|---:|---:|
+| `Marshal` | 4.6 ms | 59 003 |
+| `Marshal`, today | 2.2 ms | 30 340 |
+| `Codec.Append` onto a reused buffer | **1.24 ms** | **0** |
+| `Unmarshal` | 5.1 ms | 10 000 |
+| `Unmarshal`, today | 1.7 ms | 0 |
+| `Codec.Unmarshal` | **1.48 ms** | **0** |
+
+A `Codec` is safe for concurrent use and writes ordinary messages: `Unmarshal`
+reads what a `Codec` wrote, and a `Codec` reads what `Marshal` wrote. It covers
+structs and slices of them (`Append`/`AppendSlice`, `Unmarshal`/`UnmarshalSlice`)
+in binary mode; JSON mode stays on the package functions, where the schema
+section is the dominant cost anyway.
+
 ## Modes
 
 **Bit 0 of the first byte** selects the format:
@@ -93,16 +172,21 @@ record count and a column count. Spread over hundreds of records that framing is
 noise.
 
 Because bit 0 is the discriminator, **every standard version byte is even**:
-`0x02` for the binary form and `0x04` for JSON mode.
+`0x02` for the binary form and `0x04` for JSON mode, or `0x06` and `0x08` for the
+same two written with [`SetOmitEmpty`](#sparse-records-setomitempty) on.
 
 ### Compact mode
 
 At one to three records there is nothing to spread that framing over — a
 one-record message pays a field id *plus* a type byte per column to describe a
 single value each. So compact mode drops the version byte, the record count, the
-column count and the type bytes, and writes a four-bit header followed by one
+column count and the type bytes, and writes a five-bit header followed by one
 LSB-first bitstream of `[field_id][value]` runs. A field holding its zero value
 is omitted entirely.
+
+Field ids are 8 bits, or **4 bits** when every id in the type is 14 or below,
+which is what explicit `cb:"1"`-style tags give you. The header says which, so
+both widths decode without the reader having to guess.
 
 Arrays of primitives still delegate to the same `varint` and `packed5` codecs, so
 an array field costs the same in either mode.
@@ -120,17 +204,19 @@ columnar data, so the premise fails. The test is structural and memoised per typ
 a slice's *length* does not enter it.
 
 At one record compact always wins and is taken directly. At two or three the
-answer turns on how many fields are zero, so both are built and the smaller kept.
-`MarshalJSON` is always standard mode — a compact message has no room for a
-schema section.
+answer turns on how many fields are zero and on the key width, so both are built
+and the smaller kept. `MarshalJSON` is always standard mode — a compact message
+has no room for a schema section.
 
-| | standard | compact | `encoding/json` |
-|---|---:|---:|---:|
-| one 5-field struct | 34 B | **24 B** | 76 B |
-| same, three fields zero | 28 B | **12 B** | — |
-| 2 records | **50 B** | 50 B | 154 B |
-| 3 records | **62 B** | 65 B | 220 B |
-| struct with a 1000-element `[]int32` | 1017 B | **1009 B** | — |
+The same 5-field record, hashed ids against explicit `cb:"1"`..`cb:"5"` ones:
+
+| | standard | compact | compact, numbered | `encoding/json` |
+|---|---:|---:|---:|---:|
+| one 5-field struct | 34 B | 25 B | **22 B** | 76 B |
+| same, three fields zero | 28 B | 13 B | **11 B** | — |
+| 2 records | 50 B | 50 B | **44 B** | 154 B |
+| 3 records | 62 B | 65 B | **57 B** | 220 B |
+| struct with a 1000-element `[]int32` | 1017 B | 1010 B | **1008 B** | — |
 
 ## JSON mode
 
@@ -245,6 +331,13 @@ with the same explicit id, or an id above 254, are rejected. Because ids come fr
 the type on both sides, encoder and decoder derive the same mapping without
 transmitting field names.
 
+**Numbering a struct `cb:"1"`, `cb:"2"`, … is worth doing.** If every id lands at
+14 or below, compact mode writes its keys as 4 bits instead of 8 and each record
+sheds half its framing — a seven-field struct goes from 21 B to 17 B, and compact
+mode starts winning at two and three records where it used to lose. A tag that
+only renames a field leaves its id to the hash, which lands anywhere in 0..254
+and keeps the whole type on the wide key. It changes nothing in standard mode.
+
 ## Supported types
 
 | Go type | Encoding |
@@ -294,12 +387,20 @@ discrimination rule.
 ### Standard mode
 
 ```
-message := [version=0x02:1] [recordCount:uvarint] subTable
+message := [version=0x02:1] [recordCount:uvarint] subTable   // 0x06 under omit-empty
 
 subTable := [colCount:1] column*                 // one column per field
 
 column   := [field_id:1] [type_flags:1] payload
 ```
+
+`type_flags` holds the `field_type` in its low three bits. **Bit 7 says the
+column is empty**: every value in it is the zero value and *no payload follows*.
+Float columns set it whenever they are all zero; the integer and string columns
+set it only under [`SetOmitEmpty`](#sparse-records-setomitempty), which is what
+makes a column of a thousand unset values cost one byte instead of a thousand.
+Bytes, array and map columns inherit it through the length column that frames
+them.
 
 Payloads by `field_type`:
 
@@ -338,11 +439,12 @@ self-delimiting, so the decoder can advance directly to the next column or frame
 ### Compact mode
 
 ```
-message := [header:4 bits] record{n}                    // then padded to a byte
+message := [header:5 bits] record{n}                    // then padded to a byte
 
 header  := mode(bit 0 = 1) | ALL_POSITIVE(bit 1) | shape(bits 2-3)
+                           | NARROW_KEYS(bit 4)
 
-record  := ( [field_id:8] value )* [255:8]              // 255 closes the record
+record  := ( [field_id:k] value )* [terminator:k]       // k = 8, or 4 if narrow
 ```
 
 | bit | field | meaning |
@@ -350,13 +452,22 @@ record  := ( [field_id:8] value )* [255:8]              // 255 closes the record
 | 0 | mode | always `1` |
 | 1 | `ALL_POSITIVE` | every signed integer in the message is `>= 0`, so its payload is the magnitude rather than the zigzag — one bit saved on each |
 | 2-3 | shape | `0` lone struct · `1`/`2`/`3` array of that many records |
+| 4 | `NARROW_KEYS` | field ids are 4 bits (ids `0..14`, `15` closes a record) rather than 8 (ids `0..254`, `255` closes a record) |
 
 Shape `0` and `1` both carry one record and differ only in whether it renders as
 an object or an array of one, which the binary path takes from the destination Go
-type but a JSON reader would need told. Id `255` closing a record is the same id
-the standard mode reserves as a terminator.
+type but a JSON reader would need told. Id `255` closing a wide record is the
+same id the standard mode reserves as a terminator; `15` is that same reservation
+one nibble down.
 
-Everything after the four header bits is one LSB-first bitstream; nothing is byte
+`NARROW_KEYS` is set when every id the message writes is 14 or below, which in
+practice means a struct whose `cb` tags number its fields. It saves 4 bits on
+every key and on every terminator, against the one bit it costs the message, so it
+is ahead from the first field onwards. It is in the header rather than derived
+from the type on both sides so that two ends holding different versions of a
+struct fail as a mismatched id rather than as a misparse.
+
+Everything after the five header bits is one LSB-first bitstream; nothing is byte
 aligned until the final pad, which is never read back because a record ends at
 its terminator and the message ends at its last record.
 
@@ -386,11 +497,17 @@ LEB128's first byte was already exactly full.
 
 ## Performance
 
-Three design choices keep it fast:
+Four design choices keep it fast:
 
 - **Field access via `github.com/viant/xunsafe`** — cached, typed, unsafe struct
   field get/set on the hot numeric path (array elements use direct pointer casts).
   Type layout (`typeInfo`, field ids, accessors) is built once per type and cached.
+- **Compact mode runs a cached per-type plan** (`codec/compact_plan.go`): one
+  opcode per field, holding the field's offset and wire id, so a record is a flat
+  switch over a slice rather than three nested ones on class, kind and width. The
+  plan also fuses the passes — a field used to be read once to test it for zero,
+  once for the `ALL_POSITIVE` scan and once to write it — and its id-to-field
+  table is an array, which took the map lookup per key out of the decoder.
 - **The codecs append directly to the output buffer** and integer/byte columns
   reuse scratch slices from `sync.Pool`.
 - **The output buffer is sized from what the type last measured.** Each type
@@ -411,6 +528,14 @@ Medians of a `-count=6` run on an i7-1355U with Go 1.27:
 |---|---:|---:|---:|
 | scalar | 26.8 KB | 158 µs | 97 µs |
 | nested | 43.5 KB | 499 µs | 541 µs |
+
+One record per message, 10 000 of them, on a seven-field numbered struct — the
+case [`Codec[T]`](#many-small-messages-codect) exists for:
+
+| | encode | decode |
+|---|---:|---:|
+| `Marshal` / `Unmarshal` | 2.2 ms | 1.7 ms |
+| `Codec`, buffer reused | **1.24 ms**, 0 allocs | **1.48 ms**, 0 allocs |
 
 Each benchmark ran in its own process from a cold start (package under 62 °C).
 This laptop throttles hard enough that one sequential `go test -bench .` charges
@@ -491,6 +616,9 @@ still open.
 | `codec/schema.go` | JSON mode: the schema section, built once per type and cached |
 | `codec/schema_decode.go` | JSON mode: schema-driven decode to Go values or JSON |
 | `codec/compact_mode.go` | compact mode: eligibility, mode selection, and the Go-type bridge |
+| `codec/compact_plan.go` | the per-type compact plan: one resolved op per field, built once |
+| `codec/omitempty.go` | the omit-empty flag, the empty-column bit and the version it selects |
+| `codec/typed.go` | `Codec[T]`, the cached typed handle over the same format |
 | `compact/` | compact mode wire format: bitstream, selector varint, reader/writer |
 | `varint/` | adaptive integer-array codec used by integer and length columns |
 | `packed5/` | self-delimiting string codec used by every string path |
@@ -506,6 +634,11 @@ still open.
   compact message also rejects an unknown field id rather than skipping it: the
   wire holds no type tag, so there is no way to know how far to step.
 - Not a streaming format — all records are buffered before output.
+- `SetOmitEmpty` is global and encoder-side. Set it once at startup: flipping it
+  mid-flight is safe (it is atomic, and the caches it invalidates rebuild on
+  demand) but leaves two encodings of the same value in flight. The browser port
+  **decodes** omit-empty messages; its encoder still writes dense columns, so the
+  `omitempty` vector tier is skipped in the port's encoder tests.
 - Trusts the input buffer on decode (internal use); malformed data can panic on
   slice bounds rather than returning an error. `DecodeJSON` and `DecodeAny` do
   turn that panic into an error, but still trust the counts they read, so a
@@ -515,4 +648,6 @@ still open.
   fine — see below.
 - No backwards-compatibility guarantees — the format version byte is bumped on any
   wire change (this project is pre-alpha). Bumped version bytes must stay **even**,
-  since bit 0 discriminates compact mode.
+  since bit 0 discriminates compact mode. Compact mode has no version byte to bump,
+  so a change to its header — the `NARROW_KEYS` bit was the last one — is not
+  detectable in an already-encoded message; both ends must be rebuilt together.

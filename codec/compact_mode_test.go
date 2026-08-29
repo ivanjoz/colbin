@@ -5,6 +5,7 @@ import (
 	"math"
 	"reflect"
 	"testing"
+	"unsafe"
 
 	"github.com/ivanjoz/colbin/compact"
 )
@@ -15,6 +16,19 @@ type cmUser struct {
 	Age     int32  `cb:"age"`
 	Updated int64  `cb:"updated"`
 	GroupID int32  `cb:"groupID"`
+}
+
+// cmNumbered is the shape narrow keys are for: every field carries an explicit
+// small id, so the whole type fits four-bit keys. cmUser, whose tags name fields
+// rather than number them, gets hashed ids and stays on the wide key.
+type cmNumbered struct {
+	Quantity                int32 `cb:"1,quantity"`
+	QuantityPendingDelivery int32 `cb:"2,quantityPendingDelivery"`
+	SubQuantity             int16 `cb:"3,subQuantity"`
+	SubQuantityPending      int16 `cb:"4,subQuantityPending"`
+	SubDivisor              int16 `cb:"5,subDivisor"`
+	TotalAmount             int32 `cb:"6,totalAmount"`
+	TotalDebtAmount         int32 `cb:"7,totalDebtAmount"`
 }
 
 type cmWide struct {
@@ -62,6 +76,7 @@ func TestCompactEligibility(t *testing.T) {
 	}{
 		{cmUser{}, true},
 		{cmWide{}, true},
+		{cmNumbered{}, true},
 		{cmNested{}, false},
 		{cmArrayOfStructs{}, false},
 		{cmPointer{}, false},
@@ -79,6 +94,89 @@ func TestCompactEligibility(t *testing.T) {
 			t.Errorf("%T: memoised answer flipped to %v", tc.v, got)
 		}
 	}
+}
+
+// A type whose ids all fit under the narrow terminator takes the 4-bit key; one
+// hashed id anywhere puts the type back on the 8-bit one.
+func TestCompactKeyWidth(t *testing.T) {
+	for _, tc := range []struct {
+		v    any
+		want compact.KeyWidth
+	}{
+		{cmNumbered{}, compact.Keys4},
+		{cmUser{}, compact.Keys8},
+		{cmWide{}, compact.Keys8},
+	} {
+		ti, err := getTypeInfo(reflect.TypeOf(tc.v))
+		if err != nil {
+			t.Fatalf("%T: %v", tc.v, err)
+		}
+		compactUsable(ti) // fills the memo compactKeys reads
+		if got := compactKeys(ti); got != tc.want {
+			t.Errorf("%T: compactKeys = %d, want %d", tc.v, got, tc.want)
+		}
+	}
+}
+
+// The header must say which width it used, and the record must survive it.
+func TestNarrowKeysRoundTripAndSize(t *testing.T) {
+	v := cmNumbered{
+		Quantity: 480, QuantityPendingDelivery: 120, SubQuantity: 12,
+		SubQuantityPending: 3, SubDivisor: 24, TotalAmount: 145900,
+		TotalDebtAmount: 32000,
+	}
+	buf, err := Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compact.IsCompact(buf) {
+		t.Fatal("not compact")
+	}
+	r, err := compact.NewReader(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Keys() != compact.Keys4 {
+		t.Fatalf("header says keys %d, want %d", r.Keys(), compact.Keys4)
+	}
+
+	var out cmNumbered
+	if err := Unmarshal(buf, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out != v {
+		t.Fatalf("round trip: got %#v, want %#v", out, v)
+	}
+
+	// Same values, same codecs, ids the narrow key cannot hold: the difference is
+	// the key run alone, 4 bits on each of the seven fields and the terminator,
+	// less the one bit the header flag costs.
+	std, _ := marshalStandard(v)
+	wide := appendCompactKeys(t, v, compact.Keys8)
+	fmt.Printf("7-field numbered struct: narrow %d B, wide keys %d B, standard %d B\n",
+		len(buf), len(wide), len(std))
+	if len(buf) >= len(wide) {
+		t.Fatalf("narrow %d B is not smaller than wide %d B", len(buf), len(wide))
+	}
+}
+
+// appendCompactKeys re-encodes v at a forced key width, which is what the size
+// comparison above needs and no production path wants.
+func appendCompactKeys(t *testing.T, v any, keys compact.KeyWidth) []byte {
+	t.Helper()
+	rv := reflect.ValueOf(v)
+	ti, err := getTypeInfo(rv.Type())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := reflect.New(rv.Type())
+	p.Elem().Set(rv)
+	ptrs := []unsafe.Pointer{p.UnsafePointer()}
+
+	pl := compactPlanFor(ti)
+	w := compact.NewWriter(nil, compact.ShapeStruct, compactAllPositivePlan(pl, ptrs), keys)
+	compactWriteRecord(w, pl, ptrs[0])
+	return w.Done()
 }
 
 // --- mode selection ------------------------------------------------------------

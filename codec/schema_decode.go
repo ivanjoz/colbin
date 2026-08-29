@@ -98,8 +98,8 @@ func decodeSelfDescribing(data []byte, jsonSafe bool) (out any, err error) {
 		return nil, fmt.Errorf("colbin: empty message")
 	}
 	switch v := dec.readByte(); v {
-	case jsonFormatVersion:
-	case formatVersion:
+	case jsonFormatVersion, jsonFormatVersionOmitEmpty:
+	case formatVersion, formatVersionOmitEmpty:
 		return nil, fmt.Errorf("colbin: message carries no schema (encoded with Marshal, not MarshalJSON)")
 	default:
 		return nil, fmt.Errorf("colbin: bad version byte 0x%02x", v)
@@ -304,7 +304,6 @@ func (dec *decoder) jsonColumn(d *jsonDesc, sch *jsonSchema, n int) ([]any, erro
 			out[i] = dec.floatValue(d.kind, v)
 		}
 	case ftString:
-		dec.readByte() // flags (ftString)
 		if err := dec.readStringColumn(n, func(i int, s string) { out[i] = s }); err != nil {
 			return nil, err
 		}

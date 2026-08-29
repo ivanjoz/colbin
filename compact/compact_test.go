@@ -275,30 +275,98 @@ func usuario() []field {
 func TestMessageRoundTrip(t *testing.T) {
 	for _, shape := range []Shape{ShapeStruct, ShapeArray1, ShapeArray2, ShapeArray3} {
 		for _, allPos := range []bool{true, false} {
-			w := NewWriter(nil, shape, allPos)
-			for range shape.Records() {
-				writeRecord(w, usuario())
-			}
-			buf := w.Done()
+			for _, keys := range []KeyWidth{Keys8, Keys4} {
+				rec := usuario()
+				if keys == Keys4 { // ids a narrow key can hold
+					for i := range rec {
+						rec[i].key = uint8(i + 1)
+					}
+				}
+				w := NewWriter(nil, shape, allPos, keys)
+				for range shape.Records() {
+					writeRecord(w, rec)
+				}
+				buf := w.Done()
 
-			if !IsCompact(buf) {
-				t.Fatal("IsCompact false on a compact message")
+				if !IsCompact(buf) {
+					t.Fatal("IsCompact false on a compact message")
+				}
+				r, err := NewReader(buf)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if r.Shape() != shape || r.AllPositive() != allPos || r.Keys() != keys {
+					t.Fatalf("header: shape %d/%d allPositive %v/%v keys %d/%d",
+						r.Shape(), shape, r.AllPositive(), allPos, r.Keys(), keys)
+				}
+				for range r.Records() {
+					readRecord(t, r, rec)
+				}
+				if err := r.Err(); err != nil {
+					t.Fatal(err)
+				}
+				t.Logf("shape=%d allPositive=%v keys=%d -> %d bytes", shape, allPos, keys, len(buf))
 			}
-			r, err := NewReader(buf)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if r.Shape() != shape || r.AllPositive() != allPos {
-				t.Fatalf("header: shape %d/%d allPositive %v/%v", r.Shape(), shape, r.AllPositive(), allPos)
-			}
-			for range r.Records() {
-				readRecord(t, r, usuario())
-			}
-			if err := r.Err(); err != nil {
-				t.Fatal(err)
-			}
-			t.Logf("shape=%d allPositive=%v -> %d bytes", shape, allPos, len(buf))
 		}
+	}
+}
+
+// The narrow terminator is 15 on the wire, and every id below it must still come
+// back as itself -- 14 in particular, which sits directly under it.
+func TestNarrowKeyBoundary(t *testing.T) {
+	w := NewWriter(nil, ShapeStruct, true, Keys4)
+	for k := uint8(0); k <= MaxNarrowKey; k++ {
+		w.Key(k)
+		w.Uint(uint64(k))
+	}
+	w.End()
+
+	r, err := NewReader(w.Done())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Keys() != Keys4 {
+		t.Fatalf("keys %d, want %d", r.Keys(), Keys4)
+	}
+	for k := uint8(0); k <= MaxNarrowKey; k++ {
+		if got := r.Key(); got != k {
+			t.Fatalf("key %d, want %d", got, k)
+		}
+		if got := r.Uint(); got != uint64(k) {
+			t.Fatalf("value %d, want %d", got, k)
+		}
+	}
+	// Reported as TerminatorKey even though 15 went on the wire, so a caller's
+	// end-of-record check reads the same at either width.
+	if got := r.Key(); got != TerminatorKey {
+		t.Fatalf("terminator reported as %d, want %d", got, TerminatorKey)
+	}
+	if err := r.Err(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An id that does not fit the declared width would be truncated into a different
+// field, or into the terminator. The writer refuses rather than emit that.
+func TestNarrowKeyOutOfRange(t *testing.T) {
+	for _, k := range []uint8{MaxNarrowKey + 1, 16, 0x9a, TerminatorKey} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("key %d: no panic", k)
+				}
+			}()
+			NewWriter(nil, ShapeStruct, true, Keys4).Key(k)
+		}()
+	}
+	// The same ids are ordinary fields at the wide width.
+	w := NewWriter(nil, ShapeStruct, true, Keys8)
+	w.Key(0x9a)
+	w.Uint(1)
+	w.End()
+	r, _ := NewReader(w.Done())
+	if got := r.Key(); got != 0x9a {
+		t.Fatalf("key %d, want %d", got, 0x9a)
 	}
 }
 
@@ -321,21 +389,24 @@ func TestAllKindsRoundTrip(t *testing.T) {
 		{key: 13, kind: KindBytes, raw: []byte{}},
 		{key: 14, kind: KindBytes, raw: []byte{0, 1, 2, 255}},
 	}
-	w := NewWriter(nil, ShapeStruct, false)
-	writeRecord(w, fs)
-	r, err := NewReader(w.Done())
-	if err != nil {
-		t.Fatal(err)
-	}
-	readRecord(t, r, fs)
-	if err := r.Err(); err != nil {
-		t.Fatal(err)
+	// The ids here run 1..14, so both key widths can carry this record.
+	for _, keys := range []KeyWidth{Keys8, Keys4} {
+		w := NewWriter(nil, ShapeStruct, false, keys)
+		writeRecord(w, fs)
+		r, err := NewReader(w.Done())
+		if err != nil {
+			t.Fatal(err)
+		}
+		readRecord(t, r, fs)
+		if err := r.Err(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
 // NaN needs its own check: it is not equal to itself, so readRecord cannot test it.
 func TestNaNRoundTrip(t *testing.T) {
-	w := NewWriter(nil, ShapeStruct, true)
+	w := NewWriter(nil, ShapeStruct, true, Keys8)
 	w.Key(1)
 	w.Float64(math.NaN())
 	w.Key(2)
@@ -362,7 +433,7 @@ func TestSkipUnknownField(t *testing.T) {
 		{key: 4, kind: KindBytes, raw: []byte("also skipped")},
 		{key: 5, kind: KindInt, i: 99},
 	}
-	w := NewWriter(nil, ShapeStruct, true)
+	w := NewWriter(nil, ShapeStruct, true, Keys8)
 	writeRecord(w, fs)
 	r, _ := NewReader(w.Done())
 
@@ -386,7 +457,7 @@ func TestSkipUnknownField(t *testing.T) {
 
 // Omitting a zero-valued field is how compact mode pays nothing for absence.
 func TestOmittedFields(t *testing.T) {
-	w := NewWriter(nil, ShapeStruct, true)
+	w := NewWriter(nil, ShapeStruct, true, Keys8)
 	w.Key(0x32)
 	w.Int(1236000001)
 	w.Key(0x9a)
@@ -426,7 +497,7 @@ func TestNotCompact(t *testing.T) {
 
 // Truncated and corrupt input must produce an error, never a panic.
 func TestCorruptInput(t *testing.T) {
-	w := NewWriter(nil, ShapeArray3, true)
+	w := NewWriter(nil, ShapeArray3, true, Keys8)
 	for range 3 {
 		writeRecord(w, usuario())
 	}
@@ -458,7 +529,7 @@ func TestCorruptInput(t *testing.T) {
 }
 
 func FuzzReader(f *testing.F) {
-	w := NewWriter(nil, ShapeStruct, true)
+	w := NewWriter(nil, ShapeStruct, true, Keys8)
 	writeRecord(w, usuario())
 	f.Add(w.Done())
 	f.Add([]byte{0x01})
@@ -487,11 +558,14 @@ func FuzzReader(f *testing.F) {
 // The headline claim, kept honest: a lone Usuario in compact mode against what
 // the same values cost as plain LEB128 with the same keys.
 func TestSizeAgainstLEB128(t *testing.T) {
-	w := NewWriter(nil, ShapeStruct, true)
+	w := NewWriter(nil, ShapeStruct, true, Keys8)
 	writeRecord(w, usuario())
+	// Before Done, so the two are compared over the same span: the final pad is
+	// an artefact of where the record happens to end, not of either encoding.
+	spent := w.Bits()
 	buf := w.Done()
 
-	leb := 4 // header
+	leb := headerBits
 	for _, f := range usuario() {
 		leb += 8
 		switch f.kind {
@@ -507,8 +581,31 @@ func TestSizeAgainstLEB128(t *testing.T) {
 	}
 	leb += 8 // terminator
 	fmt.Printf("Usuario n=1: compact %d B (%d bits), LEB128-with-keys %d bits\n",
-		len(buf), w.Bits(), leb)
-	if w.Bits() > leb {
-		t.Fatalf("compact %d bits is worse than LEB128 %d bits", w.Bits(), leb)
+		len(buf), spent, leb)
+	if spent > leb {
+		t.Fatalf("compact %d bits is worse than LEB128 %d bits", spent, leb)
+	}
+}
+
+// The same record with narrow keys, which is what an explicitly numbered struct
+// gets: five keys and a terminator at four bits each instead of eight, against
+// the one bit the header flag costs.
+func TestSizeNarrowKeys(t *testing.T) {
+	fs := usuario()
+	for i := range fs {
+		fs[i].key = uint8(i + 1) // as if tagged cb:"1".."5"
+	}
+	wide := NewWriter(nil, ShapeStruct, true, Keys8)
+	writeRecord(wide, fs)
+	wideBits := wide.Bits()
+
+	narrow := NewWriter(nil, ShapeStruct, true, Keys4)
+	writeRecord(narrow, fs)
+	narrowBits := narrow.Bits()
+
+	fmt.Printf("Usuario n=1: Keys8 %d B (%d bits), Keys4 %d B (%d bits)\n",
+		len(wide.Done()), wideBits, len(narrow.Done()), narrowBits)
+	if want := wideBits - 4*(len(fs)+1); narrowBits != want {
+		t.Fatalf("narrow spent %d bits, want %d", narrowBits, want)
 	}
 }

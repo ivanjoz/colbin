@@ -3,7 +3,7 @@
 // says the encoder catches itself when they would not.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { load, vectors, hex } from './harness.mjs'
+import { load, vectors, hex, ENCODES } from './harness.mjs'
 
 const wasm = await load()
 const cases = await vectors('messages.json')
@@ -20,7 +20,7 @@ function encodeVerified(text) {
 }
 
 for (const c of cases) {
-  test(`self-check passes: ${c.tier}/${c.name}`, () => {
+  test(`self-check passes: ${c.tier}/${c.name}`, { skip: !ENCODES.has(c.tier) }, () => {
     const r = encodeVerified(c.json)
     assert.ok(r.len >= 0, `self-check rejected a good message: ${out(wasm.exports.jsonErrMessage())}`)
     // The check must not change what is written.
