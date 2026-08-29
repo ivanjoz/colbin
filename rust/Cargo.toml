@@ -1,0 +1,19 @@
+[package]
+name = "colbin"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Decoder for the colbin binary format (compact and standard modes)"
+license = "MIT"
+repository = "https://github.com/ivanjoz/colbin"
+readme = "README.md"
+
+# No runtime dependencies: this crate is a wire-format reader, and a format
+# reader that drags a dependency tree behind it is one more thing to keep in
+# step with whatever else the consumer links.
+[dependencies]
+
+[dev-dependencies]
+# Only the vector corpus needs these; a consumer of the decoder sees neither.
+base64 = "0.22"
+serde_json = "1.0"

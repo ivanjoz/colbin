@@ -606,6 +606,58 @@ returns the caller's own key order.
 Not yet deployed; see [`web/PLAN.md`](web/PLAN.md) for the design and what is
 still open.
 
+## In Rust
+
+[`rust/`](rust/) holds a Rust **decoder**, published as a Cargo crate out of this
+repository. A Cargo workspace and a Go module share one tree without either
+noticing the other: Cargo clones the repo, reads the root manifest and finds the
+member named `colbin`.
+
+```toml
+# Pinned by rev, not tag: the tags here are the Go module's version ladder, so a
+# tag requirement would either entangle the two release cadences or resolve to a
+# tag that predates the crate.
+colbin = { git = "https://github.com/ivanjoz/colbin", rev = "<sha>" }
+```
+
+```rust
+use colbin::{Kind, Schema};
+
+// The caller supplies the layout, because neither binary mode is
+// self-describing — the same contract the Go and AssemblyScript ports have.
+let schema = Schema::from_go(&[
+    ("CompanyID", Kind::Int32),
+    ("ID", Kind::Int32),
+    ("Hash", Kind::Uint64),
+    ("User", Kind::String),
+])?;
+let record = colbin::decode_one(message, &schema)?;
+let user = record.str(schema.fields()[3].id);
+```
+
+It reads both wire modes and the value kinds compact mode itself carries:
+scalars, strings, byte blobs and slices of primitives, with hashed and `cb:"N"`
+field ids. What it does not read is a nested struct, a map, an `interface{}`
+column or a `MarshalJSON` message — those are standard-mode-only shapes, and it
+rejects them rather than half-decoding one. There is no encoder: nothing in Rust
+writes colbin, and an unused encoder is a second specification to keep honest for
+free.
+
+```
+rust/src/       the decoder: bitstream, varint, packed5, compact, standard
+rust/vectors/   Go: the corpus generator, and the vectors it commits
+rust/tests/     the corpus test
+```
+
+Nothing in the corpus is written by hand. Every message comes from
+`colbin.Marshal` on a real Go value; every field id is read out of a schema
+section colbin wrote; every expected value is read back by the Go decoder — the
+compact ones through a `compact.Reader`, the columnar ones through `Unmarshal` —
+and the generator refuses to write a corpus that misses a mode, a shape, a key
+width, a version byte or a value kind. The vectors are committed, so `cargo test`
+needs no Go toolchain; CI regenerates them and fails on a diff, which is what
+catches a Go-side format change nobody ported.
+
 ## Files
 
 | file | role |
@@ -624,6 +676,7 @@ still open.
 | `packed5/` | self-delimiting string codec used by every string path |
 | `comparison/` | 21-model Colbin, Protobuf, JSON v2, and CBOR comparison corpus |
 | `web/` | the AssemblyScript port, its vectors, and the browser playground |
+| `rust/` | the Rust decoder, its Go-generated vectors, and the corpus test |
 | `colbin_test.go` | public API integration test |
 
 ## Limitations
@@ -639,6 +692,11 @@ still open.
   demand) but leaves two encodings of the same value in flight. The browser port
   **decodes** omit-empty messages; its encoder still writes dense columns, so the
   `omitempty` vector tier is skipped in the port's encoder tests.
+- The Rust port is a decoder only, and carries only the value kinds compact mode
+  admits: scalars, strings, byte blobs and slices of primitives. A nested struct,
+  a map, an `interface{}` column or a `MarshalJSON` message is refused with an
+  error naming why. It also rejects a string that is not valid UTF-8, which this
+  package permits — `packed5` is byte exact, and a Rust `String` cannot be.
 - Trusts the input buffer on decode (internal use); malformed data can panic on
   slice bounds rather than returning an error. `DecodeJSON` and `DecodeAny` do
   turn that panic into an error, but still trust the counts they read, so a

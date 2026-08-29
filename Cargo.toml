@@ -1,0 +1,6 @@
+# Cargo workspace for the Rust port. The repository is primarily a Go module;
+# the two build systems share the tree without either noticing the other, and a
+# `cargo` dependency on this repo resolves the member below by name.
+[workspace]
+resolver = "3"
+members = ["rust"]
