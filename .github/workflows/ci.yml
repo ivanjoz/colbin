@@ -112,21 +112,31 @@ jobs:
           path: web/build-site/colbin.wasm
           if-no-files-found: error
 
-      # A pull request stops here: everything above is a check, and a fork's
-      # token has no write access to Pages regardless of what is declared.
+      # Anything that is not main stops here: everything above is a check, a
+      # fork's token has no write access to Pages regardless of what is
+      # declared, and a tag has nothing to deploy that its commit on main did
+      # not already deploy.
       - name: Configure Pages
-        if: github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main'
         uses: actions/configure-pages@v6
         with:
           enablement: true
       - uses: actions/upload-pages-artifact@v5
-        if: github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main'
         with:
           path: web/build-site
 
+  # Only from main, which is what the github-pages environment itself allows: a
+  # tag push carries the same commit main already deployed, so letting the job
+  # start only to have the environment refuse it fails the run for a deploy
+  # nobody wanted twice. Matching the rule here beats arguing with it there.
+  #
+  # The test is the ref rather than the event, so running the workflow by hand
+  # on main still deploys, while a pull request (refs/pull/N/merge) and a tag
+  # (refs/tags/v*) do not.
   deploy:
     needs: build
-    if: github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
