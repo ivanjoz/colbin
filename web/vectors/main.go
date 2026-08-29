@@ -790,8 +790,43 @@ func messageCases() []messageCase {
 		{"nullable", "null-nested", `[{"c":{"x":1}},{"c":null}]`},
 	}
 
-	out := make([]messageCase, 0, len(corpus))
+	// The same corpus again, encoded with omit-empty on, so the port is checked
+	// against messages whose empty columns are a type byte and nothing else.
+	// These carry their own version byte, and the tier is off in the encoder
+	// tests until the port's encoder learns to write them too.
+	omit := []struct{ tier, name, text string }{
+		{"omitempty", "zero-values", `[{"i":0,"s":"","b":false}]`},
+		{"omitempty", "sparse-records", `[{"id":1,"a":0,"s":"","t":""},{"id":2,"a":0,"s":"","t":""},{"id":3,"a":0,"s":"","t":""}]`},
+		{"omitempty", "one-set-one-empty", `[{"id":1,"note":"x"},{"id":2,"note":""}]`},
+		{"omitempty", "empty-strings", `[{"s":""},{"s":""}]`},
+		{"omitempty", "empty-arrays", `[{"v":[]},{"v":[]}]`},
+		{"omitempty", "all-null", `[{"a":null},{"a":null}]`},
+		{"omitempty", "float-zeros", `[{"v":0.0},{"v":0.0}]`},
+		{"omitempty", "clients-1000", clientsJSON(1000)},
+	}
+
+	out := make([]messageCase, 0, len(corpus)+len(omit))
 	for _, c := range corpus {
+		msg, err := encodeJSON(c.text)
+		if err != nil {
+			panic(fmt.Sprintf("%s: %v", c.name, err))
+		}
+		back, err := colbin.DecodeJSON(msg)
+		if err != nil {
+			panic(fmt.Sprintf("%s: decode: %v", c.name, err))
+		}
+		out = append(out, messageCase{
+			Name:    c.name,
+			Tier:    c.tier,
+			JSON:    c.text,
+			Message: hex.EncodeToString(msg),
+			Decoded: string(back),
+		})
+	}
+
+	colbin.SetOmitEmpty(true)
+	defer colbin.SetOmitEmpty(false)
+	for _, c := range omit {
 		msg, err := encodeJSON(c.text)
 		if err != nil {
 			panic(fmt.Sprintf("%s: %v", c.name, err))

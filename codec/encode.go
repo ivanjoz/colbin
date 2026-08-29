@@ -23,7 +23,7 @@ func Marshal(v any) (out []byte, err error) {
 	if err != nil {
 		return nil, err
 	}
-	return appendMessage([]byte{formatVersion}, rv, true)
+	return appendMessage(binaryPrefix(), rv, true)
 }
 
 // recoverEncode turns an encodeError panic raised deep in the any encoder into a
@@ -99,7 +99,17 @@ func appendMessage(prefix []byte, rv reflect.Value, allowCompact bool) (out []by
 	if err != nil {
 		return nil, err
 	}
+	return appendRecords(nil, prefix, ti, recordPtrs, rv.Kind() == reflect.Slice, allowCompact), nil
+}
 
+// appendRecords is the records layout itself, with the element type and one
+// pointer per record already resolved. appendMessage reaches it through reflect;
+// Codec[T] reaches it with both known at compile time, which is the whole of the
+// difference between the two entry points.
+//
+// dst is appended to, so a caller encoding many messages can hand back the same
+// buffer and pay no allocation per message.
+func appendRecords(dst, prefix []byte, ti *typeInfo, recordPtrs []unsafe.Pointer, rootIsSlice, allowCompact bool) []byte {
 	// Compact mode, when the type allows it and the message is small enough for
 	// per-record framing to beat amortised columns. At one record it always wins
 	// -- the columnar header and per-column type bytes have nothing to spread
@@ -108,25 +118,41 @@ func appendMessage(prefix []byte, rv reflect.Value, allowCompact bool) (out []by
 	// gets right, so both are built and the smaller kept.
 	var compactBuf []byte
 	if allowCompact && compactUsable(ti) {
-		if shape, ok := compactShape(rv.Kind() == reflect.Slice, len(recordPtrs)); ok {
-			compactBuf = appendCompact(ti, recordPtrs, shape)
+		if shape, ok := compactShape(rootIsSlice, len(recordPtrs)); ok {
 			if len(recordPtrs) == 1 {
-				return compactBuf, nil
+				return appendCompactTo(dst, ti, recordPtrs, shape)
 			}
+			// Two or three records: the columnar form goes into dst, so the
+			// candidate needs a buffer of its own until the two can be compared.
+			compactBuf = appendCompactTo(nil, ti, recordPtrs, shape)
 		}
 	}
 
-	out = make([]byte, 0, len(prefix)+16+bodySizeHint(ti, len(recordPtrs)))
+	base := len(dst)
+	out := growTo(dst, len(prefix)+16+bodySizeHint(ti, len(recordPtrs)))
 	out = append(out, prefix...)
 	out = binary.AppendUvarint(out, uint64(len(recordPtrs)))
 	out = encodeSubTable(out, ti, recordPtrs)
 	if n := len(recordPtrs); n > 0 {
-		ti.bytesPerRecord.Store(uint32((len(out)-len(prefix))/n + 1))
+		ti.bytesPerRecord.Store(uint32((len(out)-base-len(prefix))/n + 1))
 	}
-	if compactBuf != nil && len(compactBuf) < len(out) {
-		return compactBuf, nil
+	if compactBuf != nil && len(compactBuf) < len(out)-base {
+		return append(out[:base], compactBuf...)
 	}
-	return out, nil
+	return out
+}
+
+// growTo returns dst with room for n more bytes, allocating only when it does
+// not already have it. A fresh buffer is sized from what this type last measured
+// per record, which is the difference between one allocation and a dozen
+// regrows.
+func growTo(dst []byte, n int) []byte {
+	if cap(dst)-len(dst) >= n {
+		return dst
+	}
+	out := make([]byte, len(dst), len(dst)+n)
+	copy(out, dst)
+	return out
 }
 
 // bodySizeHint estimates the body of an n-record message of this type, from what
@@ -191,11 +217,7 @@ func encodeColumn(out []byte, fm *fieldMeta, ptrs []unsafe.Pointer) []byte {
 		putF64(buf)
 		return out
 	case ftString:
-		out = append(out, ftString)
-		for _, p := range ptrs {
-			out = packed5.Append(out, fm.xf.String(p))
-		}
-		return out
+		return appendStringColumn(out, ptrs, fm.offset)
 	case ftBytes:
 		out = append(out, ftBytes)
 		buf := getBlobs(len(ptrs))
@@ -290,11 +312,7 @@ func encodeElemColumn(out []byte, elem *fieldMeta, ptrs []unsafe.Pointer) []byte
 		putF64(buf)
 		return out
 	case ftString:
-		out = append(out, ftString)
-		for _, p := range ptrs {
-			out = packed5.Append(out, *(*string)(p))
-		}
-		return out
+		return appendStringColumn(out, ptrs, 0)
 	case ftBytes:
 		out = append(out, ftBytes)
 		buf := getBlobs(len(ptrs))
@@ -316,6 +334,23 @@ func encodeElemColumn(out []byte, elem *fieldMeta, ptrs []unsafe.Pointer) []byte
 	case ftAny:
 		out = append(out, ftAny)
 		return encodeAnyColumn(out, elem, ptrs) // ptrs already at interface slots
+	}
+	return out
+}
+
+// appendStringColumn writes consecutive packed5 frames, or -- when omit-empty is
+// on and every string is "" -- the type byte alone. An empty frame is one byte,
+// so an untouched string field otherwise costs a byte per record to say nothing.
+// The strings live at p+offset, which is the struct field offset for a record
+// column and zero for an array element column; taking the offset here keeps both
+// callers from having to materialise a second pointer slice.
+func appendStringColumn(out []byte, ptrs []unsafe.Pointer, offset uintptr) []byte {
+	if omitEmpty.Load() && allEmptyStrings(ptrs, offset) {
+		return append(out, ftString|emptyColumnBit)
+	}
+	out = append(out, ftString)
+	for _, p := range ptrs {
+		out = packed5.Append(out, *(*string)(unsafe.Add(p, offset)))
 	}
 	return out
 }

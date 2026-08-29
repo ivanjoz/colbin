@@ -7,6 +7,12 @@ import colvarint "github.com/ivanjoz/colbin/varint"
 // same-width signed type preserves their bit pattern while retaining the
 // codec's narrow fixed-width fallback.
 func appendIntColumn(out []byte, values []int64, width uint8) []byte {
+	// A column of nothing but zeros is the type byte and no payload. This is the
+	// whole of omit-empty for integers, and through the length sub-columns that
+	// frame them, for bytes, arrays and maps as well.
+	if omitEmpty.Load() && allZero(values) {
+		return append(out, ftInt|emptyColumnBit)
+	}
 	out = append(out, ftInt)
 	switch width {
 	case 8:

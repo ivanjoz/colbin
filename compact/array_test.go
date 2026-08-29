@@ -24,7 +24,7 @@ func TestIntArrayRoundTrip(t *testing.T) {
 			i32[i] = int32(cur) // sorted: exercises the delta transform
 			i64[i] = rng.Int64()
 		}
-		w := NewWriter(nil, ShapeStruct, false)
+		w := NewWriter(nil, ShapeStruct, false, Keys8)
 		PutInts(w, i8)
 		PutInts(w, i16)
 		PutInts(w, i32)
@@ -72,7 +72,7 @@ func TestIntArrayMatchesColumnarCodec(t *testing.T) {
 			cur += int32(rng.IntN(50)) + 1
 			sorted[i] = cur
 		}
-		w := NewWriter(nil, ShapeStruct, true)
+		w := NewWriter(nil, ShapeStruct, true, Keys8)
 		before := w.Bits()
 		PutInts(w, sorted)
 		spent := (w.Bits() - before) / 8
@@ -93,7 +93,7 @@ func TestStringArrayRoundTrip(t *testing.T) {
 		{"Ana"},
 		{"", "Lima", "Pedro Gomez", "el niño comió jamón", "\x00\xff binary"},
 	} {
-		w := NewWriter(nil, ShapeStruct, true)
+		w := NewWriter(nil, ShapeStruct, true, Keys8)
 		w.Strs(vals)
 		r, _ := NewReader(w.Done())
 		got := r.Strs()
@@ -109,7 +109,7 @@ func TestFloatAndBoolArrays(t *testing.T) {
 	f64 := []float64{0, math.Pi, math.SmallestNonzeroFloat64, math.MaxFloat64}
 	bs := []bool{true, false, true, true, false, false, true}
 
-	w := NewWriter(nil, ShapeStruct, true)
+	w := NewWriter(nil, ShapeStruct, true, Keys8)
 	w.Float32s(f32)
 	w.Float64s(f64)
 	w.Bools(bs)
@@ -123,7 +123,7 @@ func TestFloatAndBoolArrays(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Seven bools must cost seven bits plus the count, not seven bytes.
-	w2 := NewWriter(nil, ShapeStruct, true)
+	w2 := NewWriter(nil, ShapeStruct, true, Keys8)
 	before := w2.Bits()
 	w2.Bools(bs)
 	if spent := w2.Bits() - before; spent > 8+len(bs) {
@@ -136,7 +136,7 @@ func TestArraysInsideRecord(t *testing.T) {
 	ids := []int32{101, 102, 103, 104}
 	tags := []string{"alpha", "beta"}
 
-	w := NewWriter(nil, ShapeStruct, true)
+	w := NewWriter(nil, ShapeStruct, true, Keys8)
 	w.Key(0x35)
 	w.Int(1234)
 	w.Key(0x40)
@@ -179,7 +179,7 @@ func TestArraysInsideRecord(t *testing.T) {
 // Every array kind must be steppable, so an unknown array field does not
 // derail the rest of the record.
 func TestSkipArrays(t *testing.T) {
-	w := NewWriter(nil, ShapeStruct, true)
+	w := NewWriter(nil, ShapeStruct, true, Keys8)
 	w.Key(1)
 	PutInts(w, []int32{1, 2, 3, 4, 5})
 	w.Key(2)
@@ -213,7 +213,7 @@ func TestSkipArrays(t *testing.T) {
 
 // A corrupt element count must not reach make.
 func TestArrayLengthGuards(t *testing.T) {
-	w := NewWriter(nil, ShapeStruct, true)
+	w := NewWriter(nil, ShapeStruct, true, Keys8)
 	w.bw.putVarint(math.MaxUint64) // a count nothing could satisfy
 	buf := w.Done()
 
@@ -244,7 +244,7 @@ func TestArrayLengthGuards(t *testing.T) {
 }
 
 func FuzzArrays(f *testing.F) {
-	w := NewWriter(nil, ShapeStruct, true)
+	w := NewWriter(nil, ShapeStruct, true, Keys8)
 	PutInts(w, []int32{1, 2, 3})
 	w.Strs([]string{"a", "b"})
 	w.Bools([]bool{true, false})

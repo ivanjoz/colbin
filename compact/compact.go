@@ -4,7 +4,7 @@
 //
 //	import "github.com/ivanjoz/colbin/compact"
 //
-//	w := compact.NewWriter(nil, compact.ShapeStruct, true)
+//	w := compact.NewWriter(nil, compact.ShapeStruct, true, compact.Keys8)
 //	w.Key(0x35); w.Int(1234)
 //	w.Key(0x9a); w.String("Usuario1")
 //	w.End()
@@ -21,12 +21,13 @@
 //
 // # Header
 //
-// Four bits, after which the message is one LSB-first bitstream with no
+// Five bits, after which the message is one LSB-first bitstream with no
 // alignment anywhere until a final pad to a byte boundary:
 //
 //	bit  0    1              compact mode
 //	bit  1    ALL_POSITIVE   every integer in the message is >= 0
 //	bits 2-3  shape          0 = lone struct, 1..3 = array of that many records
+//	bit  4    NARROW_KEYS    field ids are 4 bits wide rather than 8
 //
 // Shape 0 and shape 1 both carry one record; they differ only in whether it is
 // rendered as an object or as an array of one, which the binary path takes from
@@ -34,10 +35,24 @@
 //
 // # Records
 //
-// A record is a run of [key:8][value] pairs closed by TerminatorKey. A field
+// A record is a run of [key][value] pairs closed by the terminator key. A field
 // holding its zero value is omitted entirely, so an absent field costs nothing
-// beyond the terminator the record already owes. The key is the same 8-bit field
-// id the standard mode uses, so a reader resolves fields by id, not by position.
+// beyond the terminator the record already owes. The key is the same field id
+// the standard mode uses, so a reader resolves fields by id, not by position.
+//
+// # Key width
+//
+// A key is 8 bits by default, matching the standard mode's field id, with 255
+// closing a record. When every id a message writes is 14 or less the header's
+// NARROW_KEYS bit selects a 4-bit key instead, with 15 closing the record — the
+// same arrangement one nibble down, so a reader still resolves fields by id and
+// still steps over the ones it does not know.
+//
+// That halves the framing: a record of f present fields spends 4*(f+1) fewer
+// bits, against the one bit the header flag costs the whole message. It pays for
+// itself on the first field of the first record. Ids are what decide it, not the
+// field count, so it wants explicit small ids in the struct tags (`cb:"1"`,
+// `cb:"2"`, ...); a hashed id lands anywhere in 0..254 and forces the wide key.
 //
 // # Integers
 //
@@ -106,14 +121,64 @@ const MaxRecords = 3
 
 // TerminatorKey closes a record's key/value run. It matches the field id the
 // standard mode reserves, so no real field can collide with it.
+//
+// It is the id a caller sees in either key width: under Keys4 the terminator on
+// the wire is 15, and Reader.Key reports it as TerminatorKey so that the check
+// closing a record reads the same on both paths.
 const TerminatorKey uint8 = 255
+
+// KeyWidth is how many bits a field id occupies, chosen once per message and
+// recorded in the header's NARROW_KEYS bit.
+type KeyWidth uint8
+
+const (
+	// Keys8 is the default: ids 0..254, with 255 closing a record. It is the
+	// standard mode's field id unchanged, so any struct can use it.
+	Keys8 KeyWidth = 8
+	// Keys4 is the narrow form: ids 0..MaxNarrowKey, with 15 closing a record.
+	// It costs one header bit and saves four on every key, so it wins from the
+	// first field onwards -- but only a struct whose ids are all small can use
+	// it, which in practice means explicit `cb:"1"`-style tags.
+	Keys4 KeyWidth = 4
+)
+
+// MaxNarrowKey is the largest field id Keys4 can carry. 15 is the terminator, so
+// the ids stop one short of it, exactly as 255 stops the wide ones at 254.
+const MaxNarrowKey uint8 = 14
+
+// narrow reports whether k is the 4-bit width, which is what the header carries.
+// Only Keys4 is narrow, so any other value -- including one a caller invented --
+// resolves to the wide key rather than to a width nothing can read.
+func (k KeyWidth) narrow() bool { return k == Keys4 }
+
+// bits is the width of one key, and terminator is the id that closes a record at
+// that width.
+func (k KeyWidth) bits() uint8 {
+	if k.narrow() {
+		return 4
+	}
+	return 8
+}
+
+func (k KeyWidth) terminator() uint64 {
+	if k.narrow() {
+		return uint64(narrowTerminatorKey)
+	}
+	return uint64(TerminatorKey)
+}
+
+// narrowTerminatorKey closes a record under Keys4. It is TerminatorKey's role one
+// nibble down: the top id at that width, reserved so no field can hold it.
+const narrowTerminatorKey uint8 = 15
 
 // Header bit widths, in the order they are written.
 const (
-	modeBits  = 1 // 1 == compact
-	flagBits  = 1 // ALL_POSITIVE
-	shapeBits = 2
-	keyBits   = 8
+	modeBits   = 1 // 1 == compact
+	flagBits   = 1 // ALL_POSITIVE
+	shapeBits  = 2
+	narrowBits = 1 // NARROW_KEYS
+
+	headerBits = modeBits + flagBits + shapeBits + narrowBits
 )
 
 // IsCompact reports whether buf holds a compact-mode message, which is the whole

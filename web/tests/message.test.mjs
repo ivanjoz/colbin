@@ -3,19 +3,17 @@
 // encoder grows; a tier that is off is skipped loudly rather than passing.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { load, vectors, hex } from './harness.mjs'
+import { load, vectors, hex, ENCODES } from './harness.mjs'
 
 const wasm = await load()
 const cases = await vectors('messages.json')
-
-const IMPLEMENTED = new Set(['scalar', 'float', 'nested', 'array', 'nullable', 'value'])
 
 function out(len) {
   return Buffer.from(wasm.u8.subarray(wasm.exports.outPtr(), wasm.exports.outPtr() + len)).toString()
 }
 
 for (const c of cases) {
-  test(`${c.tier}: ${c.name}`, { skip: !IMPLEMENTED.has(c.tier) }, () => {
+  test(`${c.tier}: ${c.name}`, { skip: !ENCODES.has(c.tier) }, () => {
     const src = Buffer.from(c.json, 'utf8')
     wasm.u8.set(src, wasm.exports.inPtr())
     const len = wasm.exports.encodeJSON(src.length)

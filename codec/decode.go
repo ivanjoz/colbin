@@ -47,22 +47,27 @@ func Unmarshal(data []byte, dst any) error {
 	// Walk the destination pointer chain first: both modes decode into the
 	// concrete value, and compact mode dispatches on bit 0 of byte 0 before any
 	// version byte exists to read.
+	return decodeInto(data, derefTarget(rv))
+}
+
+// decodeInto decodes into a target the caller has already walked down to a
+// concrete value. Unmarshal reaches it through reflect on the destination
+// pointer; Codec[T] reaches it only for the forms its fast path does not cover.
+func decodeInto(data []byte, target reflect.Value) error {
 	if compact.IsCompact(data) {
-		return decodeCompact(data, derefTarget(rv))
+		return decodeCompact(data, target)
 	}
 
 	dec := &decoder{data: data}
 	switch v := dec.readByte(); v {
-	case formatVersion:
-	case jsonFormatVersion:
+	case formatVersion, formatVersionOmitEmpty:
+	case jsonFormatVersion, jsonFormatVersionOmitEmpty:
 		// A self-describing message: the body underneath is identical, so the
 		// schema section is simply stepped over when the Go type is known.
 		dec.pos += int(dec.readUvarint())
 	default:
 		return fmt.Errorf("colbin: bad version byte 0x%02x", v)
 	}
-
-	target := derefTarget(rv)
 
 	// Non-record types use value mode: a single N=1 element column, no record count.
 	if !topLevelIsRecords(target.Type()) {
@@ -161,7 +166,6 @@ func (dec *decoder) decodeColumn(fm *fieldMeta, n int, ptrs []unsafe.Pointer) er
 			setFloat64(fm, p, vals[i])
 		}
 	case ftString:
-		dec.readByte() // top flags byte (carries only the type)
 		if err := dec.readStringColumn(len(ptrs), func(i int, s string) {
 			fm.xf.SetString(ptrs[i], s)
 		}); err != nil {
@@ -248,7 +252,6 @@ func (dec *decoder) decodeElemColumn(elem *fieldMeta, elemType reflect.Type, ele
 			setFloat64At(elem.goKind, p, vals[i])
 		}
 	case ftString:
-		dec.readByte()
 		if err := dec.readStringColumn(len(ptrs), func(i int, s string) {
 			*(*string)(ptrs[i]) = s
 		}); err != nil {
@@ -336,6 +339,16 @@ func cloneBytes(b []byte) []byte {
 // The strings can only be cut after the arena has stopped growing, so the
 // offsets are recorded first and resolved in a second, allocation-free pass.
 func (dec *decoder) readStringColumn(n int, set func(i int, s string)) error {
+	flags := dec.readByte()
+	if flags&7 != ftString {
+		return fmt.Errorf("colbin: expected string column at pos %d", dec.pos-1)
+	}
+	if flags&emptyColumnBit != 0 {
+		for i := range n {
+			set(i, "")
+		}
+		return nil
+	}
 	offs := getI32(n + 1)
 	defer putI32(offs)
 	// Sized for the common short string; append grows it geometrically from here,
@@ -370,12 +383,18 @@ func (dec *decoder) readPacked5String() (string, error) {
 	return s, nil
 }
 
-// readIntColumn reads a colbin type byte followed by one varint array frame.
+// readIntColumn reads a colbin type byte followed by one varint array frame. The
+// empty bit says the column held nothing but zeros and carries no frame at all,
+// which is what a zero value costs under omit-empty.
 func (dec *decoder) readIntColumn(n int, width uint8) ([]int64, error) {
-	if flags := dec.readByte(); flags&7 != ftInt {
+	flags := dec.readByte()
+	if flags&7 != ftInt {
 		return nil, fmt.Errorf("colbin: expected integer column at pos %d", dec.pos-1)
 	}
 	out := make([]int64, n)
+	if flags&emptyColumnBit != 0 {
+		return out, nil
+	}
 	consumed, err := decodeIntColumn(dec.data[dec.pos:], n, width, out)
 	if err != nil {
 		return nil, err

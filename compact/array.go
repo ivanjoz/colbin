@@ -32,9 +32,7 @@ func PutInts[T varint.Signed](w *Writer, vals []T) {
 		return
 	}
 	w.scratch = varint.AppendArray(w.scratch[:0], vals)
-	for _, b := range w.scratch {
-		w.bw.put(uint64(b), 8)
-	}
+	w.bw.putBytes(w.scratch)
 }
 
 // GetInts reverses PutInts. It must be instantiated with the same T.

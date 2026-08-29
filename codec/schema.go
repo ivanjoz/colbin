@@ -54,7 +54,7 @@ func MarshalJSON(v any) (out []byte, err error) {
 		return nil, err
 	}
 	prefix := make([]byte, 0, 12+len(schema))
-	prefix = append(prefix, jsonFormatVersion)
+	prefix = append(prefix, jsonVersionByte())
 	prefix = binary.AppendUvarint(prefix, uint64(len(schema)))
 	prefix = append(prefix, schema...)
 	return appendMessage(prefix, rv, false)

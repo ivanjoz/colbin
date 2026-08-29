@@ -14,28 +14,49 @@ type Reader struct {
 	br          bitReader
 	shape       Shape
 	allPositive bool
+	keys        KeyWidth
+	keyBits     uint8  // keys.bits(), hoisted out of the per-key path
+	terminator  uint64 // keys.terminator(), likewise
 	scratch     []byte // reused buffer for shifting packed5 frames into place
 }
 
 // NewReader parses the header of a compact message. It rejects a buffer whose
 // first bit is clear, which is the whole of the mode discrimination.
 func NewReader(buf []byte) (*Reader, error) {
-	if !IsCompact(buf) {
-		return nil, ErrNotCompact
-	}
-	r := &Reader{br: newBitReader(buf)}
-	r.br.get(modeBits) // the compact bit, already checked
-	r.allPositive = r.br.getBool()
-	r.shape = Shape(r.br.get(shapeBits))
-	if r.br.err != nil {
-		return nil, r.br.err
+	r := &Reader{}
+	if err := r.Reset(buf); err != nil {
+		return nil, err
 	}
 	return r, nil
 }
 
-// Shape and AllPositive report what the header declared.
+// Reset re-aims a reader at another message, so one reader can decode many. It
+// keeps the scratch buffer used to shift unaligned packed5 frames into place,
+// which is what a per-message reader allocates again every time.
+//
+// The previous message is dropped even when the new one is rejected, so
+// Reset(nil) is how a pooled reader lets go of the buffer it just read.
+func (r *Reader) Reset(buf []byte) error {
+	r.br = bitReader{}
+	if !IsCompact(buf) {
+		return ErrNotCompact
+	}
+	r.br = bitReader{buf: buf, limit: len(buf) * 8}
+	r.br.get(modeBits) // the compact bit, already checked
+	r.allPositive = r.br.getBool()
+	r.shape = Shape(r.br.get(shapeBits))
+	r.keys = Keys8
+	if r.br.getBool() {
+		r.keys = Keys4
+	}
+	r.keyBits, r.terminator = r.keys.bits(), r.keys.terminator()
+	return r.br.err
+}
+
+// Shape, AllPositive and Keys report what the header declared.
 func (r *Reader) Shape() Shape      { return r.shape }
 func (r *Reader) AllPositive() bool { return r.allPositive }
+func (r *Reader) Keys() KeyWidth    { return r.keys }
 
 // Records is how many records the message holds, 1..MaxRecords.
 func (r *Reader) Records() int { return r.shape.Records() }
@@ -43,8 +64,19 @@ func (r *Reader) Records() int { return r.shape.Records() }
 // Err reports the first error any read hit, or nil.
 func (r *Reader) Err() error { return r.br.err }
 
-// Key reads a field id. TerminatorKey closes the current record.
-func (r *Reader) Key() uint8 { return uint8(r.br.get(keyBits)) }
+// Key reads a field id at whichever width the header declared. TerminatorKey
+// closes the current record.
+//
+// A narrow record ends on 15, which is reported as TerminatorKey so that the
+// caller's loop is the same on both paths. Nothing is lost by folding the two:
+// Keys4 reserves 15 the way Keys8 reserves 255, so no field can hold it.
+func (r *Reader) Key() uint8 {
+	k := r.br.get(r.keyBits)
+	if k == r.terminator {
+		return TerminatorKey
+	}
+	return uint8(k)
+}
 
 // Int reverses Writer.Int, applying whatever ALL_POSITIVE declared.
 func (r *Reader) Int() int64 {

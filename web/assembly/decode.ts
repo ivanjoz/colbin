@@ -29,6 +29,13 @@ import {
 
 const JSON_FORMAT_VERSION: u8 = 0x04
 const BINARY_FORMAT_VERSION: u8 = 0x02
+// The same two formats written with omit-empty on: a column of nothing but empty
+// values is its type byte alone, with EMPTY_COLUMN set and no payload. The
+// version says so outright so a reader that does not know the bit refuses the
+// message instead of walking into the next column.
+const JSON_FORMAT_VERSION_OMIT_EMPTY: u8 = 0x08
+const BINARY_FORMAT_VERSION_OMIT_EMPTY: u8 = 0x06
+const EMPTY_COLUMN: u8 = 1 << 7
 const SCH_RECORDS: u8 = 1 << 0
 const SCH_SINGLE_STRUCT: u8 = 1 << 1
 const DESC_NULLABLE: u8 = 1 << 3
@@ -197,12 +204,12 @@ export class Decoder {
       this.diag.fail(D_UNSUPPORTED, 0, '', 'this is a compact-mode message, which is not implemented yet')
       return false
     }
-    if (version == BINARY_FORMAT_VERSION) {
+    if (version == BINARY_FORMAT_VERSION || version == BINARY_FORMAT_VERSION_OMIT_EMPTY) {
       this.diag.fail(D_UNSUPPORTED, 0, '',
         'this is a binary-mode message: it carries no schema, so it can only be read with the type that wrote it')
       return false
     }
-    if (version != JSON_FORMAT_VERSION) {
+    if (version != JSON_FORMAT_VERSION && version != JSON_FORMAT_VERSION_OMIT_EMPTY) {
       this.fail('unknown format version ' + version.toString())
       return false
     }
@@ -421,6 +428,16 @@ export class Decoder {
 
     if (d.ft == FT_STRING) {
       const out = new Array<Val>(n)
+      if ((flags & EMPTY_COLUMN) != 0) {
+        // Nothing but "", and no frames follow.
+        for (let i = 0; i < n; i++) {
+          const v = new Val()
+          v.tag = V_STRING
+          v.bytes = new Writer(0).take()
+          unchecked((out[i] = v))
+        }
+        return out
+      }
       for (let i = 0; i < n; i++) {
         const w = new Writer(32)
         if (!packed5Decode(this.r, w)) {
@@ -478,6 +495,9 @@ export class Decoder {
       return null
     }
     const out = new Int64Array(n)
+    // Nothing but zeros, and no frame follows. Every column framed by a length
+    // sub-column -- bytes, arrays, maps -- collapses through this one.
+    if ((flags & EMPTY_COLUMN) != 0) return out
     if (!decodeArray(this.r, n, out, bitWidth)) {
       this.checkReader()
       this.fail('malformed integer column')

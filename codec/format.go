@@ -7,6 +7,14 @@ package codec
 // package), so an odd version byte would be read as a compact message.
 const formatVersion byte = 0x02
 
+// formatVersionOmitEmpty prefixes a message written with omit-empty on (see
+// omitempty.go). The body differs only in that a column of nothing but empty
+// values is its type byte alone, which a decoder reads from the type byte's
+// empty bit and needs no configuration for -- but a decoder that predates the
+// flag would miss that bit and walk into the next column, so the version says so
+// outright and such a decoder rejects the message instead.
+const formatVersionOmitEmpty byte = 0x06
+
 // reserved field-id: 255 is never assigned, so a struct may have at most 254
 // fields and the id space always has a free "terminator" slot.
 const reservedFieldID uint8 = 255
@@ -39,6 +47,10 @@ const (
 // Unmarshal); a reader that does not uses the schema to produce JSON (see
 // DecodeAny / DecodeJSON).
 const jsonFormatVersion byte = 0x04
+
+// jsonFormatVersionOmitEmpty is jsonFormatVersion for a message written with
+// omit-empty on, for the same reason formatVersionOmitEmpty exists.
+const jsonFormatVersionOmitEmpty byte = 0x08
 
 // Scalar kinds recorded in a schema descriptor for ftInt/ftFloat columns. The
 // wire carries only the ftInt class, so width and signedness — needed both to

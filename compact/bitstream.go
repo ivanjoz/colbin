@@ -1,15 +1,24 @@
 package compact
 
+import "encoding/binary"
+
 // LSB-first bit packing. Values are written low bit first and the reader mirrors
 // that order, so nothing in a compact message is byte aligned except the final
 // pad. Writes and reads are split into chunks of at most 32 bits so the uint64
-// accumulator, which holds up to 7 leftover bits between calls, can never
-// overflow: 7 + 32 < 64.
+// accumulator, which holds up to 31 leftover bits between calls, can never
+// overflow: 31 + 32 < 64.
+//
+// Both sides move four bytes at a time. A bit codec that appends or loads one
+// byte per iteration spends most of its time on the loop rather than on the
+// bits: a compact record is a run of short fields, so the per-call overhead is
+// what the format actually costs. The writer therefore holds up to 31 pending
+// bits and emits a whole uint32 when it has one, and the reader takes eight
+// bytes in a single load and shifts the field out of them.
 
 // bitWriter accumulates bits LSB-first into buf.
 type bitWriter struct {
 	buf     []byte
-	current uint64 // pending bits not yet flushed to buf (always < 8 between calls)
+	current uint64 // pending bits not yet flushed to buf (always < 32 between calls)
 	nbits   uint8  // valid bits currently held in current
 }
 
@@ -32,7 +41,8 @@ func (w *bitWriter) putBool(b bool) {
 	w.chunk(0, 1)
 }
 
-// chunk writes width <= 32 bits, keeping every shift inside uint64 range.
+// chunk writes width <= 32 bits, keeping every shift inside uint64 range: at
+// most 31 pending bits plus 32 new ones is 63.
 func (w *bitWriter) chunk(v uint64, width uint8) {
 	if width == 0 {
 		return
@@ -40,6 +50,32 @@ func (w *bitWriter) chunk(v uint64, width uint8) {
 	v &= (uint64(1) << width) - 1
 	w.current |= v << w.nbits
 	w.nbits += width
+	if w.nbits >= 32 {
+		w.buf = binary.LittleEndian.AppendUint32(w.buf, uint32(w.current))
+		w.current >>= 32
+		w.nbits -= 32
+	}
+}
+
+// putBytes writes b as consecutive 8-bit units. When the stream is already byte
+// aligned -- which it is for a packed5 frame that follows a whole number of
+// bytes -- the bytes are copied straight in rather than shifted through the
+// accumulator one at a time.
+func (w *bitWriter) putBytes(b []byte) {
+	if w.nbits%8 == 0 {
+		w.flushWhole()
+		w.buf = append(w.buf, b...)
+		return
+	}
+	for _, x := range b {
+		w.chunk(uint64(x), 8)
+	}
+}
+
+// flushWhole moves every complete pending byte into buf, leaving current with
+// only the bits that do not fill one. It is only correct to call when what
+// follows starts on a byte boundary.
+func (w *bitWriter) flushWhole() {
 	for w.nbits >= 8 {
 		w.buf = append(w.buf, byte(w.current))
 		w.current >>= 8
@@ -55,6 +91,7 @@ func (w *bitWriter) bits() int { return len(w.buf)*8 + int(w.nbits) }
 // its terminator key and a message ends at its last record, so the decoder stops
 // before reaching it.
 func (w *bitWriter) flush() []byte {
+	w.flushWhole()
 	if w.nbits > 0 {
 		w.buf = append(w.buf, byte(w.current))
 		w.current = 0
@@ -103,17 +140,23 @@ func (r *bitReader) getBool() bool { return r.get(1) == 1 }
 
 // chunk reads width <= 32 bits. The caller has already bounds checked the whole
 // read, so this only has to assemble bytes.
+//
+// A width of up to 32 bits starting mid byte spans at most 5 bytes, so eight
+// bytes always cover it and the shift stays inside uint64: 7 + 32 is 39. Away
+// from the end of the buffer that is one unaligned load; the last few bytes take
+// the copy path, since a load there would run off the slice.
 func (r *bitReader) chunk(width uint8) uint64 {
 	if width == 0 {
 		return 0
 	}
-	var v uint64
 	i, sh := r.pos/8, uint(r.pos%8)
-	// A width of up to 32 bits starting mid byte spans at most 5 bytes.
-	for n, off := 0, 0; off < int(sh)+int(width); n, off = n+1, off+8 {
-		if i+n < len(r.buf) {
-			v |= uint64(r.buf[i+n]) << uint(off)
-		}
+	var v uint64
+	if i+8 <= len(r.buf) {
+		v = binary.LittleEndian.Uint64(r.buf[i:])
+	} else {
+		var tail [8]byte
+		copy(tail[:], r.buf[i:])
+		v = binary.LittleEndian.Uint64(tail[:])
 	}
 	r.pos += int(width)
 	return (v >> sh) & ((uint64(1) << width) - 1)

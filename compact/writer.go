@@ -2,6 +2,7 @@ package compact
 
 import (
 	"math"
+	"strconv"
 
 	"github.com/ivanjoz/colbin/packed5"
 )
@@ -17,6 +18,9 @@ type Writer struct {
 	bw          bitWriter
 	shape       Shape
 	allPositive bool
+	keys        KeyWidth
+	keyBits     uint8  // keys.bits(), hoisted out of the per-key path
+	terminator  uint64 // keys.terminator(), likewise
 	scratch     []byte // reused packed5 frame buffer
 }
 
@@ -28,27 +32,64 @@ type Writer struct {
 // a pass over the whole message before the first bit is written, which is why it
 // is a parameter rather than something the writer infers: at three records that
 // pre-scan is free, and in standard mode it would undo the single pass encoder.
-func NewWriter(out []byte, shape Shape, allPositive bool) *Writer {
-	w := &Writer{bw: bitWriter{buf: out}, shape: shape, allPositive: allPositive}
-	w.bw.put(1, modeBits)
-	w.bw.putBool(allPositive)
-	w.bw.put(uint64(shape), shapeBits)
+//
+// keys is Keys8 unless every field id the caller will write is at most
+// MaxNarrowKey, in which case Keys4 halves what the key run costs. It is a
+// parameter for the same reason: the ids are a property of the caller's type,
+// known before the first bit, and picking the width per message means the writer
+// cannot discover mid-record that it guessed wrong.
+func NewWriter(out []byte, shape Shape, allPositive bool, keys KeyWidth) *Writer {
+	w := &Writer{}
+	w.Reset(out, shape, allPositive, keys)
 	return w
 }
 
-// Shape and AllPositive report what the header was built with.
+// Reset re-aims a writer at a fresh message, so one writer can encode many. It
+// is what makes a Writer poolable: the packed5 and varint scratch buffers it has
+// already grown are kept, which is the allocation a per-message writer pays
+// again on every message.
+//
+// out is appended to, exactly as in NewWriter; passing buf[:0] reuses a buffer
+// the caller owns and drops the encoder's last allocation with it.
+func (w *Writer) Reset(out []byte, shape Shape, allPositive bool, keys KeyWidth) {
+	if !keys.narrow() {
+		keys = Keys8 // anything that is not the narrow width is the wide one
+	}
+	w.bw.buf, w.bw.current, w.bw.nbits = out, 0, 0
+	w.shape, w.allPositive = shape, allPositive
+	w.keys, w.keyBits, w.terminator = keys, keys.bits(), keys.terminator()
+
+	w.bw.put(1, modeBits)
+	w.bw.putBool(allPositive)
+	w.bw.put(uint64(shape), shapeBits)
+	w.bw.putBool(keys.narrow())
+}
+
+// Shape, AllPositive and Keys report what the header was built with.
 func (w *Writer) Shape() Shape      { return w.shape }
 func (w *Writer) AllPositive() bool { return w.allPositive }
+func (w *Writer) Keys() KeyWidth    { return w.keys }
 
 // Bits is how many bits have been written, header included. Useful for sizing
 // experiments; the final message is this rounded up to a byte.
 func (w *Writer) Bits() int { return w.bw.bits() }
 
 // Key writes a field id, introducing the value that follows.
-func (w *Writer) Key(k uint8) { w.bw.put(uint64(k), keyBits) }
+//
+// Under Keys4 an id above MaxNarrowKey does not fit, and truncating it would
+// silently rename the field or forge a terminator. That is a caller error the
+// writer has no way to report -- it has no error to return and the message is
+// half built -- so it panics rather than emitting a message that decodes wrong.
+func (w *Writer) Key(k uint8) {
+	if w.keys.narrow() && k > MaxNarrowKey {
+		panic("colbin: compact field id " + strconv.Itoa(int(k)) + " does not fit a 4-bit key")
+	}
+	w.bw.put(uint64(k), w.keyBits)
+}
 
-// End closes the current record with the terminator key.
-func (w *Writer) End() { w.bw.put(uint64(TerminatorKey), keyBits) }
+// End closes the current record with the terminator key, at whichever width the
+// header declared.
+func (w *Writer) End() { w.bw.put(w.terminator, w.keyBits) }
 
 // Int writes a signed value. With ALL_POSITIVE set the payload is the magnitude,
 // which is one bit narrower than the zigzag the flag's absence forces.
@@ -77,18 +118,14 @@ func (w *Writer) Float64(f float64) { w.bw.put(math.Float64bits(f), 64) }
 // the bitstream happens to be.
 func (w *Writer) Str(s string) {
 	w.scratch = packed5.Append(w.scratch[:0], s)
-	for _, b := range w.scratch {
-		w.bw.put(uint64(b), 8)
-	}
+	w.bw.putBytes(w.scratch)
 }
 
 // Bytes writes a length-prefixed blob. Unlike a string it has no codec of its
 // own, so the length uses the same varint as every other integer.
 func (w *Writer) Bytes(b []byte) {
 	w.bw.putVarint(uint64(len(b)))
-	for _, x := range b {
-		w.bw.put(uint64(x), 8)
-	}
+	w.bw.putBytes(b)
 }
 
 // Done pads the stream to a byte boundary and returns the finished message. The

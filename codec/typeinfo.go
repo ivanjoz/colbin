@@ -72,10 +72,11 @@ type typeInfo struct {
 	// wasted guess — no correctness stake, and no lock needed.
 	bytesPerRecord atomic.Uint32
 
-	// compactMode memoises whether this type can use compact mode (see
-	// compact_mode.go). The answer depends only on the layout, so it is computed
-	// once on first use; a race just recomputes the same value.
-	compactMode atomic.Int32
+	// cplan is the compact-mode plan for this type: whether compact mode can
+	// carry it at all, the key width its field ids allow, and one resolved op
+	// per field (see compact_plan.go). It depends only on the layout, so it is
+	// built once on first use; a race builds the same plan twice and keeps one.
+	cplan atomic.Pointer[compactPlan]
 }
 
 var typeInfoCache sync.Map // reflect.Type -> *typeInfo
