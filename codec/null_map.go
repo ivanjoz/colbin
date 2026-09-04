@@ -1,6 +1,7 @@
 package codec
 
 import (
+	"fmt"
 	"reflect"
 	"unsafe"
 )
@@ -152,8 +153,12 @@ func (dec *decoder) decodeMapColumn(fm *fieldMeta, n int, slotPtrs []unsafe.Poin
 	if err != nil {
 		return err
 	}
+	defer putI64(lengths)
 	total := 0
-	for _, l := range lengths {
+	for _, l := range *lengths {
+		if l < 0 || l > int64(len(dec.data)) {
+			return fmt.Errorf("colbin: map length %d out of range", l)
+		}
 		total += int(l)
 	}
 	keys := reflect.MakeSlice(reflect.SliceOf(fm.mapKeyType), total, total)
@@ -172,7 +177,7 @@ func (dec *decoder) decodeMapColumn(fm *fieldMeta, n int, slotPtrs []unsafe.Poin
 	}
 	idx := 0
 	for i := range n {
-		l := int(lengths[i])
+		l := int((*lengths)[i])
 		if l == 0 {
 			continue // leave the map field nil (matches Go zero value)
 		}

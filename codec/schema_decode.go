@@ -295,14 +295,16 @@ func (dec *decoder) jsonColumn(d *jsonDesc, sch *jsonSchema, n int) ([]any, erro
 		if err != nil {
 			return nil, err
 		}
-		for i, v := range vals {
+		for i, v := range *vals {
 			out[i] = scalarFromInt64(d.kind, v)
 		}
+		putI64(vals)
 	case ftFloat:
 		vals := dec.readFloatColumn(n)
-		for i, v := range vals {
+		for i, v := range *vals {
 			out[i] = dec.floatValue(d.kind, v)
 		}
+		putF64(vals)
 	case ftString:
 		if err := dec.readStringColumn(n, func(i int, s string) { out[i] = s }); err != nil {
 			return nil, err
@@ -313,9 +315,10 @@ func (dec *decoder) jsonColumn(d *jsonDesc, sch *jsonSchema, n int) ([]any, erro
 		if err != nil {
 			return nil, err
 		}
-		for i, b := range blobs {
+		for i, b := range *blobs {
 			out[i] = cloneBytes(b)
 		}
+		putBlobs(blobs)
 	case ftStruct:
 		dec.readByte() // flags (ftStruct)
 		return dec.jsonSubTable(sch.structs[d.structIdx], sch, n)
@@ -348,8 +351,11 @@ func (dec *decoder) jsonArrayColumn(d *jsonDesc, sch *jsonSchema, n int) ([]any,
 	if err != nil {
 		return nil, err
 	}
+	// Held until this column is done: the recursive jsonColumn below borrows
+	// from the same pool, so returning it early would hand out this buffer.
+	defer putI64(lengths)
 	total := 0
-	for _, l := range lengths {
+	for _, l := range *lengths {
 		total += int(l)
 	}
 	var flat []any
@@ -360,7 +366,7 @@ func (dec *decoder) jsonArrayColumn(d *jsonDesc, sch *jsonSchema, n int) ([]any,
 	}
 	out := make([]any, n)
 	at := 0
-	for i, l := range lengths {
+	for i, l := range *lengths {
 		if l == 0 {
 			continue
 		}
@@ -378,8 +384,11 @@ func (dec *decoder) jsonMapColumn(d *jsonDesc, sch *jsonSchema, n int) ([]any, e
 	if err != nil {
 		return nil, err
 	}
+	// Held until this column is done: the recursive jsonColumn below borrows
+	// from the same pool, so returning it early would hand out this buffer.
+	defer putI64(lengths)
 	total := 0
-	for _, l := range lengths {
+	for _, l := range *lengths {
 		total += int(l)
 	}
 	var keys, vals []any
@@ -395,7 +404,7 @@ func (dec *decoder) jsonMapColumn(d *jsonDesc, sch *jsonSchema, n int) ([]any, e
 	}
 	out := make([]any, n)
 	at := 0
-	for i, l := range lengths {
+	for i, l := range *lengths {
 		if l == 0 {
 			continue // nil map, like the typed decoder
 		}
