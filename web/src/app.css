@@ -43,3 +43,14 @@ code,
 pre {
   font-family: var(--mono);
 }
+
+/* Below the two-pane breakpoint the app stops being a fixed-height dashboard
+   and becomes an ordinary scrolling document: three panes that each own a
+   scrollbar are unreadable on a screen that fits one of them. */
+@media (max-width: 860px) {
+  html,
+  body {
+    height: auto;
+    min-height: 100dvh;
+  }
+}

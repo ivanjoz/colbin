@@ -82,7 +82,10 @@
     font-size: 12px;
     line-height: 1.6;
     overflow: auto;
-    max-height: 300px;
+    max-height: min(300px, 45dvh);
+    /* The lines are wider than a phone; let the dump scroll sideways on its
+       own rather than dragging the page with it. */
+    overscroll-behavior-x: contain;
   }
 
   .line {

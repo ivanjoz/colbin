@@ -185,7 +185,7 @@ try {
   await wait(700)
   await evaluate(
     "document.querySelector('.tree .row')" +
-      ".dispatchEvent(new MouseEvent('mouseenter', {bubbles: true}))"
+      ".dispatchEvent(new PointerEvent('pointerenter', {bubbles: true, pointerType: 'mouse'}))"
   )
   await wait(200) // Svelte applies the update on a microtask, not synchronously
   const hover = await evaluate("document.querySelectorAll('.hex .cell.hit').length")
@@ -198,7 +198,7 @@ try {
   // first kilobyte — otherwise the dump lights up nothing and reads as broken.
   await evaluate(
     "Array.from(document.querySelectorAll('.tree .row')).find(r => /email/.test(r.textContent))" +
-      ".dispatchEvent(new MouseEvent('mouseenter', {bubbles: true}))"
+      ".dispatchEvent(new PointerEvent('pointerenter', {bubbles: true, pointerType: 'mouse'}))"
   )
   await wait(200)
   const far = await evaluate("document.querySelectorAll('.hex .cell.hit').length")
@@ -237,6 +237,51 @@ try {
   )
   check('the page does not scroll sideways', overflow.w <= overflow.winW, JSON.stringify(overflow))
   check('the page does not scroll down', overflow.h <= overflow.winH, JSON.stringify(overflow))
+
+  // A phone. The same page, one column, and above all not one pixel wider
+  // than the screen — a sideways scroll is what "not responsive" looks like.
+  await send('Emulation.setDeviceMetricsOverride', {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 2,
+    mobile: true,
+  })
+  await send('Page.navigate', { url: origin })
+  await wait(2500)
+
+  const phone = await evaluate(
+    '(() => {' +
+      'const tracks = (el) => getComputedStyle(el).gridTemplateColumns.split(" ").length;' +
+      // Whatever sticks out, named, so a failure says which element to fix.
+      // The hex dump and the example strip scroll sideways on purpose, so
+      // their contents being wider than the screen is the design, not a bug.
+      'const wide = Array.from(document.querySelectorAll("body *"))' +
+      '  .filter(el => !el.closest(".hex, aside ul"))' +
+      '  .filter(el => el.getBoundingClientRect().right > window.innerWidth + 1)' +
+      '  .map(el => el.tagName.toLowerCase() + "." + (el.className.baseVal ?? el.className ?? ""));' +
+      'return {' +
+      'docW: document.documentElement.scrollWidth, winW: window.innerWidth,' +
+      'shell: tracks(document.querySelector(".shell")),' +
+      'main: tracks(document.querySelector("main")),' +
+      'panels: tracks(document.querySelector(".panels")),' +
+      'examples: document.querySelectorAll("aside button").length,' +
+      'editorH: document.querySelector("textarea").getBoundingClientRect().height,' +
+      'wide: wide.slice(0, 4)' +
+      '};})()'
+  )
+  check('the phone page does not scroll sideways', phone.docW <= phone.winW, JSON.stringify(phone))
+  check('nothing overflows the screen', phone.wide.length === 0, phone.wide.join(', '))
+  check('the shell is one column', phone.shell === 1, 'got ' + phone.shell)
+  check('the editor and the message stack', phone.main === 1, 'got ' + phone.main)
+  check('the columns and the bytes stack', phone.panels === 1, 'got ' + phone.panels)
+  check('every example is still reachable', phone.examples === 11, 'got ' + phone.examples)
+  check('the editor keeps a usable height', phone.editorH >= 200, 'got ' + phone.editorH)
+
+  // No hover on a touch screen, so the link between the two panels is a tap.
+  await evaluate("document.querySelector('.tree .row').click()")
+  await wait(200)
+  const tapped = await evaluate("document.querySelectorAll('.hex .cell.hit').length")
+  check('tapping a column highlights its bytes', tapped > 0, 'highlighted ' + tapped)
 
   check('no console errors', consoleErrors.length === 0, consoleErrors.join(' | '))
 } finally {
