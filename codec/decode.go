@@ -39,6 +39,12 @@ type decoder struct {
 // Unmarshal decodes a colbin message into dst, which must be a non-nil pointer
 // to a compatible Go value. A records message may target a slice of structs, or
 // a single struct when the message contains exactly one record.
+//
+// A destination slice with enough capacity is decoded into in place rather than
+// replaced, so a caller decoding many messages through one hoisted variable
+// allocates for the records once. The elements are overwritten, which means the
+// slice must not be one the caller still holds a live reference to; passing a
+// fresh or nil slice opts out.
 func Unmarshal(data []byte, dst any) error {
 	rv := reflect.ValueOf(dst)
 	if rv.Kind() != reflect.Ptr || rv.IsNil() {
@@ -59,14 +65,8 @@ func decodeInto(data []byte, target reflect.Value) error {
 	}
 
 	dec := &decoder{data: data}
-	switch v := dec.readByte(); v {
-	case formatVersion, formatVersionOmitEmpty:
-	case jsonFormatVersion, jsonFormatVersionOmitEmpty:
-		// A self-describing message: the body underneath is identical, so the
-		// schema section is simply stepped over when the Go type is known.
-		dec.pos += int(dec.readUvarint())
-	default:
-		return fmt.Errorf("colbin: bad version byte 0x%02x", v)
+	if err := dec.header(); err != nil {
+		return err
 	}
 
 	// Non-record types use value mode: a single N=1 element column, no record count.
@@ -80,42 +80,37 @@ func decodeInto(data []byte, target reflect.Value) error {
 			[]unsafe.Pointer{target.Addr().UnsafePointer()})
 	}
 
-	n64, m := binary.Uvarint(dec.data[dec.pos:])
-	if m <= 0 {
-		return fmt.Errorf("colbin: bad record count")
+	n, err := dec.recordCount()
+	if err != nil {
+		return err
 	}
-	dec.pos += m
-	n := int(n64)
 
 	var elemType reflect.Type
-	var recordPtrs []unsafe.Pointer
+	var recordPtrs *[]unsafe.Pointer
 	var backing reflect.Value // kept alive so the backing array survives
 
 	switch target.Kind() {
 	case reflect.Slice:
 		elemType = target.Type().Elem()
-		backing = reflect.MakeSlice(target.Type(), n, n)
-		base := backing.UnsafePointer()
-		size := elemType.Size()
-		recordPtrs = make([]unsafe.Pointer, n)
-		for i := range n {
-			recordPtrs[i] = unsafe.Add(base, uintptr(i)*size)
-		}
+		backing = reuseSlice(target, n)
+		recordPtrs = spreadPtrs(backing.UnsafePointer(), n, elemType.Size())
 	case reflect.Struct:
 		if n != 1 {
 			return fmt.Errorf("colbin: message has %d records, cannot decode into a single struct", n)
 		}
 		elemType = target.Type()
-		recordPtrs = []unsafe.Pointer{target.Addr().UnsafePointer()}
+		recordPtrs = getPtrs(1)
+		(*recordPtrs)[0] = target.Addr().UnsafePointer()
 	default:
 		return fmt.Errorf("colbin: Unmarshal target must be *slice or *struct, got %s", target.Kind())
 	}
+	defer putPtrs(recordPtrs)
 
 	ti, err := getTypeInfo(elemType)
 	if err != nil {
 		return err
 	}
-	if err := dec.decodeSubTable(ti, n, recordPtrs); err != nil {
+	if err := dec.decodeSubTable(ti, n, *recordPtrs); err != nil {
 		return err
 	}
 	if target.Kind() == reflect.Slice {
@@ -124,20 +119,90 @@ func decodeInto(data []byte, target reflect.Value) error {
 	return nil
 }
 
+// header validates the version byte and steps over a JSON message's schema
+// section, leaving the cursor where the body begins.
+func (dec *decoder) header() error {
+	switch v := dec.readByte(); v {
+	case formatVersion, formatVersionOmitEmpty:
+	case jsonFormatVersion, jsonFormatVersionOmitEmpty:
+		// A self-describing message: the body underneath is identical, so the
+		// schema section is simply stepped over when the Go type is known.
+		dec.pos += int(dec.readUvarint())
+	default:
+		return fmt.Errorf("colbin: bad version byte 0x%02x", v)
+	}
+	return nil
+}
+
+// recordCount reads the record count that opens a records-layout body.
+func (dec *decoder) recordCount() (int, error) {
+	n64, m := binary.Uvarint(dec.data[dec.pos:])
+	if m <= 0 {
+		return 0, fmt.Errorf("colbin: bad record count")
+	}
+	dec.pos += m
+	return int(n64), nil
+}
+
+// reuseSlice returns the n-record slice to decode into, reusing the
+// destination's own backing array when it is already big enough. A caller
+// decoding many messages into one hoisted variable then allocates nothing for
+// the records at all.
+//
+// The reused elements are zeroed first. A column the message does not carry --
+// which is what a reader sees when the writer's struct had fewer fields -- is
+// simply not written, and without the zeroing the previous message's values
+// would show through underneath it. reflect's Clear is a typed bulk zero, so it
+// costs one call and keeps the write barriers a raw memclr would skip.
+func reuseSlice(target reflect.Value, n int) reflect.Value {
+	if target.Cap() < n {
+		return reflect.MakeSlice(target.Type(), n, n)
+	}
+	out := target.Slice3(0, n, n)
+	out.Clear()
+	return out
+}
+
+// spreadPtrs fills a pooled buffer with one pointer per record of a contiguous
+// backing array. Every records-layout decode starts here.
+func spreadPtrs(base unsafe.Pointer, n int, size uintptr) *[]unsafe.Pointer {
+	ptrs := getPtrs(n)
+	for i := range n {
+		(*ptrs)[i] = unsafe.Add(base, uintptr(i)*size)
+	}
+	return ptrs
+}
+
 // decodeSubTable reads [colCount] then each [id][column] into the given records.
+//
+// The id is resolved through the type's precomputed table rather than a map, so
+// a message decoded a second time pays one array load per column. That matters
+// most for a nested array of structs: the sub-table is re-entered for every such
+// column of every message, and the type it names was already described the first
+// time this program saw it.
 func (dec *decoder) decodeSubTable(ti *typeInfo, n int, ptrs []unsafe.Pointer) error {
 	colCount := int(dec.readByte())
 	for range colCount {
 		id := dec.readByte()
-		fm := ti.byID[id]
-		if fm == nil {
+		i := ti.byID[id]
+		if i == 0 {
 			return fmt.Errorf("colbin: unknown field id %d (schema mismatch)", id)
 		}
-		if err := dec.decodeColumn(fm, n, ptrs); err != nil {
+		if err := dec.decodeColumn(&ti.fields[i-1], n, ptrs); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// offsetPtrsPooled is offsetPtrs onto a pooled buffer. Every caller here hands
+// the result to one decode call and drops it, so the buffer goes straight back.
+func (dec *decoder) offsetPtrsPooled(ptrs []unsafe.Pointer, offset uintptr) *[]unsafe.Pointer {
+	out := getPtrs(len(ptrs))
+	for i, p := range ptrs {
+		(*out)[i] = unsafe.Add(p, offset)
+	}
+	return out
 }
 
 func (dec *decoder) readByte() byte {
@@ -149,7 +214,10 @@ func (dec *decoder) readByte() byte {
 // decodeColumn reads one column into STRUCT FIELDS (value at ptr+fm.offset).
 func (dec *decoder) decodeColumn(fm *fieldMeta, n int, ptrs []unsafe.Pointer) error {
 	if fm.nullable {
-		return dec.decodeNullableColumn(fm.elem, fm.pointeeType, n, offsetPtrs(ptrs, fm.offset))
+		slots := dec.offsetPtrsPooled(ptrs, fm.offset)
+		err := dec.decodeNullableColumn(fm.elem, fm.pointeeType, n, *slots)
+		putPtrs(slots)
+		return err
 	}
 	switch fm.fType {
 	case ftInt:
@@ -158,13 +226,15 @@ func (dec *decoder) decodeColumn(fm *fieldMeta, n int, ptrs []unsafe.Pointer) er
 			return err
 		}
 		for i, p := range ptrs {
-			setInt64(fm, p, vals[i])
+			setInt64(fm, p, (*vals)[i])
 		}
+		putI64(vals)
 	case ftFloat:
 		vals := dec.readFloatColumn(n)
 		for i, p := range ptrs {
-			setFloat64(fm, p, vals[i])
+			setFloat64(fm, p, (*vals)[i])
 		}
+		putF64(vals)
 	case ftString:
 		if err := dec.readStringColumn(len(ptrs), func(i int, s string) {
 			fm.xf.SetString(ptrs[i], s)
@@ -178,58 +248,102 @@ func (dec *decoder) decodeColumn(fm *fieldMeta, n int, ptrs []unsafe.Pointer) er
 			return err
 		}
 		for i, p := range ptrs {
-			fm.xf.SetBytes(p, cloneBytes(blobs[i]))
+			fm.xf.SetBytes(p, cloneBytes((*blobs)[i]))
 		}
+		putBlobs(blobs)
 	case ftStruct:
 		dec.readByte() // flags (ftStruct)
-		childPtrs := make([]unsafe.Pointer, len(ptrs))
-		for i, p := range ptrs {
-			childPtrs[i] = unsafe.Add(p, fm.offset)
-		}
-		return dec.decodeSubTable(fm.sub, n, childPtrs)
+		childPtrs := dec.offsetPtrsPooled(ptrs, fm.offset)
+		err := dec.decodeSubTable(fm.sub, n, *childPtrs)
+		putPtrs(childPtrs)
+		return err
 	case ftArray:
 		dec.readByte() // flags (ftArray)
-		shPtrs := make([]unsafe.Pointer, len(ptrs))
-		for i, p := range ptrs {
-			shPtrs[i] = unsafe.Add(p, fm.offset)
-		}
-		return dec.decodeArrayBody(fm.elem, fm.sliceType, fm.elemSize, shPtrs)
+		shPtrs := dec.offsetPtrsPooled(ptrs, fm.offset)
+		err := dec.decodeArrayBody(fm.elem, fm.sliceType, fm.elemSize, *shPtrs)
+		putPtrs(shPtrs)
+		return err
 	case ftMap:
-		return dec.decodeMapColumn(fm, n, offsetPtrs(ptrs, fm.offset))
+		slots := dec.offsetPtrsPooled(ptrs, fm.offset)
+		err := dec.decodeMapColumn(fm, n, *slots)
+		putPtrs(slots)
+		return err
 	case ftAny:
-		return dec.decodeAnyColumn(fm, n, offsetPtrs(ptrs, fm.offset))
+		slots := dec.offsetPtrsPooled(ptrs, fm.offset)
+		err := dec.decodeAnyColumn(fm, n, *slots)
+		putPtrs(slots)
+		return err
 	}
 	return nil
 }
 
-// decodeArrayBody reads the length sub-column, allocates each record's slice,
-// then decodes the flattened element column into the slices' backing arrays.
+// decodeArrayBody reads the length sub-column, allocates the records' slices,
+// then decodes the flattened element column into their backing arrays.
 // shPtrs point at the slice headers to populate (one per record).
+//
+// The column gets ONE backing array, sub-sliced per record, rather than a
+// MakeSlice per record. The wire already stores these elements flattened and
+// contiguous, so this is the layout the column is in; the old shape allocated
+// once per record and then reassembled the same contiguous run in elemPtrs, an
+// append into a slice that started at capacity zero. Each record's header is cut
+// with cap == len, so appending to one record's slice reallocates instead of
+// stomping the next record's elements. The arrays a column produces are retained
+// or dropped together, which is the same trade readStringColumn already makes
+// for the strings of one column.
 func (dec *decoder) decodeArrayBody(elem *fieldMeta, sliceType reflect.Type, elemSize uintptr, shPtrs []unsafe.Pointer) error {
 	lengths, err := dec.readIntColumn(len(shPtrs), 64)
 	if err != nil {
 		return err
 	}
 	total := 0
-	elemPtrs := make([]unsafe.Pointer, 0)
-	for i, sp := range shPtrs {
-		l := int(lengths[i])
-		total += l
-		if l == 0 {
-			continue // leave the slice field as nil (matches Go zero value)
+	for _, l := range *lengths {
+		// A negative or absurd length is a corrupt message. It has to be caught
+		// before it is summed, because the sum sizes the one array every record
+		// then points into.
+		if l < 0 || l > int64(len(dec.data)) {
+			putI64(lengths)
+			return fmt.Errorf("colbin: array length %d out of range", l)
 		}
-		sv := reflect.MakeSlice(sliceType, l, l)
-		// Store the slice header into the field; GC keeps the backing array alive
-		// because the field is typed as a slice.
-		*(*sliceHeader)(sp) = sliceHeader{data: sv.UnsafePointer(), len: l, cap: l}
-		for j := range l {
-			elemPtrs = append(elemPtrs, unsafe.Add(sv.UnsafePointer(), uintptr(j)*elemSize))
+		total += int(l)
+	}
+
+	var elemPtrs *[]unsafe.Pointer
+	if total > 0 {
+		backing := reflect.MakeSlice(sliceType, total, total)
+		base := backing.UnsafePointer()
+		elemPtrs = getPtrs(total)
+		for j := range total {
+			(*elemPtrs)[j] = unsafe.Add(base, uintptr(j)*elemSize)
+		}
+		off := 0
+		for i, sp := range shPtrs {
+			l := int((*lengths)[i])
+			if l == 0 {
+				continue // leave the slice field as nil (matches Go zero value)
+			}
+			// GC keeps the whole array alive through any one of these interior
+			// pointers, because the field is typed as a slice of its elements.
+			*(*sliceHeader)(sp) = sliceHeader{data: (*elemPtrs)[off], len: l, cap: l}
+			off += l
 		}
 	}
-	if elideEmpty(elem, total) {
-		return nil // the encoder wrote no element column
+	putI64(lengths)
+
+	if elideEmpty(elem, total) { // the encoder wrote no element column
+		if elemPtrs != nil {
+			putPtrs(elemPtrs)
+		}
+		return nil
 	}
-	return dec.decodeElemColumn(elem, sliceType.Elem(), elemSize, total, elemPtrs)
+	var ptrs []unsafe.Pointer
+	if elemPtrs != nil {
+		ptrs = *elemPtrs
+	}
+	err = dec.decodeElemColumn(elem, sliceType.Elem(), elemSize, total, ptrs)
+	if elemPtrs != nil {
+		putPtrs(elemPtrs)
+	}
+	return err
 }
 
 // decodeElemColumn reads a column into ARRAY ELEMENTS (ptrs point at values).
@@ -244,13 +358,15 @@ func (dec *decoder) decodeElemColumn(elem *fieldMeta, elemType reflect.Type, ele
 			return err
 		}
 		for i, p := range ptrs {
-			setInt64At(elem.goKind, p, vals[i])
+			setInt64At(elem.goKind, p, (*vals)[i])
 		}
+		putI64(vals)
 	case ftFloat:
 		vals := dec.readFloatColumn(n)
 		for i, p := range ptrs {
-			setFloat64At(elem.goKind, p, vals[i])
+			setFloat64At(elem.goKind, p, (*vals)[i])
 		}
+		putF64(vals)
 	case ftString:
 		if err := dec.readStringColumn(len(ptrs), func(i int, s string) {
 			*(*string)(ptrs[i]) = s
@@ -264,8 +380,9 @@ func (dec *decoder) decodeElemColumn(elem *fieldMeta, elemType reflect.Type, ele
 			return err
 		}
 		for i, p := range ptrs {
-			*(*[]byte)(p) = cloneBytes(blobs[i])
+			*(*[]byte)(p) = cloneBytes((*blobs)[i])
 		}
+		putBlobs(blobs)
 	case ftStruct:
 		dec.readByte()
 		return dec.decodeSubTable(elem.sub, n, ptrs)
@@ -280,16 +397,19 @@ func (dec *decoder) decodeElemColumn(elem *fieldMeta, elemType reflect.Type, ele
 	return nil
 }
 
-// readFloatColumn reads a flags byte + raw IEEE-754 payload; returns n values.
-func (dec *decoder) readFloatColumn(n int) []float64 {
+// readFloatColumn reads a flags byte + raw IEEE-754 payload; returns n values in
+// a pooled buffer the caller returns once it has read them out.
+func (dec *decoder) readFloatColumn(n int) *[]float64 {
 	flags := dec.readByte()
 	width := uint8(32)
 	if flags>>4&7 == 1 {
 		width = 64
 	}
-	out := make([]float64, n)
-	if flags>>7&1 == 1 { // empty column
-		return out
+	buf := getF64(n)
+	out := *buf
+	if flags>>7&1 == 1 { // empty column: the pooled buffer still holds the last
+		clear(out) // column's values, so a zero column has to be written out
+		return buf
 	}
 	for i := range n {
 		if width == 64 {
@@ -300,23 +420,30 @@ func (dec *decoder) readFloatColumn(n int) []float64 {
 			dec.pos += 4
 		}
 	}
-	return out
+	return buf
 }
 
-// readBlobs reads a length sub-column + concatenated bytes, returning n raw
-// slices that alias the input buffer (callers copy as needed).
-func (dec *decoder) readBlobs(n int) ([][]byte, error) {
+// readBlobs reads a length sub-column + concatenated bytes into a pooled buffer,
+// returning n raw slices that alias the input (callers copy as needed, and
+// return the buffer once they have).
+func (dec *decoder) readBlobs(n int) (*[][]byte, error) {
 	lengths, err := dec.readIntColumn(n, 64)
 	if err != nil {
 		return nil, err
 	}
-	out := make([][]byte, n)
+	defer putI64(lengths)
+	buf := getBlobs(n)
+	out := *buf
 	for i := range n {
-		l := int(lengths[i])
+		l := int((*lengths)[i])
+		if l < 0 || dec.pos+l > len(dec.data) {
+			putBlobs(buf)
+			return nil, fmt.Errorf("colbin: blob length %d out of range", l)
+		}
 		out[i] = dec.data[dec.pos : dec.pos+l]
 		dec.pos += l
 	}
-	return out, nil
+	return buf, nil
 }
 
 // cloneBytes copies a slice so decoded []byte fields don't alias the input.
@@ -386,19 +513,26 @@ func (dec *decoder) readPacked5String() (string, error) {
 // readIntColumn reads a colbin type byte followed by one varint array frame. The
 // empty bit says the column held nothing but zeros and carries no frame at all,
 // which is what a zero value costs under omit-empty.
-func (dec *decoder) readIntColumn(n int, width uint8) ([]int64, error) {
+//
+// The values land in a pooled buffer, which the caller returns once it has read
+// them into the destination. decodeIntColumn fills all n on success, so the only
+// path that has to zero the buffer is the empty column — everything else
+// overwrites whatever the previous column left there.
+func (dec *decoder) readIntColumn(n int, width uint8) (*[]int64, error) {
 	flags := dec.readByte()
 	if flags&7 != ftInt {
 		return nil, fmt.Errorf("colbin: expected integer column at pos %d", dec.pos-1)
 	}
-	out := make([]int64, n)
+	buf := getI64(n)
 	if flags&emptyColumnBit != 0 {
-		return out, nil
+		clear(*buf)
+		return buf, nil
 	}
-	consumed, err := decodeIntColumn(dec.data[dec.pos:], n, width, out)
+	consumed, err := decodeIntColumn(dec.data[dec.pos:], n, width, *buf)
 	if err != nil {
+		putI64(buf)
 		return nil, err
 	}
 	dec.pos += consumed
-	return out, nil
+	return buf, nil
 }

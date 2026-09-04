@@ -241,3 +241,51 @@ func BenchmarkColbinDecodeNestedToJSON(b *testing.B) {
 		}
 	}
 }
+
+// Many small messages of one type, decoded in a loop -- the shape where the
+// per-call cost is the whole cost, and the one the per-type caches and the
+// column pools exist for. The batch benchmarks above amortise that away.
+
+func BenchmarkColbinDecodeSmallRepeated(b *testing.B) {
+	data, _ := Marshal(grantCorpus()[0].Grants)
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var out []grantRow
+		if err := Unmarshal(data, &out); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// The same, through a Codec: the handle already holds the layout, so the
+// columnar path never goes back through reflect for it.
+func BenchmarkColbinDecodeSmallRepeatedCodec(b *testing.B) {
+	c := MustCodec[grantRow]()
+	data, _ := Marshal(grantCorpus()[0].Grants)
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var out []grantRow
+		if err := c.UnmarshalSlice(data, &out); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// Small messages whose records each hold an array of structs, which re-enters
+// the sub-table once per column per message.
+func BenchmarkColbinDecodeSmallRepeatedNested(b *testing.B) {
+	data, _ := Marshal(grantCorpus())
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var out []grantHolder
+		if err := Unmarshal(data, &out); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

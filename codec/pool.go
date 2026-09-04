@@ -1,10 +1,20 @@
 package codec
 
-import "sync"
+import (
+	"sync"
+	"unsafe"
+)
 
 // Per-column scratch buffers are reused across columns via pools: the encoder
 // gathers one column's values into a scratch slice, packs it, then returns the
 // scratch. This replaces one N-sized allocation per column with a reused buffer.
+//
+// The decoder borrows the same pools. It used to allocate every column buffer
+// fresh, which the encoder had long since stopped doing, and on the shape that
+// makes it hurt — many small messages of one type decoded in a loop — those
+// per-column allocations were most of the work. A decode buffer is read into the
+// destination and dropped within the column that made it, so it has exactly the
+// lifetime a pool wants.
 
 var (
 	i8Pool   = sync.Pool{New: func() any { s := make([]int8, 0, 256); return &s }}
@@ -13,7 +23,31 @@ var (
 	i64Pool  = sync.Pool{New: func() any { s := make([]int64, 0, 256); return &s }}
 	f64Pool  = sync.Pool{New: func() any { s := make([]float64, 0, 256); return &s }}
 	blobPool = sync.Pool{New: func() any { s := make([][]byte, 0, 256); return &s }}
+	ptrPool  = sync.Pool{New: func() any { s := make([]unsafe.Pointer, 0, 256); return &s }}
 )
+
+// getPtrs is one pointer per record or per element. Both codecs walk a column by
+// handing the next level down a slice of pointers, one per value, and rebuild
+// that slice at every level of every column of every message.
+//
+// The pooled buffer holds pointers, so it is scanned by the GC while it sits in
+// the pool. putPtrs clears it before handing it back: a stale pointer in a
+// pooled buffer keeps a whole decoded message alive for as long as the pool
+// holds the buffer, which on a decode loop is indefinitely.
+func getPtrs(n int) *[]unsafe.Pointer {
+	p := ptrPool.Get().(*[]unsafe.Pointer)
+	if cap(*p) < n {
+		*p = make([]unsafe.Pointer, n)
+	} else {
+		*p = (*p)[:n]
+	}
+	return p
+}
+
+func putPtrs(p *[]unsafe.Pointer) {
+	clear(*p)
+	ptrPool.Put(p)
+}
 
 func getI8(n int) *[]int8 {
 	p := i8Pool.Get().(*[]int8)
@@ -79,4 +113,11 @@ func getBlobs(n int) *[][]byte {
 	}
 	return p
 }
-func putBlobs(p *[][]byte) { blobPool.Put(p) }
+
+// putBlobs clears before returning: these entries alias either the caller's byte
+// slices (encode) or the message being decoded, and a pooled buffer that keeps
+// holding them pins that memory for as long as the pool holds the buffer.
+func putBlobs(p *[][]byte) {
+	clear(*p)
+	blobPool.Put(p)
+}

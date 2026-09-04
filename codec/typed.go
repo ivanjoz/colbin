@@ -130,7 +130,14 @@ func (c *Codec[T]) Unmarshal(data []byte, v *T) error {
 	if v == nil {
 		return fmt.Errorf("colbin: Codec.Unmarshal needs a non-nil *%s", c.rtype)
 	}
-	if !compact.IsCompact(data) || !c.pl.usable {
+	if !compact.IsCompact(data) {
+		// Columnar. The handle already holds T's layout, so this goes straight to
+		// the sub-table rather than back through reflect and the type cache.
+		var zero T
+		*v = zero
+		return c.decodeColumnar(data, 1, unsafe.Pointer(v))
+	}
+	if !c.pl.usable {
 		return decodeInto(data, reflect.NewAt(c.rtype, unsafe.Pointer(v)).Elem())
 	}
 	r := compactReaderPool.Get().(*compact.Reader)
@@ -149,13 +156,56 @@ func (c *Codec[T]) Unmarshal(data []byte, v *T) error {
 	return r.Err()
 }
 
+// reuseRecords is the n-record slice to decode into, reusing dst's backing array
+// when it is already large enough -- so a loop that hoists its destination
+// allocates for the records once rather than per message. The reused elements
+// are zeroed for the reason reuseSlice gives: an omitted field, in either mode,
+// is simply not written, and the previous message's value would otherwise
+// survive underneath it.
+func reuseRecords[T any](dst []T, n int) []T {
+	if cap(dst) < n {
+		return make([]T, n)
+	}
+	out := dst[:n:n]
+	clear(out)
+	return out
+}
+
 // UnmarshalSlice decodes a message of any record count into dst, replacing
 // whatever it held.
+//
+// dst's backing array is reused when it has the capacity, so the slice handed in
+// must not be one the caller still needs: a decode overwrites its elements.
+// Passing a fresh or nil slice opts out.
 func (c *Codec[T]) UnmarshalSlice(data []byte, dst *[]T) error {
 	if dst == nil {
 		return fmt.Errorf("colbin: Codec.UnmarshalSlice needs a non-nil *[]%s", c.rtype)
 	}
-	if !compact.IsCompact(data) || !c.pl.usable {
+	if !compact.IsCompact(data) {
+		// Columnar, which is every message past three records. This used to fall
+		// back to the reflect path and re-resolve a type the handle was built to
+		// remember; now it reads the count itself and decodes into a []T.
+		dec := &decoder{data: data}
+		if err := dec.header(); err != nil {
+			return err
+		}
+		n, err := dec.recordCount()
+		if err != nil {
+			return err
+		}
+		out := reuseRecords(*dst, n)
+		if n > 0 {
+			ptrs := spreadPtrs(unsafe.Pointer(&out[0]), n, c.ti.size)
+			err = dec.decodeSubTable(c.ti, n, *ptrs)
+			putPtrs(ptrs)
+			if err != nil {
+				return err
+			}
+		}
+		*dst = out
+		return nil
+	}
+	if !c.pl.usable {
 		return decodeInto(data, reflect.ValueOf(dst).Elem())
 	}
 	r := compactReaderPool.Get().(*compact.Reader)
@@ -163,7 +213,7 @@ func (c *Codec[T]) UnmarshalSlice(data []byte, dst *[]T) error {
 	if err := r.Reset(data); err != nil {
 		return err
 	}
-	out := make([]T, r.Records())
+	out := reuseRecords(*dst, r.Records())
 	for i := range out {
 		if err := compactReadRecord(r, c.pl, unsafe.Pointer(&out[i])); err != nil {
 			return err
@@ -174,6 +224,27 @@ func (c *Codec[T]) UnmarshalSlice(data []byte, dst *[]T) error {
 	}
 	*dst = out
 	return nil
+}
+
+// decodeColumnar decodes a columnar records message of exactly n records into
+// records laid out contiguously from base, using the layout the handle already
+// holds.
+func (c *Codec[T]) decodeColumnar(data []byte, want int, base unsafe.Pointer) error {
+	dec := &decoder{data: data}
+	if err := dec.header(); err != nil {
+		return err
+	}
+	n, err := dec.recordCount()
+	if err != nil {
+		return err
+	}
+	if n != want {
+		return fmt.Errorf("colbin: message has %d records, cannot decode into a single %s", n, c.rtype)
+	}
+	ptrs := spreadPtrs(base, n, c.ti.size)
+	err = dec.decodeSubTable(c.ti, n, *ptrs)
+	putPtrs(ptrs)
+	return err
 }
 
 var (

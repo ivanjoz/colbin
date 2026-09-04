@@ -25,9 +25,10 @@ func TestIntColumnRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if !reflect.DeepEqual(got, values) {
-			t.Fatalf("%s: got %v want %v", name, got, values)
+		if !reflect.DeepEqual(*got, values) {
+			t.Fatalf("%s: got %v want %v", name, *got, values)
 		}
+		putI64(got)
 		if dec.pos != len(data) {
 			t.Fatalf("%s: consumed %d of %d bytes", name, dec.pos, len(data))
 		}

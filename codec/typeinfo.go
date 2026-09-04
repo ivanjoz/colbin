@@ -59,8 +59,18 @@ type fieldMeta struct {
 type typeInfo struct {
 	rtype  reflect.Type
 	size   uintptr
-	fields []fieldMeta          // in declaration order
-	byID   map[uint8]*fieldMeta // wire id -> field, for decode
+	fields []fieldMeta // in declaration order
+
+	// byID maps a wire field id to its field, as index+1 into fields so that the
+	// zero value means "no such field". The columnar decoder does one array load
+	// per column where it used to hash into a map — at a few records per message
+	// that lookup was a measurable share of the decode, which is the same finding
+	// that put the identical table on compactPlan (see compact_plan.go).
+	//
+	// It is 256 bytes per struct type, paid once, and it is built here rather
+	// than lazily because it is derived from nothing but the ids this function
+	// just assigned.
+	byID [256]uint8
 
 	// bytesPerRecord is what the last encode of this type actually cost, per
 	// record. The output buffer is sized from it, which is the difference
@@ -204,9 +214,9 @@ func (st *buildState) build(t reflect.Type) (*typeInfo, error) {
 		ti.fields[k].id = hid
 	}
 
-	ti.byID = make(map[uint8]*fieldMeta, len(ti.fields))
+	// index+1 fits a uint8 because a struct may hold at most 254 encodable fields.
 	for i := range ti.fields {
-		ti.byID[ti.fields[i].id] = &ti.fields[i]
+		ti.byID[ti.fields[i].id] = uint8(i + 1)
 	}
 	st.done = append(st.done, ti)
 	return ti, nil
