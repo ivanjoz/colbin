@@ -168,7 +168,7 @@
           <div class="panels">
             <div class="panel">
               <h3>Columns</h3>
-              <p class="sub">Hover a column to find its bytes in the message.</p>
+              <p class="sub">Hover or tap a column to find its bytes in the message.</p>
               <ColumnTree columns={report.columns} total={report.totalBytes} bind:hovered />
             </div>
             <div class="panel">
@@ -383,5 +383,110 @@
     color: #0f1117;
     cursor: pointer;
     white-space: nowrap;
+  }
+
+  /* One column below the breakpoint. The sidebar becomes a strip of chips
+     across the top — eleven examples stacked would push the editor off the
+     screen before the reader had typed anything. */
+  @media (max-width: 860px) {
+    .shell {
+      grid-template-columns: 1fr;
+    }
+
+    aside {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 8px;
+      overflow: visible;
+      padding: 10px 0 10px 12px;
+      border-right: 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    aside h2 {
+      grid-area: 1 / 1;
+      margin: 0;
+    }
+
+    .upload {
+      grid-area: 1 / 2;
+      margin-right: 12px;
+    }
+
+    .upload span {
+      padding: 6px 12px;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    /* The strip scrolls sideways and runs to the edge of the screen, so a
+       half-cut chip says there are more of them. */
+    aside ul {
+      grid-area: 2 / 1 / 3 / 3;
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      padding: 2px 12px 2px 0;
+      scrollbar-width: none;
+    }
+
+    aside ul::-webkit-scrollbar {
+      display: none;
+    }
+
+    aside li {
+      flex: none;
+    }
+
+    aside button {
+      width: auto;
+      white-space: nowrap;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-size: 13px;
+    }
+
+    /* The chips already say the examples are switchable, and the note under
+       the editor carries the rest. */
+    .hint {
+      display: none;
+    }
+
+    main {
+      grid-template-columns: 1fr;
+    }
+
+    .result {
+      border-left: 0;
+      border-top: 1px solid var(--line);
+    }
+
+    /* Nothing above it is a fixed height any more, so the editor states its
+       own instead of stretching to fill a box that is not there. */
+    textarea {
+      flex: none;
+      height: 38dvh;
+      min-height: 200px;
+      /* Under 16px, iOS zooms the page when the field takes focus. */
+      font-size: 16px;
+    }
+
+    .scroll {
+      overflow: visible;
+    }
+
+    .panels {
+      grid-template-columns: 1fr;
+      gap: 18px;
+      margin-top: 18px;
+    }
+
+    /* The pull-up assumed a wide facts row with space to its right. Stacked,
+       the button gets its own line. */
+    .download-row {
+      margin: 12px 0 0;
+    }
   }
 </style>

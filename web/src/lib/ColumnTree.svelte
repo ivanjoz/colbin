@@ -28,21 +28,29 @@
 <ul class="tree" style="margin-left: {depth > 0 ? 12 : 0}px">
   {#each columns as column (column.name + column.start)}
     <li>
-      <!-- Hover is the link to the hex view: the bytes highlight there. -->
-      <div
+      <!-- Hover is the link to the hex view: the bytes highlight there. A tap
+           does the same, because a touch screen has no hover to offer — and
+           the enter/leave pair is gated on a real mouse, or a tap would set
+           the highlight on the way in and the click would clear it again. -->
+      <button
+        type="button"
         class="row"
         class:is-hovered={hovered === column}
         title={detail(column)}
-        role="presentation"
-        onmouseenter={() => (hovered = column)}
-        onmouseleave={() => (hovered = undefined)}
+        onpointerenter={(event) => {
+          if (event.pointerType === 'mouse') hovered = column
+        }}
+        onpointerleave={(event) => {
+          if (event.pointerType === 'mouse') hovered = undefined
+        }}
+        onclick={() => (hovered = hovered === column ? undefined : column)}
       >
         <span class="fill" style="width: {share(column)}%"></span>
         <span class="name"
           >{column.name}{#if column.nullable}<span class="nullable">?</span>{/if}</span
         >
         <span class="bytes">{bytes(column.bytes)}</span>
-      </div>
+      </button>
       {#if column.children.length > 0}
         <ColumnTree columns={column.children} {total} depth={depth + 1} bind:hovered />
       {/if}
@@ -73,13 +81,22 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
+    width: 100%;
     height: 28px;
     padding: 0 8px;
     border: 1px solid var(--line);
     border-radius: 4px;
     background: var(--panel-2);
+    color: inherit;
+    font: inherit;
+    text-align: left;
     overflow: hidden;
-    cursor: default;
+    cursor: pointer;
+  }
+
+  .row:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: 1px;
   }
 
   .fill {

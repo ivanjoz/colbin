@@ -47,4 +47,20 @@
   a:hover {
     text-decoration: underline;
   }
+
+  /* The tagline is a sentence, not a label: on a narrow screen it takes the
+     second line whole rather than squeezing the brand and the link out. */
+  @media (max-width: 860px) {
+    header {
+      flex-wrap: wrap;
+      gap: 4px 10px;
+      padding: 10px 12px;
+    }
+
+    .tagline {
+      order: 1;
+      flex-basis: 100%;
+      font-size: 12px;
+    }
+  }
 </style>

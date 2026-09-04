@@ -98,7 +98,7 @@ export const examples: Example[] = [
   {
     key: 'clients',
     title: 'Clients, 1000 records',
-    note: 'Nine fields over a thousand rows, and every column wins for a different reason. id and updated climb steadily, so the varint codec stores the step instead of the value; categoryID and age are small integers; name, city and email repeat their vocabulary, which is what packed5 is for. Hover a column to see where its bytes went.',
+    note: 'Nine fields over a thousand rows, and every column wins for a different reason. id and updated climb steadily, so the varint codec stores the step instead of the value; categoryID and age are small integers; name, city and email repeat their vocabulary, which is what packed5 is for. Hover or tap a column to see where its bytes went.',
     json: clients(1000),
   },
   {
