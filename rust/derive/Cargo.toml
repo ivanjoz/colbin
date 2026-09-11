@@ -1,0 +1,22 @@
+# The derive macro for `colbin::Colbin`, which generates a typed encode and
+# decode for one struct: field access instead of a `Record`/`Value` tree.
+#
+# A separate crate because a procedural macro has to be. It is reached through
+# the parent crate's `derive` feature, so a consumer who does not want it links
+# neither this nor the three build-time dependencies below.
+[package]
+name = "colbin-derive"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Derive macro for the colbin binary format"
+license = "MIT"
+repository = "https://github.com/ivanjoz/colbin"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["derive"] }

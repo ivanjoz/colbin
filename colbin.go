@@ -9,6 +9,29 @@ func Marshal(v any) ([]byte, error) {
 	return codec.Marshal(v)
 }
 
+// MarshalForceCompact encodes v in compact mode whenever the type permits it,
+// instead of letting Marshal pick the mode on size.
+//
+// Compact mode is a bit-level layout for one record, or an array of at most
+// three, where the columnar layout has nothing to amortise its per-column
+// framing over. Marshal takes it when it measures smaller, which is the right
+// default; this is for a caller who wants the form itself -- one bitstream, no
+// version byte, no columns to walk -- for a size-bounded record such as a token
+// or a small blob.
+//
+// v must be a struct or a slice of one to three structs: compact mode frames
+// records, so there is no value layout for a top-level map or scalar. It errors
+// rather than falling back, naming the field in the way, and the messages it
+// writes are ordinary colbin messages that Unmarshal reads.
+//
+// Compact mode carries nested structs, arrays of structs, maps and nested
+// slices. It cannot carry an interface field at any depth: the concrete type is
+// a property of the value and the compact wire has no tag for it. A pointer
+// field needs SetOmitEmpty(true), and a self-referential type is out.
+func MarshalForceCompact(v any) ([]byte, error) {
+	return codec.MarshalForceCompact(v)
+}
+
 // Unmarshal decodes a colbin message into dst, which must be a non-nil pointer
 // to a compatible Go value.
 func Unmarshal(data []byte, dst any) error {
@@ -94,3 +117,74 @@ func DecodeJSON(data []byte) ([]byte, error) {
 func DecodeAny(data []byte) (any, error) {
 	return codec.DecodeAny(data)
 }
+
+// MarshalMinimal encodes v in **minimal mode**: a byte-aligned `[key][value]`
+// layout for a record of at most sixteen primitive fields, where a zero-valued
+// field is not written at all.
+//
+// It is the mode for one small record on a hot path — a wire frame, a token, a
+// row key — where the columnar mode's per-record framing is the dominant cost
+// and there is nothing to amortise it over. A ten-field record encodes in 62 ns
+// here, 18 ns through [MustMinimalCodec], and 6 ns through the minimal.Writer
+// underneath, against compact mode's 92 ns for about the same bytes; see
+// minimal/README.md for the format, the measurements and the trade.
+//
+// Two things it asks of the type, both refused loudly rather than worked around:
+//
+//   - **Every field carries an explicit `cb:"N"` with N ≤ 15.** Four key bits
+//     cannot hold a hashed id.
+//   - **Scalars, strings, []byte and slices of those.** No nested struct, map,
+//     pointer or interface: a field's whole layout has to follow from its key.
+//
+// A minimal message is not self-describing and carries no mode byte, so
+// [Unmarshal] cannot read one and [UnmarshalMinimal] is the only way back.
+func MarshalMinimal(v any) ([]byte, error) {
+	return codec.MarshalMinimal(v)
+}
+
+// AppendMinimal is MarshalMinimal onto a buffer the caller owns, which is what
+// makes encoding one message per call allocation-free.
+//
+//	buf := make([]byte, 0, 64)
+//	for _, record := range records {
+//	    buf, _ = colbin.AppendMinimal(buf[:0], &record)
+//	    send(buf)
+//	}
+func AppendMinimal(dst []byte, v any) ([]byte, error) {
+	return codec.AppendMinimal(dst, v)
+}
+
+// UnmarshalMinimal decodes a minimal message into dst, a non-nil pointer to a
+// struct of the same shape. Fields the message omitted are zeroed, since that is
+// exactly what their absence means.
+//
+// A key the type does not declare is an error rather than something to skip: the
+// header sizes a field but does not say which layout it is, so there is no way to
+// know how far to step.
+func UnmarshalMinimal(data []byte, dst any) error {
+	return codec.UnmarshalMinimal(data, dst)
+}
+
+// MinimalFieldIDs reports the wire key of every field of a type minimal mode
+// accepts, for handing to a reader in another language. Reading them out of the
+// struct tags by hand is how the two sides drift.
+func MinimalFieldIDs(v any) (map[string]uint8, error) {
+	return codec.MinimalFieldIDs(v)
+}
+
+// MinimalCodec is minimal mode through a cached, typed handle: the per-type plan
+// is resolved once instead of on every call, which is what takes a ten-field
+// record from 62 ns to 20. Use it wherever the type is known at compile time.
+//
+//	var chargeCodec = colbin.MustMinimalCodec[Charge]()
+//
+//	buf, _ := chargeCodec.Append(buf[:0], &charge)
+type MinimalCodec[T any] = codec.MinimalCodec[T]
+
+// NewMinimalCodec builds the handle for T, which must be a struct minimal mode
+// accepts.
+func NewMinimalCodec[T any]() (*MinimalCodec[T], error) { return codec.NewMinimalCodec[T]() }
+
+// MustMinimalCodec is NewMinimalCodec for a package-level variable, where a type
+// error is a programming error and there is nobody to return it to.
+func MustMinimalCodec[T any]() *MinimalCodec[T] { return codec.MustMinimalCodec[T]() }

@@ -3,4 +3,4 @@
 # `cargo` dependency on this repo resolves the member below by name.
 [workspace]
 resolver = "3"
-members = ["rust"]
+members = ["rust", "rust/derive"]

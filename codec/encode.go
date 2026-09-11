@@ -72,34 +72,40 @@ func appendMessage(prefix []byte, rv reflect.Value, allowCompact bool) (out []by
 		return encodeValueMode(out, rv), nil
 	}
 
-	// Resolve record element type and a pointer to each record.
-	var elemType reflect.Type
-	var recordPtrs []unsafe.Pointer
-	switch rv.Kind() {
-	case reflect.Slice:
-		elemType = rv.Type().Elem()
-		n := rv.Len()
-		recordPtrs = make([]unsafe.Pointer, n)
-		base := rv.UnsafePointer() // &elem[0]
-		size := elemType.Size()
-		for i := range n {
-			recordPtrs[i] = unsafe.Add(base, uintptr(i)*size)
-		}
-	case reflect.Struct:
-		elemType = rv.Type()
-		// Non-addressable value: copy into an addressable location to take its pointer.
-		cp := reflect.New(elemType)
-		cp.Elem().Set(rv)
-		recordPtrs = []unsafe.Pointer{cp.UnsafePointer()}
-	default:
-		return nil, fmt.Errorf("colbin: Marshal expects struct or slice of structs, got %s", rv.Kind())
+	elemType, recordPtrs, err := recordPointers(rv)
+	if err != nil {
+		return nil, err
 	}
-
 	ti, err := getTypeInfo(elemType)
 	if err != nil {
 		return nil, err
 	}
 	return appendRecords(nil, prefix, ti, recordPtrs, rv.Kind() == reflect.Slice, allowCompact), nil
+}
+
+// recordPointers resolves the record element type and a pointer to each record,
+// which is what both marshal modes and MarshalForceCompact all need before they
+// can encode anything.
+func recordPointers(rv reflect.Value) (reflect.Type, []unsafe.Pointer, error) {
+	switch rv.Kind() {
+	case reflect.Slice:
+		elemType := rv.Type().Elem()
+		n := rv.Len()
+		ptrs := make([]unsafe.Pointer, n)
+		base := rv.UnsafePointer() // &elem[0]
+		size := elemType.Size()
+		for i := range n {
+			ptrs[i] = unsafe.Add(base, uintptr(i)*size)
+		}
+		return elemType, ptrs, nil
+	case reflect.Struct:
+		// Non-addressable value: copy into an addressable location to take its pointer.
+		cp := reflect.New(rv.Type())
+		cp.Elem().Set(rv)
+		return rv.Type(), []unsafe.Pointer{cp.UnsafePointer()}, nil
+	default:
+		return nil, nil, fmt.Errorf("colbin: Marshal expects struct or slice of structs, got %s", rv.Kind())
+	}
 }
 
 // appendRecords is the records layout itself, with the element type and one
@@ -111,19 +117,24 @@ func appendMessage(prefix []byte, rv reflect.Value, allowCompact bool) (out []by
 // buffer and pay no allocation per message.
 func appendRecords(dst, prefix []byte, ti *typeInfo, recordPtrs []unsafe.Pointer, rootIsSlice, allowCompact bool) []byte {
 	// Compact mode, when the type allows it and the message is small enough for
-	// per-record framing to beat amortised columns. At one record it always wins
-	// -- the columnar header and per-column type bytes have nothing to spread
-	// over -- so it is taken without building the alternative. At two or three
-	// the answer depends on how many fields are zero, which no cheap predictor
-	// gets right, so both are built and the smaller kept.
+	// per-record framing to beat amortised columns. For a flat struct at one
+	// record it always wins -- the columnar header and per-column type bytes have
+	// nothing to spread over -- so it is taken without building the alternative.
+	//
+	// Otherwise the answer is not predictable cheaply, so both are built and the
+	// smaller kept. That is so at two or three records, where it depends on how
+	// many fields are zero, and it is so at any count for a composite type: a
+	// struct holding a hundred sub-records spends a hundred key runs on them
+	// where the columnar form spends one column per field, and compact mode can
+	// come out larger.
 	var compactBuf []byte
 	if allowCompact && compactUsable(ti) {
 		if shape, ok := compactShape(rootIsSlice, len(recordPtrs)); ok {
-			if len(recordPtrs) == 1 {
+			if len(recordPtrs) == 1 && !compactPlanFor(ti).hasComposite {
 				return appendCompactTo(dst, ti, recordPtrs, shape)
 			}
-			// Two or three records: the columnar form goes into dst, so the
-			// candidate needs a buffer of its own until the two can be compared.
+			// The columnar form goes into dst, so the candidate needs a buffer
+			// of its own until the two can be compared.
 			compactBuf = appendCompactTo(nil, ti, recordPtrs, shape)
 		}
 	}

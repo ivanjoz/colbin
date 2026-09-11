@@ -46,25 +46,41 @@ type cmWide struct {
 	Big     []uint64
 }
 
+// cmNested and cmArrayOfStructs are composites: compact mode carries them, as a
+// nested key run and as a counted run of them, but the encoder decides on size
+// rather than taking compact outright the way it does for a flat struct.
 type cmNested struct {
 	ID   int64
-	Sub  struct{ X int32 } // a nested struct: never compact
+	Sub  struct{ X int32 }
 	Name string
 }
 
 type cmArrayOfStructs struct {
 	ID   int64
-	Rows []cmUser // an array of structs: never compact
+	Rows []cmUser
 }
 
 type cmPointer struct {
 	ID  int64
-	Opt *int32 // nullable: never compact
+	Opt *int32 // nullable: compact only under omit-empty
 }
 
 type cmPlatformInt struct {
 	ID   int64
 	Nums []int // platform-width elements: never compact
+}
+
+// cmAny is the one exclusion the format cannot lift: an interface's concrete
+// type is a property of the value, and the compact wire has no tag for it.
+type cmAny struct {
+	ID      int64
+	Payload any
+}
+
+// cmCyclic can reach itself, and a compact plan is a tree of sub-plans.
+type cmCyclic struct {
+	ID   int64
+	Kids []cmCyclic
 }
 
 // --- eligibility ---------------------------------------------------------------
@@ -77,10 +93,12 @@ func TestCompactEligibility(t *testing.T) {
 		{cmUser{}, true},
 		{cmWide{}, true},
 		{cmNumbered{}, true},
-		{cmNested{}, false},
-		{cmArrayOfStructs{}, false},
-		{cmPointer{}, false},
+		{cmNested{}, true},         // nested key run
+		{cmArrayOfStructs{}, true}, // counted run of key runs
+		{cmPointer{}, false},       // omit-empty is off here
 		{cmPlatformInt{}, false},
+		{cmAny{}, false},
+		{cmCyclic{}, false},
 	} {
 		ti, err := getTypeInfo(reflect.TypeOf(tc.v))
 		if err != nil {
@@ -202,10 +220,10 @@ func TestMarshalPicksCompactAtOneRecord(t *testing.T) {
 // Ineligible types must stay columnar and keep round-tripping.
 func TestMarshalStaysStandardWhenIneligible(t *testing.T) {
 	vals := []any{
-		cmNested{ID: 1, Name: "x"},
-		cmArrayOfStructs{ID: 1, Rows: []cmUser{{ID: 2}}},
 		cmPointer{ID: 1},
 		cmPlatformInt{ID: 1, Nums: []int{1, 2, 3}},
+		cmAny{ID: 1, Payload: "x"},
+		cmCyclic{ID: 1},
 		map[string]int32{"a": 1}, // value mode
 		[]cmUser{},               // zero records
 		[]cmUser{{}, {}, {}, {}}, // four records, past MaxRecords

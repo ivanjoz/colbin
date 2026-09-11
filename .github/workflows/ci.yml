@@ -85,10 +85,25 @@ jobs:
       - name: Regenerate the Rust vectors from the Go codecs
         run: |
           go run ./rust/vectors
-          git diff --exit-code rust/vectors/vectors.json
+          git diff --exit-code rust/vectors/vectors.json rust/vectors/composites.json
       - run: cargo fmt --all -- --check
+      # Both feature states: the crate has no dependencies by default, and the
+      # derive is the one thing that adds any, so a warning that only appears in
+      # one of the two is still a warning.
       - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --features derive -- -D warnings
       - run: cargo test
+      - run: cargo test --features derive
+
+      # The other direction: Rust writes a corpus and the Go decoder reads it.
+      # Byte equality only covers the cases where the two encoders agree exactly,
+      # and a string that packs smaller than raw is deliberately not one of them —
+      # so without this, those messages are never handed to Go at all.
+      - name: Verify the Rust encoder against the Go decoder
+        run: |
+          cargo run --features derive --example emit_vectors
+          git diff --exit-code rust/vectors/rust_encoded.json
+          go test ./rust/vectors
 
       - name: Install
         working-directory: web

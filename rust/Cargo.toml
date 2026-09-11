@@ -12,6 +12,25 @@ readme = "README.md"
 # reader that drags a dependency tree behind it is one more thing to keep in
 # step with whatever else the consumer links.
 [dependencies]
+# The derive macro, which is a procedural macro and so has to be its own crate.
+# Optional: a consumer who does not derive links neither it nor the three
+# build-time crates it needs, which is what keeps the "no dependencies" promise
+# above true for everyone who does not opt in.
+colbin-derive = { version = "0.1", path = "derive", optional = true }
+
+[features]
+default = []
+# Only the macro is optional. `Colbin`, `TypedCodec` and the field reader and
+# writer it generates against are always present, so a caller can hand-write an
+# impl without pulling in a proc-macro toolchain.
+derive = ["dep:colbin-derive"]
+
+# The benchmark measures the typed path against the dynamic one, so it needs the
+# derive. Declared rather than cfg'd inside the file, so `--all-targets` without
+# the feature simply does not build it.
+[[example]]
+name = "bench"
+required-features = ["derive"]
 
 [dev-dependencies]
 # Only the vector corpus needs these; a consumer of the decoder sees neither.

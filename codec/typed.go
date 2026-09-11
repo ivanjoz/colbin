@@ -69,10 +69,15 @@ func MustCodec[T any]() *Codec[T] {
 	return c
 }
 
-// Compact reports whether T can use compact mode, and Keys the key width its
-// field ids allow. Both are fixed by the type, so a caller can log or assert on
-// them once rather than inspecting messages.
+// Compact reports whether compact mode can carry T at all, Composite whether T
+// holds a nested struct, a map or an array of structs, and Keys the key width
+// its field ids allow. All three are fixed by the type, so a caller can log or
+// assert on them once rather than inspecting messages.
+//
+// The pair is what says which form Append writes: compact for a type that is
+// Compact and not Composite, and columnar otherwise -- see Append for why.
 func (c *Codec[T]) Compact() bool          { return c.pl.usable }
+func (c *Codec[T]) Composite() bool        { return c.pl.hasComposite }
 func (c *Codec[T]) Keys() compact.KeyWidth { return c.pl.keys }
 
 // Marshal encodes one record. It is Append onto a fresh buffer; a caller
@@ -82,18 +87,29 @@ func (c *Codec[T]) Marshal(v *T) ([]byte, error) { return c.Append(nil, v) }
 // Append encodes one record onto dst and returns the extended buffer, so a loop
 // over many records can pass buf[:0] and allocate nothing at all.
 //
-// One record always takes compact mode when the type allows it -- the columnar
-// header and per-column type bytes have nothing to amortise over -- so the mode
-// is decided by the type, not by the value, and this path never builds both.
+// One record of a flat struct always takes compact mode -- the columnar header
+// and per-column type bytes have nothing to amortise over -- so the mode is
+// decided by the type, not by the value, and this path never builds both.
+//
+// A type with a nested struct, a map or an array of structs keeps the columnar
+// form here. Compact mode can carry those, but whether it is smaller depends on
+// how much sub-record data the value holds, and answering that means encoding
+// twice -- which is the one thing a Codec exists not to do. Marshal, which does
+// build both, is the entry point for a composite type that wants the smaller of
+// the two; MarshalForceCompact is the one that wants compact regardless.
 func (c *Codec[T]) Append(dst []byte, v *T) ([]byte, error) {
 	if v == nil {
 		return nil, fmt.Errorf("colbin: Codec.Append needs a non-nil *%s", c.rtype)
 	}
 	p := unsafe.Pointer(v)
-	if c.pl.usable {
+	if c.pl.usable && !c.pl.hasComposite {
 		return appendCompactTo(dst, c.ti, unsafe.Slice(&p, 1), compact.ShapeStruct), nil
 	}
-	return appendRecords(dst, binaryPrefix(), c.ti, unsafe.Slice(&p, 1), false, false), nil
+	// A composite type goes through the ordinary record path, which builds both
+	// forms and keeps the smaller -- so a Codec writes byte for byte what Marshal
+	// writes for the same value, which is the property the flat fast path above
+	// gets for free.
+	return appendRecords(dst, binaryPrefix(), c.ti, unsafe.Slice(&p, 1), false, true), nil
 }
 
 // AppendSlice encodes vs as a message of len(vs) records, the same layout

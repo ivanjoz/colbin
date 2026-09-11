@@ -140,9 +140,29 @@ func (r *Reader) Bytes() []byte {
 	return out
 }
 
+// Count reverses Writer.Count: an element or entry count, checked against the
+// bits actually remaining given the fewest bits one element can occupy. A
+// corrupt count near 2^64 has to be rejected before it is used to size anything.
+//
+// For an array of structs that floor is one key width, since an empty record is
+// its terminator alone -- see KeyWidth.Bits.
+func (r *Reader) Count(minBitsPerElem int) (int, bool) { return r.arrayLen(minBitsPerElem) }
+
 // Skip advances past a value of the given kind without materialising it, which
 // is what lets a reader step over a field id its type does not know.
+//
+// The composite kinds are refused rather than guessed at: a nested key run or an
+// array of them is self delimiting only against its own sub-schema, and this
+// signature carries no schema at all. A caller who has the sub-schema does not
+// need Skip -- it can read the value.
 func (r *Reader) Skip(k Kind) {
+	switch k {
+	case KindStruct, KindArray, KindMap:
+		if r.br.err == nil {
+			r.br.err = ErrSkipComposite
+		}
+		return
+	}
 	switch k {
 	case KindInt, KindUint:
 		r.br.getVarint()
@@ -200,4 +220,11 @@ const (
 	KindFloat32s
 	KindFloat64s
 	KindBools
+
+	// Composite forms, which recurse into values of their own: a nested key run,
+	// a counted run of values, and a counted run of key/value pairs. They are the
+	// kinds Skip refuses, for the reason it gives.
+	KindStruct
+	KindArray
+	KindMap
 )

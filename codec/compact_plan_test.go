@@ -95,7 +95,7 @@ func TestCompactPlanNoSignedFields(t *testing.T) {
 // One field without a compact form disqualifies the whole type, and the plan is
 // what records that.
 func TestCompactPlanIneligible(t *testing.T) {
-	for _, v := range []any{cmNested{}, cmArrayOfStructs{}, cmPointer{}, cmPlatformInt{}, struct{}{}} {
+	for _, v := range []any{cmAny{}, cmCyclic{}, cmPointer{}, cmPlatformInt{}, struct{}{}} {
 		ti, err := getTypeInfo(reflect.TypeOf(v))
 		if err != nil {
 			t.Fatalf("%T: %v", v, err)
