@@ -1622,7 +1622,8 @@
             "v": "AAEC+v8="
           }
         ]
-      ]
+      ],
+      "rustByteExact": false
     },
     {
       "name": "compact-all-positive",
@@ -1751,7 +1752,8 @@
             "v": "ok"
           }
         ]
-      ]
+      ],
+      "rustByteExact": true
     },
     {
       "name": "compact-mostly-omitted",
@@ -1840,7 +1842,8 @@
             "v": "x"
           }
         ]
-      ]
+      ],
+      "rustByteExact": true
     },
     {
       "name": "compact-empty-record",
@@ -1920,7 +1923,8 @@
       "message": "4x8=",
       "records": [
         []
-      ]
+      ],
+      "rustByteExact": true
     },
     {
       "name": "compact-slices",
@@ -2079,7 +2083,8 @@
             ]
           }
         ]
-      ]
+      ],
+      "rustByteExact": false
     },
     {
       "name": "compact-single-element-slices",
@@ -2168,7 +2173,8 @@
             ]
           }
         ]
-      ]
+      ],
+      "rustByteExact": false
     },
     {
       "name": "compact-narrow-keys",
@@ -2238,7 +2244,8 @@
             ]
           }
         ]
-      ]
+      ],
+      "rustByteExact": false
     },
     {
       "name": "compact-narrow-negative",
@@ -2292,7 +2299,8 @@
             "v": "neg"
           }
         ]
-      ]
+      ],
+      "rustByteExact": true
     },
     {
       "name": "compact-shape-1",
@@ -2356,7 +2364,8 @@
             "v": "a"
           }
         ]
-      ]
+      ],
+      "rustByteExact": true
     },
     {
       "name": "compact-shape-2",
@@ -2430,7 +2439,8 @@
             "v": "b"
           }
         ]
-      ]
+      ],
+      "rustByteExact": true
     },
     {
       "name": "compact-shape-3",
@@ -2510,7 +2520,8 @@
             "v": "c"
           }
         ]
-      ]
+      ],
+      "rustByteExact": true
     },
     {
       "name": "compact-token",
@@ -2571,7 +2582,8 @@
             "v": "tester"
           }
         ]
-      ]
+      ],
+      "rustByteExact": false
     },
     {
       "name": "compact-token-accented",
@@ -2632,7 +2644,8 @@
             "v": "ñandú@example.com"
           }
         ]
-      ]
+      ],
+      "rustByteExact": false
     },
     {
       "name": "compact-token-empty-user",
@@ -2681,7 +2694,8 @@
             "v": "1"
           }
         ]
-      ]
+      ],
+      "rustByteExact": true
     },
     {
       "name": "compact-string-aligned",
@@ -2733,7 +2747,8 @@
             "v": "alineado"
           }
         ]
-      ]
+      ],
+      "rustByteExact": false
     },
     {
       "name": "compact-string-unaligned",
@@ -2767,7 +2782,8 @@
             "v": "desalineado"
           }
         ]
-      ]
+      ],
+      "rustByteExact": false
     },
     {
       "name": "standard-scalars-4",
@@ -3062,7 +3078,8 @@
             "v": "CQgH"
           }
         ]
-      ]
+      ],
+      "rustByteExact": false
     },
     {
       "name": "standard-empty-float-column",
@@ -3357,7 +3374,8 @@
             "v": ""
           }
         ]
-      ]
+      ],
+      "rustByteExact": true
     },
     {
       "name": "standard-slices-4",
@@ -3645,7 +3663,8 @@
             "v": []
           }
         ]
-      ]
+      ],
+      "rustByteExact": true
     },
     {
       "name": "standard-tokens-4",
@@ -3772,7 +3791,8 @@
             "v": "a-very-long-user-name-for-width-testing"
           }
         ]
-      ]
+      ],
+      "rustByteExact": false
     },
     {
       "name": "standard-zero-records",
@@ -3810,7 +3830,8 @@
         }
       ],
       "message": "AgAFygAANQAAnwAAGgAAagI=",
-      "records": []
+      "records": [],
+      "rustByteExact": true
     },
     {
       "name": "standard-many-records",
@@ -5257,7 +5278,8 @@
             "v": "usuario63"
           }
         ]
-      ]
+      ],
+      "rustByteExact": false
     },
     {
       "name": "standard-omit-empty-columns",
@@ -5552,7 +5574,8 @@
             "v": ""
           }
         ]
-      ]
+      ],
+      "rustByteExact": true
     },
     {
       "name": "standard-omit-empty-tokens",
@@ -5767,7 +5790,8 @@
             "v": "usuario07"
           }
         ]
-      ]
+      ],
+      "rustByteExact": false
     },
     {
       "name": "standard-omit-empty-slices",
@@ -6027,7 +6051,8 @@
             "v": []
           }
         ]
-      ]
+      ],
+      "rustByteExact": true
     },
     {
       "name": "compact-omit-empty-token",
@@ -6076,7 +6101,8 @@
             "v": "flag"
           }
         ]
-      ]
+      ],
+      "rustByteExact": false
     }
   ]
 }

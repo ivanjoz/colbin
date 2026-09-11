@@ -66,7 +66,11 @@ func TestArrayColumnSharedBacking(t *testing.T) {
 // up here as the first message's values leaking into the second.
 func TestRepeatedDecodeIsStable(t *testing.T) {
 	first := grantCorpus()
-	second := []grantHolder{{UsuarioID: 9, Grants: []grantRow{{1, 1, []uint8{}}}}, {UsuarioID: 10}}
+	// second holds two records, which is small enough for compact mode to win,
+	// and compact mode omits an empty field and decodes it back as nil -- so
+	// SubAccesos is non-empty here where the four-record corpus above can use the
+	// columnar form's empty []byte. See TestCodecSliceReuse for the same crossing.
+	second := []grantHolder{{UsuarioID: 9, Grants: []grantRow{{1, 1, []uint8{5}}}}, {UsuarioID: 10}}
 
 	dataA, err := Marshal(first)
 	if err != nil {

@@ -88,8 +88,16 @@ func (w *Writer) Key(k uint8) {
 }
 
 // End closes the current record with the terminator key, at whichever width the
-// header declared.
+// header declared. A nested key run -- a struct field, or one element of an
+// array of structs -- is closed by this same call: the framing does not change
+// with depth.
 func (w *Writer) End() { w.bw.put(w.terminator, w.keyBits) }
+
+// Count writes how many elements or entries a composite holds, introducing the
+// values that follow. It is the array codecs' count varint, exposed for the
+// composites whose elements are written one at a time rather than handed to a
+// codec in bulk.
+func (w *Writer) Count(n int) { w.bw.putVarint(uint64(n)) }
 
 // Int writes a signed value. With ALL_POSITIVE set the payload is the magnitude,
 // which is one bit narrower than the zigzag the flag's absence forces.

@@ -69,7 +69,7 @@ pub(crate) fn decode(data: &[u8], schema: &Schema) -> Result<Vec<Record>, Error>
 fn read_column(
     cursor: &mut Cursor<'_>,
     id: u8,
-    kind: Kind,
+    kind: &Kind,
     count: usize,
 ) -> Result<Vec<Value>, Error> {
     if let Some(elem) = Elem::of_slice(kind) {
@@ -88,7 +88,11 @@ fn read_column(
         let flattened = read_elem_column(cursor, id, elem, total)?;
         return split(kind, flattened, &lengths);
     }
-    let elem = Elem::of_scalar(kind).expect("every kind is either a scalar or a slice");
+    // A composite kind reaches here only in standard mode, which this decoder
+    // reads flat: compact mode carries nested structs, arrays of structs and maps,
+    // the columnar layout carries them as sub-tables, and only the former is
+    // ported. Refused rather than panicked on.
+    let elem = Elem::of_scalar(kind).ok_or(Error::CompositeUnsupported { id })?;
     Ok(read_elem_column(cursor, id, elem, count)?.into_values(kind))
 }
 
@@ -109,7 +113,7 @@ enum Elem {
 }
 
 impl Elem {
-    fn of_scalar(kind: Kind) -> Option<Self> {
+    fn of_scalar(kind: &Kind) -> Option<Self> {
         if let Some((bits, signed)) = kind.scalar_int() {
             return Some(Self::Int { bits, signed });
         }
@@ -123,7 +127,7 @@ impl Elem {
         })
     }
 
-    fn of_slice(kind: Kind) -> Option<Self> {
+    fn of_slice(kind: &Kind) -> Option<Self> {
         if let Some((bits, signed)) = kind.slice_int() {
             return Some(Self::Int { bits, signed });
         }
@@ -150,7 +154,7 @@ enum Column {
 
 impl Column {
     /// Hands each value out as the scalar kind the schema declared.
-    fn into_values(self, kind: Kind) -> Vec<Value> {
+    fn into_values(self, kind: &Kind) -> Vec<Value> {
         match self {
             Self::Ints(values) => values.into_iter().map(Value::Int).collect(),
             Self::Uints(values) => values.into_iter().map(Value::Uint).collect(),
@@ -179,7 +183,7 @@ impl Column {
 }
 
 /// Cuts a flattened element column into one slice value per record.
-fn split(kind: Kind, column: Column, lengths: &[i64]) -> Result<Vec<Value>, Error> {
+fn split(kind: &Kind, column: Column, lengths: &[i64]) -> Result<Vec<Value>, Error> {
     let mut out = Vec::with_capacity(lengths.len());
     let mut at = 0_usize;
     // Every length was range checked while the total was summed.

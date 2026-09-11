@@ -122,12 +122,23 @@ func decodeInto(data []byte, target reflect.Value) error {
 // header validates the version byte and steps over a JSON message's schema
 // section, leaving the cursor where the body begins.
 func (dec *decoder) header() error {
+	// Bounds first, and everything below stays inside them. A message arrives
+	// from a file or a socket, so a length it declares is an instruction from
+	// somewhere else: acting on one before checking it is how a decoder reads
+	// memory it was never given. Every branch here used to trust one.
+	if dec.pos >= len(dec.data) {
+		return fmt.Errorf("colbin: message is empty")
+	}
 	switch v := dec.readByte(); v {
 	case formatVersion, formatVersionOmitEmpty:
 	case jsonFormatVersion, jsonFormatVersionOmitEmpty:
 		// A self-describing message: the body underneath is identical, so the
 		// schema section is simply stepped over when the Go type is known.
-		dec.pos += int(dec.readUvarint())
+		length, read := binary.Uvarint(dec.data[dec.pos:])
+		if read <= 0 || length > uint64(len(dec.data)-dec.pos-read) {
+			return fmt.Errorf("colbin: schema section runs past the message")
+		}
+		dec.pos += read + int(length)
 	default:
 		return fmt.Errorf("colbin: bad version byte 0x%02x", v)
 	}
@@ -136,6 +147,9 @@ func (dec *decoder) header() error {
 
 // recordCount reads the record count that opens a records-layout body.
 func (dec *decoder) recordCount() (int, error) {
+	if dec.pos > len(dec.data) {
+		return 0, fmt.Errorf("colbin: message ends before its record count")
+	}
 	n64, m := binary.Uvarint(dec.data[dec.pos:])
 	if m <= 0 {
 		return 0, fmt.Errorf("colbin: bad record count")

@@ -161,6 +161,10 @@ bit 0 == 1    compact mode  — bit-level, one to three records
 `Marshal` picks the mode and `Unmarshal` dispatches on that bit, so neither is
 something callers choose.
 
+There is a third, **minimal mode**, which is not in that dispatch at all: it
+carries no version byte, so it is reached through `MarshalMinimal` and read back
+through `UnmarshalMinimal`. See [Minimal mode](#minimal-mode).
+
 ### Standard mode
 
 The default, and what the rest of this document mostly describes. Records are
@@ -191,22 +195,65 @@ both widths decode without the reader having to guess.
 Arrays of primitives still delegate to the same `varint` and `packed5` codecs, so
 an array field costs the same in either mode.
 
+Composites recurse through the same bitstream, and none of them borrows the
+columnar layout — compact mode has no column framing to embed, so a nested struct
+is simply another key run:
+
+```text
+nested struct   [key] [ [key][value] ... [terminator] ]
+array           [key] [count:varint] [value] [value] ...
+map             [key] [count:varint] [key][value] [key][value] ...
+```
+
+Every form is self-delimiting given the schema, so nothing needs a byte length
+and nothing needs a type tag. The omit-zero rule reaches into them too: a nested
+struct all of whose fields are zero is omitted entirely, and so is an empty array
+or map. One consequence of nesting is that `NARROW_KEYS` is a property of the
+whole **message** — a nested key run spends the same key bits, so every reachable
+struct has to keep its ids at or below 14, which means tagging the nested structs
+too.
+
 Layout in [Wire format](#compact-mode-1); the codec in
 [`compact/README.md`](compact/README.md).
 
 ### How the mode is chosen
 
-Compact mode is used when the record count is 1 to 3 **and** every field is a
-scalar, string, `[]byte`, or an array of those. Nested structs, arrays of structs,
-pointers, maps, `any`, and `[]int`/`[]uint` elements fall back to standard mode —
-chiefly because a struct holding 100 sub-structs carries 100 records' worth of
-columnar data, so the premise fails. The test is structural and memoised per type;
-a slice's *length* does not enter it.
+Compact mode can carry a type when the record count is 1 to 3 and every field has
+a compact form. That is scalars, strings, `[]byte`, arrays of those, and — through
+the recursion above — nested structs, arrays of structs, maps and nested slices.
+Three things it cannot carry:
 
-At one record compact always wins and is taken directly. At two or three the
-answer turns on how many fields are zero and on the key width, so both are built
-and the smaller kept. `MarshalJSON` is always standard mode — a compact message
-has no room for a schema section.
+- **`any` / interface, at any depth.** A value's concrete type is a property of
+  the value, not the type, and the compact wire has no tag for it. This is the
+  only exclusion the format itself imposes.
+- **A pointer, unless `SetOmitEmpty(true)`.** Presence *is* "named by a key", so
+  `nil` and a pointer to the zero value are the same bytes.
+- **A self-referential type.** The wire would be fine; the per-type plan is a
+  tree of sub-plans and building one would not terminate.
+
+The test is structural and memoised per type; a slice's *length* does not enter
+it.
+
+For a **flat** struct at one record compact always wins and is taken directly. In
+every other case both forms are built and the smaller kept: at two or three
+records the answer turns on how many fields are zero and on the key width, and for
+a **composite** type it turns on how much sub-record data the value holds — a
+struct with 100 sub-structs spends 100 key runs where the columnar form spends one
+column per field, and compact can come out larger. `MarshalJSON` is always
+standard mode — a compact message has no room for a schema section.
+
+`MarshalForceCompact` skips that choice and takes compact whenever the type
+permits it, erroring (rather than falling back) when it does not:
+
+```go
+buf, err := colbin.MarshalForceCompact(token)   // compact.IsCompact(buf) == true
+// err: "... cmAny cannot use compact mode: field Payload is an interface, whose
+//       concrete type is a property of the value and has no tag on the compact wire"
+```
+
+`Codec[T].Append` keeps its single-encode promise and stays columnar for a
+composite type; `Codec[T].Compact()` and `.Composite()` together say which form a
+handle writes.
 
 The same 5-field record, hashed ids against explicit `cb:"1"`..`cb:"5"` ones:
 
@@ -217,6 +264,57 @@ The same 5-field record, hashed ids against explicit `cb:"1"`..`cb:"5"` ones:
 | 2 records | 50 B | 50 B | **44 B** | 154 B |
 | 3 records | 62 B | 65 B | **57 B** | 220 B |
 | struct with a 1000-element `[]int32` | 1017 B | 1010 B | **1008 B** | — |
+
+## Minimal mode
+
+A byte-aligned `[key][value]` layout for **one record of at most sixteen numbered
+primitive fields**, where a zero-valued field is not written at all.
+
+```go
+type Charge struct {
+    CompanyID int32  `cb:"0"`
+    UserID    int32  `cb:"1"`
+    RouteID   uint16 `cb:"2"`
+    CPU       uint16 `cb:"3"`
+}
+
+buf, _ := colbin.MarshalMinimal(&charge)      // 11 B where a fixed layout took 20
+err := colbin.UnmarshalMinimal(buf, &charge)
+```
+
+It exists for the case the other two modes are not built for: one small record on
+a hot path — a wire frame, a token, a row key — where per-record framing is the
+whole cost and there is nothing to amortise it over.
+
+| one 10-field record, 5 fields set | encode | decode | allocs |
+|---|---:|---:|---:|
+| `minimal.Writer` straight-line, as a generator emits | **5.8 ns** | **18.0 ns** | 0 |
+| `MinimalCodec[T]`, plan held in the handle | 17.6 ns | 32.8 ns | 0 |
+| `AppendMinimal`, onto the caller's buffer | 32.0 ns | 52.3 ns | 0 |
+| `MarshalMinimal` | 62.5 ns | — | 1 |
+| compact mode, `Codec[T].Append` | 92.2 ns | 127.8 ns | 0 |
+
+11 bytes against compact mode's 10, and against 20 for the fixed layout the
+straight-line row replaces.
+
+What it asks of the type, each refused loudly rather than worked around:
+
+- **Every field carries an explicit `cb:"N"` with N ≤ 15.** Four key bits cannot
+  hold a hashed id.
+- **Scalars, strings, `[]byte` and slices of those.** No nested struct, map,
+  pointer or interface: a field's whole layout has to follow from its key.
+
+And what it gives up for the speed: a minimal message is **not self-describing
+and carries no mode byte**, so `Unmarshal` cannot read one; and an unknown key is
+an error rather than something to skip, so adding a field is a coordinated deploy
+of both sides.
+
+`AppendMinimal(dst, v)` writes onto a buffer the caller owns, and
+`MustMinimalCodec[T]()` holds the resolved plan so a hot path pays neither the
+type lookup nor the reflect entry — both allocation-free per message. `MinimalFieldIDs(v)` dumps the
+wire keys for handing to a reader in another language. The format, the wire
+layout and the reasoning are in [`minimal/README.md`](minimal/README.md); the
+Rust port is `colbin::MinimalReader` / `colbin::MinimalWriter`.
 
 ## JSON mode
 
@@ -445,6 +543,11 @@ header  := mode(bit 0 = 1) | ALL_POSITIVE(bit 1) | shape(bits 2-3)
                            | NARROW_KEYS(bit 4)
 
 record  := ( [field_id:k] value )* [terminator:k]       // k = 8, or 4 if narrow
+
+value   := scalar                                       // varint / bits / packed5
+         | record                                       // nested struct
+         | [count:varint] value*                        // array
+         | [count:varint] ( value value )*              // map, key then value
 ```
 
 | bit | field | meaning |
@@ -672,6 +775,8 @@ catches a Go-side format change nobody ported.
 | `codec/omitempty.go` | the omit-empty flag, the empty-column bit and the version it selects |
 | `codec/typed.go` | `Codec[T]`, the cached typed handle over the same format |
 | `compact/` | compact mode wire format: bitstream, selector varint, reader/writer |
+| `minimal/` | minimal mode wire format: the byte-aligned key/value reader/writer |
+| `codec/minimal.go` | minimal mode: the per-type plan and the reflection façade |
 | `varint/` | adaptive integer-array codec used by integer and length columns |
 | `packed5/` | self-delimiting string codec used by every string path |
 | `comparison/` | 21-model Colbin, Protobuf, JSON v2, and CBOR comparison corpus |
@@ -683,6 +788,9 @@ catches a Go-side format change nobody ported.
 
 - The plain binary mode is not self-describing: encoder and decoder must share a
   compatible Go type. Use JSON mode when the reader has no such type.
+- Minimal mode goes further: it has no version byte either, so `Unmarshal` cannot
+  recognise one and `UnmarshalMinimal` is the only way back. It carries at most
+  sixteen explicitly numbered fields, and no composite of any kind.
 - Compact mode carries no schema, so `MarshalJSON` always uses standard mode. A
   compact message also rejects an unknown field id rather than skipping it: the
   wire holds no type tag, so there is no way to know how far to step.
@@ -692,11 +800,58 @@ catches a Go-side format change nobody ported.
   demand) but leaves two encodings of the same value in flight. The browser port
   **decodes** omit-empty messages; its encoder still writes dense columns, so the
   `omitempty` vector tier is skipped in the port's encoder tests.
-- The Rust port is a decoder only, and carries only the value kinds compact mode
-  admits: scalars, strings, byte blobs and slices of primitives. A nested struct,
-  a map, an `interface{}` column or a `MarshalJSON` message is refused with an
-  error naming why. It also rejects a string that is not valid UTF-8, which this
-  package permits — `packed5` is byte exact, and a Rust `String` cannot be.
+- The Rust port reads both wire modes and **writes compact mode**
+  (`colbin::encode`, `colbin::encode_one`). Its `Schema` is a tree, so compact
+  mode's composites — nested structs, arrays of structs, maps, nested slices —
+  round-trip; standard mode is still read **flat**, since a composite is a
+  sub-table there and that is a separate layout. An `interface{}` column or a
+  `MarshalJSON` message is refused with an error naming why. It also rejects a
+  string that is not valid UTF-8, which this package permits — `packed5` is byte
+  exact, and a Rust `String` cannot be.
+- **`#[derive(Colbin)]` is the fast path in Rust** (`derive` feature). A message
+  is read into and written out of the struct's own fields, with no intermediate
+  `Record` and no `Value`: **46 ns/op to encode and 103 ns/op to decode** a
+  seven-field record, against Go's `Codec[T]` at ~120 and ~150. It carries the
+  flat forms — `bool`, the fixed-width integers and floats, `String`, `Vec<u8>`
+  and slices of those; a nested struct, a slice of structs or a map goes through
+  `colbin::Codec`, which reads and writes all of them.
+
+  ```rust
+  #[derive(Colbin)]
+  struct Token { #[cb(1)] company_id: i32, #[cb(2)] user: String }
+
+  let codec = TypedCodec::<Token>::new()?;
+  codec.append(&mut buf, &token)?;      // zero allocations
+  codec.decode_into(&buf, &mut token)?; // straight into the fields
+  ```
+
+  The macro is the crate's only dependency and it is optional, so a consumer who
+  does not derive links neither it nor `syn`.
+- **Use `colbin::Codec` for the same shape repeatedly.** It resolves the
+  schema's derived facts once and lets the caller own the buffer:
+  `Codec::append_one` allocates nothing, and measured 67 ns/op against 124 ns/op
+  for the free `encode_one` on a seven-field record — faster than Go's
+  `Codec[T].Append` (~120 ns/op), because streaming the packed5 and varint frames
+  through the bitstream removed two scratch buffers the Go encoder still pays
+  for. Decode is ~190 ns/op, and the gap against Go is the owned `Record`/`Value`
+  tree rather than the codec — which is what the derive above removes.
+- **The Rust encoder writes raw `packed5` frames**, where Go picks the cheaper of
+  raw and packed per string. So a Rust-written message is identical to a
+  Go-written one except where a string packs smaller: measured over the corpus,
+  685 B against 654 B in total (+4.7%), worst case +6 B on one record. Everything
+  else is byte-identical, the integer array codec's transform search included.
+  Both directions are pinned in CI: Go writes and Rust reads
+  (`rust/tests/vectors.rs`), Rust writes and Go reads
+  (`rust/vectors/verify_test.go`).
+- `Kind::Array` of a bare scalar is refused when a `Schema` is built: no Go type
+  produces it, because a slice of scalars is its own kind (`Int32s`, `Strings`, …)
+  and rides a bulk codec. `Array` carries composites and `Bytes`.
+- Compact mode's `Reader.Skip` refuses the composite kinds. Every value form is
+  self-delimiting *against its schema*, and `Skip` is handed a `Kind` rather than
+  a sub-schema, so there is no way to know how far a nested key run reaches.
+- A map's entries are written in Go's iteration order, so compact output is not
+  byte-stable for a map-bearing type. The columnar path has always had this
+  property; compact mode inherits it rather than paying for a sort per map.
 - Trusts the input buffer on decode (internal use); malformed data can panic on
   slice bounds rather than returning an error. `DecodeJSON` and `DecodeAny` do
   turn that panic into an error, but still trust the counts they read, so a

@@ -190,8 +190,13 @@ func TestCodecReportsTypeFacts(t *testing.T) {
 	if c := MustCodec[cmUser](); !c.Compact() || c.Keys() != compact.Keys8 {
 		t.Errorf("cmUser: compact %v keys %d, want true/%d", c.Compact(), c.Keys(), compact.Keys8)
 	}
-	if c := MustCodec[cmNested](); c.Compact() {
-		t.Error("cmNested: compact true, want false")
+	// A composite type can use compact mode, but Append does not pick it: the
+	// two facts together are what say which form a Codec writes.
+	if c := MustCodec[cmNested](); !c.Compact() || !c.Composite() {
+		t.Errorf("cmNested: compact %v composite %v, want true/true", c.Compact(), c.Composite())
+	}
+	if c := MustCodec[cmAny](); c.Compact() {
+		t.Error("cmAny: compact true, want false")
 	}
 }
 

@@ -149,6 +149,10 @@ type caseOut struct {
 	Fields      []fieldOut     `json:"fields"`
 	Message     string         `json:"message"`
 	Records     [][]fieldValue `json:"records"`
+	// Whether the Rust encoder can reproduce this message byte for byte. It
+	// writes raw packed5 frames, and Go picks the cheaper of raw and packed --
+	// so the two agree exactly unless some string in the value packs smaller.
+	RustByteExact bool `json:"rustByteExact"`
 }
 
 type fieldIDCase struct {
@@ -180,6 +184,10 @@ func main() {
 		panic(err)
 	}
 	fmt.Printf("%d field-id cases, %d messages -> %s\n", len(c.FieldIDs), len(c.Cases), out)
+
+	// The composite corpus, whose schema representation is a tree rather than a
+	// string. See composites.go for why it is a separate file.
+	writeComposites(filepath.Join(filepath.Dir(out), "composites.json"))
 }
 
 // --- the cases ---------------------------------------------------------------
@@ -330,11 +338,12 @@ func marshalCase(name string, value any) caseOut {
 	fields := fieldsOf(elem)
 
 	c := caseOut{
-		Name:      name,
-		OmitEmpty: colbin.OmitEmpty(),
-		Shape:     -1,
-		Fields:    fields,
-		Message:   base64.StdEncoding.EncodeToString(data),
+		Name:          name,
+		OmitEmpty:     colbin.OmitEmpty(),
+		Shape:         -1,
+		Fields:        fields,
+		Message:       base64.StdEncoding.EncodeToString(data),
+		RustByteExact: everyStringIsRaw(value),
 	}
 	if compact.IsCompact(data) {
 		r, err := compact.NewReader(data)
@@ -764,7 +773,7 @@ func fold(s string) uint8 {
 //
 // The ids therefore come from the colbin package itself rather than from a
 // second implementation of the hash.
-func fieldsOf(t reflect.Type) []fieldOut {
+func fieldIDsOf(t reflect.Type) []fieldOut {
 	rows := reflect.MakeSlice(reflect.SliceOf(t), 1, 1)
 	data, err := colbin.MarshalJSON(rows.Interface())
 	if err != nil {
@@ -794,13 +803,23 @@ func fieldsOf(t reflect.Type) []fieldOut {
 		pos = skipDesc(data, pos)
 		out = append(out, fieldOut{Name: name, ID: id})
 	}
-	// The kinds and the cb:"N" tags come from the Go type, which is where they
-	// live; the schema section carries neither in a form worth re-deriving.
+	// The cb:"N" tags come from the Go type, which is where they live; the schema
+	// section does not carry them in a form worth re-deriving.
 	for i, sf := range encodableFields(t) {
-		out[i].Kind = kindName(sf.Type)
 		if id, ok := explicitID(sf); ok {
 			out[i].Explicit = &id
 		}
+	}
+	return out
+}
+
+// fieldsOf is fieldIDsOf with each field's flat kind name attached, which is what
+// the original corpus records. It panics on a composite type by way of kindName;
+// the composite corpus uses fieldIDsOf and builds a kind tree instead.
+func fieldsOf(t reflect.Type) []fieldOut {
+	out := fieldIDsOf(t)
+	for i, sf := range encodableFields(t) {
+		out[i].Kind = kindName(sf.Type)
 	}
 	return out
 }
@@ -828,19 +847,24 @@ func explicitID(sf reflect.StructField) (int, bool) {
 	return 0, false
 }
 
-// skipDesc steps over one schema descriptor. Only the shapes this generator can
-// produce are handled; anything else means the corpus grew a type the Rust
-// decoder does not carry, and the panic is the right outcome.
+// skipDesc steps over one schema descriptor, following the layout codec/schema.go
+// documents. ftAny is the one class left out: nothing here can produce it, and it
+// is the one form compact mode has no representation for at all.
 func skipDesc(buf []byte, pos int) int {
 	flags := buf[pos]
 	pos++
 	switch flags & 0x07 {
-	case 0, 1: // int, float: one scalar-kind byte
+	case 0, 1: // ftInt, ftFloat: one scalar-kind byte
 		return pos + 1
-	case 2, 3: // string, bytes: nothing
+	case 2, 3: // ftString, ftBytes: nothing
 		return pos
-	case 4: // array: the element descriptor
+	case 4: // ftArray: the element descriptor
 		return skipDesc(buf, pos)
+	case 5: // ftStruct: a uvarint index into the schema's struct table
+		_, n := binary.Uvarint(buf[pos:])
+		return pos + n
+	case 6: // ftMap: the key descriptor, then the value's
+		return skipDesc(buf, skipDesc(buf, pos))
 	}
 	panic("unsupported descriptor class")
 }
@@ -997,4 +1021,51 @@ func reportCoverage(cases []caseOut) {
 		fmt.Fprintf(os.Stderr, "\nCOVERAGE GAP: %v\n", missing)
 		os.Exit(1)
 	}
+}
+
+// everyStringIsRaw reports whether every string reachable in value goes out as a
+// raw packed5 frame -- header bit 0 clear -- which is the frame the Rust encoder
+// writes. Go picks the cheaper of raw and packed per string, and raw wins on
+// anything short, so the two encoders agree byte for byte far more often than
+// "Rust does not pack" suggests. Where they disagree, this says so rather than
+// leaving the encoder test to guess.
+func everyStringIsRaw(value any) bool {
+	raw := true
+	var walk func(v reflect.Value)
+	walk = func(v reflect.Value) {
+		if !raw || !v.IsValid() {
+			return
+		}
+		switch v.Kind() {
+		case reflect.String:
+			if frame := packed5.Append(nil, v.String()); len(frame) > 0 && frame[0]&1 == 1 {
+				raw = false
+			}
+		case reflect.Ptr, reflect.Interface:
+			if !v.IsNil() {
+				walk(v.Elem())
+			}
+		case reflect.Slice, reflect.Array:
+			if v.Kind() == reflect.Slice && v.Type().Elem().Kind() == reflect.Uint8 {
+				return // []byte is not a string column
+			}
+			for i := range v.Len() {
+				walk(v.Index(i))
+			}
+		case reflect.Map:
+			it := v.MapRange()
+			for it.Next() {
+				walk(it.Key())
+				walk(it.Value())
+			}
+		case reflect.Struct:
+			for i := range v.NumField() {
+				if v.Type().Field(i).PkgPath == "" {
+					walk(v.Field(i))
+				}
+			}
+		}
+	}
+	walk(reflect.ValueOf(value))
+	return raw
 }

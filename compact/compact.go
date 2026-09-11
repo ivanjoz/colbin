@@ -54,6 +54,38 @@
 // field count, so it wants explicit small ids in the struct tags (`cb:"1"`,
 // `cb:"2"`, ...); a hashed id lands anywhere in 0..254 and forces the wide key.
 //
+// # Composites
+//
+// A record is a run of keyed values, and three of those value forms are
+// themselves made of values. They recurse through the same bitstream, and none
+// of them borrows anything from the standard mode: compact mode has no column
+// framing to embed, so a nested struct is another key run, not a sub-table. The
+// two modes share value codecs -- varint, packed5 -- and nothing else.
+//
+//	nested struct   [key] [ [key][value] ... [terminator] ]
+//	array           [key] [count:varint] [value] [value] ...
+//	map             [key] [count:varint] [key][value] [key][value] ...
+//
+// Every form is self delimiting given the schema, which is the only thing the
+// format asks of a value: an array carries its count, a packed5 frame carries
+// its own end, and a key run closes on the terminator. Nothing needs a byte
+// length and nothing needs a type tag.
+//
+// What the schema cannot supply is a value's *dynamic* type, so an interface
+// field has no compact form at all -- see codec/compact_plan.go, which is where
+// the per-field rule lives.
+//
+// The omit-zero rule reaches into the composites the same way it reaches a
+// scalar. A nested struct all of whose fields are zero is omitted entirely, and
+// so is an array or map of length zero, which is why an empty-but-non-nil slice
+// or map decodes back as nil -- exactly as it already did for a slice.
+//
+// One thing changes for the key width: a nested key run spends the same key bits
+// as the record containing it, so NARROW_KEYS is a property of the whole message
+// rather than of the root struct. Every struct reachable in the message must
+// keep its ids at or below MaxNarrowKey, which in practice means tagging the
+// nested structs too.
+//
 // # Integers
 //
 // ALL_POSITIVE decides how a signed value becomes the unsigned payload: with the
@@ -92,6 +124,10 @@ var (
 	// ErrBadString is returned when a string field does not hold a valid packed5
 	// frame.
 	ErrBadString = errors.New("colbin: compact bad string frame")
+	// ErrSkipComposite is returned when Skip is asked to step over a nested
+	// struct, array or map. Those forms are self delimiting only against their
+	// own sub-schema, which Skip is not given -- see Reader.Skip.
+	ErrSkipComposite = errors.New("colbin: compact composite cannot be skipped without its sub-schema")
 )
 
 // Shape says how many records the message holds and whether a lone record is an
@@ -150,6 +186,11 @@ const MaxNarrowKey uint8 = 14
 // Only Keys4 is narrow, so any other value -- including one a caller invented --
 // resolves to the wide key rather than to a width nothing can read.
 func (k KeyWidth) narrow() bool { return k == Keys4 }
+
+// Bits is the width of one key. It is also the fewest bits a record can occupy,
+// since an empty record is its terminator alone -- which is what bounds-checking
+// a record count needs (see Reader.Count).
+func (k KeyWidth) Bits() int { return int(k.bits()) }
 
 // bits is the width of one key, and terminator is the id that closes a record at
 // that width.

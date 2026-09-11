@@ -19,6 +19,7 @@
 //! decides what to do with a frame that is not UTF-8.
 
 use crate::Error;
+use crate::bitstream::BitWriter;
 
 const FLAG_PACKED5: u8 = 1 << 0;
 const FLAG_UPPERCASE: u8 = 1 << 1;
@@ -219,4 +220,47 @@ impl<'a> StreamReader<'a> {
         self.bit += usize::from(width);
         Some(((u64::from_le_bytes(window) >> shift) & ((1_u64 << width) - 1)) as u32)
     }
+}
+
+// --- encoding ----------------------------------------------------------------
+
+/// Writes `bytes` as a frame with `PACKED_5` clear: the header, the length, and
+/// the payload verbatim.
+///
+/// Written straight through the bitstream rather than built into a scratch
+/// buffer first, which is what the Go encoder has to do because `packed5.Append`
+/// returns a slice. A raw frame is three sequential pieces, so there is nothing
+/// to assemble: the header and the length go out as 8-bit units, which leaves
+/// the stream's alignment exactly as it found it, so the payload still takes
+/// `put_bytes`'s memcpy path when the frame began byte aligned.
+///
+/// This is a *frame*, not a bare string — a bare string would not be readable by
+/// anything. It is the unpacked branch of the same format, which Go's encoder
+/// already emits whenever raw is the cheaper of the two, so it is a path that was
+/// on the wire and being read before this encoder existed.
+///
+/// The packed branch is deliberately not ported. Its encoder is a greedy scan
+/// over case-toggle runs, digit runs, a symbol table and multi-byte escapes,
+/// which additionally costs the exact size of all four header-flag settings
+/// computed per string to pick the cheapest. Skipping it is a CPU win and a size
+/// loss: +1 byte on the short identifiers a record usually carries, and up to
+/// ~60% on long lowercase text. See `rust/PLAN.md`.
+pub(crate) fn write_raw(writer: &mut BitWriter<'_>, bytes: &[u8]) {
+    let length = bytes.len();
+    if length <= LEN_INLINE {
+        writer.chunk((length as u64) << LEN_SHIFT, 8);
+    } else {
+        // The header's five length bits cannot hold it, so they carry the escape
+        // code and a uvarint follows. A length the header *could* have held must
+        // not use the escape: one length has one encoding, and the decoder
+        // rejects an overlong prefix.
+        writer.chunk((LEN_ESCAPE as u64) << LEN_SHIFT, 8);
+        let mut remaining = length as u64;
+        while remaining >= 0x80 {
+            writer.chunk((remaining & 0x7F) | 0x80, 8);
+            remaining >>= 7;
+        }
+        writer.chunk(remaining, 8);
+    }
+    writer.put_bytes(bytes);
 }
