@@ -58,15 +58,24 @@ impl<'a> Writer<'a> {
 
     /// Writes an unsigned integer, and nothing at all when it is zero.
     ///
-    /// The omit-zero test lives inside the inline test rather than before it:
-    /// zero is one of the codes the nibble carries, so folding the two keeps
-    /// this at the two compares it had before the inline range existed.
+    /// Zero is tested first even though it is inside the inline range: folding
+    /// it into the inline test saves a compare on a small non-zero value and
+    /// spends one on every omitted field, which is the common case on a record
+    /// the format is built to leave half empty. Go measured 7.6 ns against 6.5
+    /// for that order on a ten-field record; LLVM is indifferent here.
+    ///
+    /// `wire/narrow.go` then goes further and folds the two compares into
+    /// `value-1 < uintInlineMax`, and hides the wide half behind
+    /// `//go:noinline`, to stay inside Go's inline budget. Neither is worth
+    /// copying: this compiles to the same code either way, and the plain
+    /// spelling is the one that says what it means. See RATIONALE.md, "The
+    /// inline budget is part of the format's speed".
     #[allow(clippy::cast_possible_truncation)]
     pub fn u64(&mut self, key: u8, value: u64) {
+        if value == 0 {
+            return;
+        }
         if value <= UINT_INLINE_MAX {
-            if value == 0 {
-                return;
-            }
             self.buf.push(key << 4 | value as u8);
             return;
         }
@@ -80,8 +89,9 @@ impl<'a> Writer<'a> {
 
     #[allow(clippy::cast_possible_truncation)]
     fn uint_wide(&mut self, key: u8, value: u64) {
-        let width = (bit_length(value) + 7) / 8;
-        self.buf.push(key << 4 | (UINT_WIDTH_BASE + width as u8 - 1));
+        let width = bit_length(value).div_ceil(8);
+        self.buf
+            .push(key << 4 | (UINT_WIDTH_BASE + width as u8 - 1));
         append_magnitude(self.buf, value, width);
     }
 
@@ -139,10 +149,10 @@ impl<'a> Writer<'a> {
     /// three.
     #[allow(clippy::cast_possible_truncation)]
     pub fn u16(&mut self, key: u8, value: u16) {
+        if value == 0 {
+            return;
+        }
         if u64::from(value) <= UINT_INLINE_MAX {
-            if value == 0 {
-                return;
-            }
             self.buf.push(key << 4 | value as u8);
             return;
         }
@@ -164,10 +174,10 @@ impl<'a> Writer<'a> {
     /// Writes a field whose type cannot exceed four bytes.
     #[allow(clippy::cast_possible_truncation)]
     pub fn u32(&mut self, key: u8, value: u32) {
+        if value == 0 {
+            return;
+        }
         if u64::from(value) <= UINT_INLINE_MAX {
-            if value == 0 {
-                return;
-            }
             self.buf.push(key << 4 | value as u8);
             return;
         }
@@ -312,7 +322,8 @@ impl<'a> Writer<'a> {
                 self.buf.push(value.len() as u8);
             } else {
                 self.buf.push(ELEMENT_SIZE_ESCAPE);
-                self.buf.extend_from_slice(&(value.len() as u32).to_le_bytes());
+                self.buf
+                    .extend_from_slice(&(value.len() as u32).to_le_bytes());
             }
             self.buf.extend_from_slice(value);
         }
@@ -437,7 +448,7 @@ impl<'a> Writer<'a> {
             self.buf.push(value as u8);
             return;
         }
-        let width = (bit_length(value) + 7) / 8;
+        let width = bit_length(value).div_ceil(8);
         self.buf.push(UINT_WIDTH_BASE + width as u8 - 1);
         append_magnitude(self.buf, value, width);
     }
@@ -886,12 +897,10 @@ impl<'a> Reader<'a> {
 
     /// Appends each element of a string array onto `dst`, reusing its capacity.
     pub fn strings_into(&mut self, dst: &mut Vec<String>) {
-        let start = self.at;
         for raw in self.strings_bytes() {
             match core::str::from_utf8(raw) {
                 Ok(value) => dst.push(value.to_owned()),
                 Err(_) => {
-                    self.at = start;
                     self.fail(Error::NotUtf8);
                     return;
                 }

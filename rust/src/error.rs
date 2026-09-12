@@ -65,13 +65,9 @@ impl fmt::Display for Error {
             Self::SizeTooLarge => {
                 out.write_str("colbin: a declared size is larger than this platform can address")
             }
-            Self::FieldTooWide => {
-                out.write_str("colbin: a field is wider than its declared type")
-            }
+            Self::FieldTooWide => out.write_str("colbin: a field is wider than its declared type"),
             Self::BadEscape => out.write_str("colbin: unassigned size escape code"),
-            Self::BadDescriptor => {
-                out.write_str("colbin: unassigned or mismatched descriptor")
-            }
+            Self::BadDescriptor => out.write_str("colbin: unassigned or mismatched descriptor"),
             Self::BadBitmap => out.write_str("colbin: bad presence bitmap"),
             Self::BadWidth => out.write_str("colbin: column block width above 64 bits"),
             Self::ShortBuffer => out.write_str("colbin: column output slice too short"),

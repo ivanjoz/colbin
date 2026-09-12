@@ -127,7 +127,10 @@ const fn varint_len(value: u64) -> usize {
 #[allow(clippy::cast_possible_truncation)]
 fn append_varint(buf: &mut Vec<u8>, key: u8, value: u64) {
     buf.push(key);
-    buf.push(descriptor(CLASS_SPECIAL, SPECIAL_VARINT | (value & 0b111) as u8));
+    buf.push(descriptor(
+        CLASS_SPECIAL,
+        SPECIAL_VARINT | (value & 0b111) as u8,
+    ));
     let mut rest = value >> VARINT_BITS;
     while rest >= 0x80 {
         buf.push(rest as u8 | 0x80);
@@ -199,7 +202,8 @@ impl<'a> Writer8<'a> {
             return;
         }
         self.buf.push(key);
-        self.buf.push(descriptor(CLASS_INT, INT_POSITIVE_FLAG | code));
+        self.buf
+            .push(descriptor(CLASS_INT, INT_POSITIVE_FLAG | code));
         append_magnitude(self.buf, value, width);
     }
 
@@ -268,7 +272,11 @@ impl<'a> Writer8<'a> {
             return;
         }
         // Past a byte the varint can be shorter, and a u16 should not encode
-        // differently from a u32 holding the same value.
+        // differently from a u32 holding the same value. `uint_wide` measures
+        // both forms; Go's `U16` instead compares against `varintWinsToU16`,
+        // the one window where the varint wins at this width, because it has an
+        // inline budget to stay inside and this does not. The corpus case
+        // `wide.integer widths` is what holds the two answers together.
         self.uint_wide(key, u64::from(value));
     }
 
@@ -407,7 +415,8 @@ impl<'a> Writer8<'a> {
                 self.buf.push(value.len() as u8);
             } else {
                 self.buf.push(ELEMENT_SIZE_ESCAPE);
-                self.buf.extend_from_slice(&(value.len() as u32).to_le_bytes());
+                self.buf
+                    .extend_from_slice(&(value.len() as u32).to_le_bytes());
             }
             self.buf.extend_from_slice(value);
         }
@@ -511,7 +520,8 @@ impl<'a> Writer8<'a> {
             return;
         }
         let (code, width) = size_code_for(value);
-        self.buf.push(descriptor(CLASS_INT, INT_POSITIVE_FLAG | code));
+        self.buf
+            .push(descriptor(CLASS_INT, INT_POSITIVE_FLAG | code));
         append_magnitude(self.buf, value, width);
     }
 

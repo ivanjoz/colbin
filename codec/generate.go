@@ -3,15 +3,15 @@ package codec
 // A source generator for the format.
 //
 // The plan walk in wire.go resolves a type once and then switches over that
-// plan per field, which costs 18 ns to encode a ten-field record where the
-// straight-line calls it is standing in for cost 5.4. The difference is not the
+// plan per field, which costs 22 ns to encode a ten-field record where the
+// straight-line calls it is standing in for cost 5.1. The difference is not the
 // reflection — that happens once — it is the switch, the offsets loaded from the
 // plan, and the unsafe.Add per field, none of which the compiler can fold
 // because none of them is a constant.
 //
 // A generator turns them all into constants. It emits exactly what a hand-written
-// codec would write, so the generated encode is the 5.4 ns row of the table in
-// wire/README.md rather than the 18 ns one — and the decode is a switch over
+// codec would write, so the generated encode is the 5.1 ns row of the table in
+// wire/README.md rather than the 22 ns one — and the decode is a switch over
 // a constant key, which Go compiles to a jump table.
 //
 // It works from a reflect.Type rather than by parsing source, so it reuses the

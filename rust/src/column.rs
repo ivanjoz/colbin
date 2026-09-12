@@ -143,7 +143,7 @@ pub(crate) const fn unzigzag(value: u64) -> i64 {
 
 /// What a run of `count` residuals occupies at `w` bits.
 const fn block_bytes(count: usize, w: usize) -> usize {
-    (count * w + 7) / 8
+    (count * w).div_ceil(8)
 }
 
 /// The width a block of residuals needs: the widest one's bit length, with no
@@ -557,7 +557,11 @@ mod tests {
                     .collect();
                 let mut packed = Vec::new();
                 pack_run(&mut packed, &block, w);
-                assert_eq!(packed.len(), block_bytes(count, w), "width {w}, count {count}");
+                assert_eq!(
+                    packed.len(),
+                    block_bytes(count, w),
+                    "width {w}, count {count}"
+                );
 
                 let mut exact = vec![0_u64; count];
                 unpack_run(&packed, &mut exact, w);
@@ -599,7 +603,11 @@ mod tests {
         round_trip(&(0..1000_i64).collect::<Vec<_>>()); // delta
         round_trip(&[7_i64; 500]); // constant
         round_trip(&vec![0_i64; 256]); // width 0
-        round_trip(&(0..300).map(|i| 1_700_000_000_000 + i * 37).collect::<Vec<i64>>());
+        round_trip(
+            &(0..300)
+                .map(|i| 1_700_000_000_000 + i * 37)
+                .collect::<Vec<i64>>(),
+        );
         round_trip(&[i8::MIN, i8::MAX, 0, -1]);
         round_trip(&[i16::MIN, i16::MAX, 0, -1]);
         round_trip(&[i32::MIN, i32::MAX, 0, -1]);

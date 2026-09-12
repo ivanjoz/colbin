@@ -276,6 +276,28 @@ func (w *Writer8) Bool(key uint8, value bool) {
 
 // U16, U32 and I32 are the width-typed entry points, for the reason Writer's
 // are: a field's Go type already fixes how wide it can be.
+//
+// They also have to stay inside Go's inline budget, which is what decides how
+// they are shaped. A call costs 57 of the 80 units a function may spend to be
+// inlinable, so one of these may hold the inline-value case, the omit-zero test
+// and *one* call, and nothing else. Anything more and the whole method goes out
+// of line — and then every field of the record pays a call, not only the wide
+// one. Nine of a ten-field record's writes leaving the inliner measured
+// 18.9 ns against 7.0.
+//
+// So the wide cases live behind the call rather than in front of it, and
+// `u16Wide` does not reach `uintWide`: at two bytes the varint and the
+// byte-count form differ in exactly one window, which is a comparison against a
+// constant rather than a length computation.
+
+// varintWinsToU16 is the largest value the varint form is shorter on once the
+// magnitude would take two bytes. Three value bits ride in the descriptor and
+// seven in the single continuation byte, so ten bits cost three bytes where the
+// byte-count form costs four; from eleven bits the two tie and `uintWide`'s
+// strict `<` keeps the magnitude. TestWideWidthTypedWritersMatchUint asserts the
+// boundary against `Uint` for every uint16 there is.
+const varintWinsToU16 = 0x3FF
+
 func (w *Writer8) U16(key uint8, value uint16) {
 	if value == 0 {
 		return
@@ -284,14 +306,23 @@ func (w *Writer8) U16(key uint8, value uint16) {
 		w.Buffer = append(w.Buffer, key, uint8(value))
 		return
 	}
+	w.u16Wide(key, value)
+}
+
+func (w *Writer8) u16Wide(key uint8, value uint16) {
 	if value <= 0xFF {
-		// Three bytes either way at this width, so the fast path keeps it.
+		// Three bytes either way at this width, so the byte-count form keeps it.
 		w.Buffer = append(w.Buffer, key, descriptor(classInt, intPositiveFlag|1), uint8(value))
 		return
 	}
-	// Past a byte the varint can be shorter, and a uint16 should not encode
-	// differently from a uint32 holding the same value.
-	w.uintWide(key, uint64(value))
+	if value <= varintWinsToU16 {
+		w.Buffer = append(w.Buffer, key,
+			descriptor(classSpecial, specialVarint|uint8(value&0b111)),
+			uint8(value>>varintBits))
+		return
+	}
+	w.Buffer = append(w.Buffer, key, descriptor(classInt, intPositiveFlag|2),
+		uint8(value), uint8(value>>8))
 }
 
 func (w *Writer8) U32(key uint8, value uint32) {
@@ -302,8 +333,17 @@ func (w *Writer8) U32(key uint8, value uint32) {
 		w.Buffer = append(w.Buffer, key, uint8(value))
 		return
 	}
-	w.uintWide(key, uint64(value))
+	w.u32Wide(key, value)
 }
+
+// u32Wide is a one-line wrapper and is marked not to be inlined, which reads
+// backwards and is the point: inlined, its body would cost U32 the widening
+// conversion on top of the call, and that single unit is what puts U32 at 81
+// against the budget's 80. A uint32 field is then one call where a uint64 field
+// is none, for no reason a reader of this file could be expected to guess.
+//
+//go:noinline
+func (w *Writer8) u32Wide(key uint8, value uint32) { w.uintWide(key, uint64(value)) }
 
 func (w *Writer8) I32(key uint8, value int32) { w.Int(key, int64(value)) }
 

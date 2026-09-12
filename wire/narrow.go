@@ -240,28 +240,33 @@ func appendMagnitude(buffer []byte, magnitude uint64, width int) []byte {
 
 // Uint writes an unsigned integer, and writes nothing at all when it is zero.
 //
-// The one-byte case is inline and everything else is a call, deliberately: a
-// value under 256 is what most fields on this wire hold, and keeping that path
-// small enough for the inliner is worth more than the branch it costs the rest.
+// The field that fits its own nibble is inline and everything else is a call,
+// deliberately: a value under eight is what a flag, a small count or a bool
+// holds, and keeping that path inside the inliner is worth more than the branch
+// it costs the rest.
 func (w *Writer) Uint(key uint8, value uint64) {
-	// The omit-zero test lives inside the inline test rather than before it:
-	// zero is one of the codes the nibble carries, so folding the two keeps this
-	// at the two compares it had before the inline range existed.
-	if value <= uintInlineMax {
-		if value == 0 {
-			return
-		}
+	// One compare covers both the inline range and the omit-zero rule, because
+	// zero wraps: `0-1` is not below eight, so a zero field falls through to
+	// uintWide and is dropped there. Two compares here — the obvious spelling —
+	// cost 83 against the inliner's budget of 80, and a Uint that does not
+	// inline puts *every* field of the record through a call rather than only
+	// the wide ones. Sending a ten-field record's writes out of line that way
+	// measured 18.9 ns against 7.0 on the wide key's equivalent.
+	if value-1 < uintInlineMax {
 		w.Buffer = append(w.Buffer, key<<4|uint8(value))
-		return
-	}
-	if value <= 0xFF {
-		w.Buffer = append(w.Buffer, key<<4|uintWidthBase, uint8(value))
 		return
 	}
 	w.uintWide(key, value)
 }
 
+// uintWide is not inlined on purpose: it is the cold half of Uint, and letting
+// it fold back in is what would push Uint itself out of the budget.
+//
+//go:noinline
 func (w *Writer) uintWide(key uint8, value uint64) {
+	if value == 0 {
+		return
+	}
 	width := (bits.Len64(value) + 7) / 8
 	w.Buffer = appendMagnitude(
 		append(w.Buffer, key<<4|uintWidthBase+uint8(width)-1), value, width)
@@ -922,10 +927,10 @@ func (r *Reader) Skip() {
 
 // U16 writes a field whose type cannot exceed two bytes.
 func (w *Writer) U16(key uint8, value uint16) {
+	if value == 0 {
+		return
+	}
 	if value <= uintInlineMax {
-		if value == 0 {
-			return
-		}
 		w.Buffer = append(w.Buffer, key<<4|uint8(value))
 		return
 	}
@@ -937,23 +942,23 @@ func (w *Writer) U16(key uint8, value uint16) {
 }
 
 // U32 writes a field whose type cannot exceed four bytes.
+//
+// It is shaped like Uint and for the same reason: one compare, one append and
+// one call is all the inliner's budget holds.
 func (w *Writer) U32(key uint8, value uint32) {
-	if value <= uintInlineMax {
-		if value == 0 {
-			return
-		}
+	if value-1 < uintInlineMax {
 		w.Buffer = append(w.Buffer, key<<4|uint8(value))
-		return
-	}
-	if value <= 0xFF {
-		w.Buffer = append(w.Buffer, key<<4|uintWidthBase, uint8(value))
 		return
 	}
 	w.u32Wide(key, value)
 }
 
+//go:noinline
 func (w *Writer) u32Wide(key uint8, value uint32) {
 	switch {
+	case value == 0:
+	case value <= 0xFF:
+		w.Buffer = append(w.Buffer, key<<4|uintWidthBase, uint8(value))
 	case value <= 0xFFFF:
 		w.Buffer = append(w.Buffer, key<<4|uintWidthBase+1,
 			uint8(value), uint8(value>>8))

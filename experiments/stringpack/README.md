@@ -36,16 +36,23 @@ measured rather than argued.
 2. **32% to 46% of packed5's encode time is the planning pass**, not the packing.
    `packed5.Size` — which plans and throws the plan away — costs 2.26 ms/MB on
    `name` against `Append`'s 4.90.
-3. **`u5b`, which does both, is faster *and* smaller than packed5 on all five
-   corpora**: 1.3x to 2.3x faster to encode, 1.1x to 2.1x faster to decode, and
-   0.02% to 3.4% fewer bytes. No planning pass, no wire-format flag guessing.
+3. **`u5b`, which does both, is 1.3x to 2.3x faster to encode and 1.1x to 2.1x
+   faster to decode than packed5**, while being 0.6% to 3.4% *smaller* on four
+   corpora and 0.06% larger on the fifth (`sku`). No planning pass, no
+   wire-format flag guessing.
 4. **`p6` — six flat bits per character, no state at all — is 1.6x to 3.2x
    faster to encode and 1.5x to 2.8x faster to decode**, for 12% to 20% more
    bytes than `u5b`. It is also the base64 layout, so its SIMD kernels exist.
 5. Two things that did **not** work: a fixed-width 3-digit number token (worth
-   0.06%), and table-driven byte classification (12% to 35% *slower* than the
-   comparison chain it replaced). Both are kept in the tree; see
+   0.06% where it helped, a regression on short digit runs — reverted), and
+   table-driven byte classification (12% to 35% *slower* than the comparison
+   chain it replaced — kept in the tree as `u5btab`). See
    [Negative results](#negative-results).
+6. **Moving the frame header's two live bits into the `BLOB` descriptor removes
+   it entirely** — 1.7% to 8.7% off a string field under both key widths, at no
+   encode cost, which is a bigger size win than anything the packing kernel
+   produced. Implemented and measured in `field_test.go`; see
+   [K4 vs K8](#embedded-in-a-colbin-record-k4-vs-k8).
 
 ---
 
@@ -107,21 +114,231 @@ string twice".
 ### Shared framing
 
 Every experimental codec here uses the same one-byte header as packed5, so the
-ratios are directly comparable:
+ratios are directly comparable. Notation is `BYTE_ALIGNED_PLAN.md`'s: `b.n` is
+bit *n* of byte *b*, bytes counted from 0 and bits from 1 with **`.1` the most
+significant**. (That is the convention the plan's descriptor table uses — `0xD0`
+and `0xD8` only parse as narrow and wide root structs under it. It is *not* the
+LSB-first convention of the packed bitstream itself, and not how the field
+constants read in `packed5.go`, where `PACKED_5` is bit 0. The two coexist: a
+descriptor byte is a byte with named fields, a unit stream is a bit sequence.)
+
+| | packed5 (today) | u5 / u5b / p6 |
+| --- | --- | --- |
+| header | `0.1–0.5` **L** payload byte length 0..30 · 31 = escape<br>`0.6` **ENABLE_NUMBER_0_1023** opcode 31 is an integer, not `'-'`<br>`0.7` **UPPERCASE_DOMINANT** default case of the stream<br>`0.8` **PACKED_5** 0 = raw payload · 1 = packed stream<br>`1.1–…` *(L = 31 only)* payload length, LEB128 uvarint | `0.1–0.5` **L** payload byte length 0..30 · 31 = escape<br>`0.6` **upper** stream starts in uppercase mode — *u5b only*<br>`0.7` **drop** 1 = the payload's last unit is padding — *u5 and p6 only; u5b retires it, below*<br>`0.8` **packed** 0 = raw payload · 1 = packed stream<br>`1.1–…` *(L = 31 only)* payload length, LEB128 uvarint |
+| payload, raw | `p.1–…` content, L bytes verbatim | `p.1–…` content, L bytes verbatim |
+| payload, packed | `p.1–p.3` **padBits** unused bits at the end of the final payload byte<br>`p.4–…` tokens, LSB-first<br>`then` padBits zero bits | `p.1–…` units, LSB-first, no prefix — the grid starts at bit 1 of byte *p* |
+| token count | `8L − 3 − padBits` bits of token | `floor(8L / w) − drop` units, w = 5 (u5, u5b) or 6 (p6) |
+
+`p` is the first payload byte: 1 normally, or 1 + the uvarint's length when L
+escapes.
+
+Same overhead — one byte for any payload up to 30. The two differences are what
+the flag bits buy and where the stream terminator lives.
+
+**Why `drop` is one bit.** For a payload of P bytes holding U units of width w,
+`w*U <= 8P < w*U + 8`, so `floor(8P/w)` is U or U+1 and never more — for w of 5
+and of 6 alike. packed5 needs three bits for the same job because its tokens are
+not unit-multiples, so its stream can end anywhere in a byte rather than on one
+of two places.
+
+**Why that matters beyond the one bit.** packed5's three `padBits` sit *inside*
+the payload, so every token in the frame is offset from the byte grid by 3 bits
+and no token ever lands where a fixed shift could find it. Moving the terminator
+into the header both frees the two flag bits `u5b` spends on `upper`, and lets
+the first unit start at bit 1 of byte *p* — which is the precondition for
+`wide64` doing anything at all.
+
+**And `u5b` does not need even that one bit.** Pad to the grid with a trailing
+`CASE_TOGGLE_SIMPLE` instead. A simple toggle applies to the next letter, so one
+with no letter after it decodes to nothing — a NOP the alphabet already had. It
+cannot cost a byte either: `drop` is 1 exactly when `5*(U+1) <= 8L`, so adding
+the unit leaves L unchanged. `TestU5BDropAlwaysZero` pins both halves of that
+over every test input. So a `u5b` header has exactly two live bits, `packed` and
+`upper`, which is what the next section is about.
+
+### Embedded in a colbin record: K4 vs K8
+
+The string codec never sees a key. It produces the *content* of a `BLOB`, so the
+frame above is byte-identical under K4 and K8. What differs is the descriptor
+wrapped around it, and the difference decides how much of the frame header is
+dead weight.
+
+**Today — the u5b frame goes in as `BLOB` content, verbatim:**
+
+| | K4 | K8 |
+| --- | --- | --- |
+| | `0.1–0.4` Key<br>`0.5` More? 0 = 11-bit size · 1 = u32<br>`0.6–0.8` Size high 3<br>`1.1–1.8` Size low 8 → 0..2047<br>`2.1–…` Content, Size bytes | `0.1–0.8` Key<br>`1.1` 1<br>`1.2–1.4` Class `001`<br>`1.5–1.6` **enc** 0 raw · 1 packed5 · 2 dict ref · 3 rsv<br>`1.7–1.8` lw 0→1B · 1→2B · 2→4B · 3→8B<br>`2.1–…` Size, lw bytes LE<br>`then` Content, Size bytes |
+| size on the wire | yes | yes |
+| encoding on the wire | **no** — *"enc comes from the schema"* | **yes**, in `enc` |
+| `"SKU-4217-hola"`, key 3 | `30 0C` + 12-byte frame = **14 B** | `03 94 0C` + 12-byte frame = **15 B** |
+
+Of the frame header's eight bits:
+
+- `0.1–0.5` **L** duplicates the descriptor's Size under **both** widths. Always
+  dead when embedded.
+- `0.8` **packed** duplicates `enc` under **K8**. Under **K4** it is load-bearing:
+  the schema fixes the encoding for the whole column, so without this bit the
+  never-inflate fallback could not be a *per-value* decision — a column of mostly
+  packable strings with three unpackable ones would have to give up packing
+  entirely, or inflate those three.
+- `0.7` **drop** is retired by the `CASE_TOGGLE_SIMPLE` padding above.
+- `0.6` **upper** is the only bit that is genuinely new information under K8.
+
+So an embedded u5b frame has **one** live bit under K8 and **two** under K4. Both
+fit in the descriptor, and then the frame header goes away entirely and Content
+is the bare unit stream.
+
+**Proposed — the two live bits move into the descriptor:**
+
+| | K4, a `STRING` nibble distinct from `BLOB` | K8, spending the reserved `enc` |
+| --- | --- | --- |
+| | `0.1–0.4` Key<br>`0.5` **packed** 0 = raw · 1 = u5b<br>`0.6` **upper**<br>`0.7–0.8` Size high 2<br>`1.1–1.8` Size low 8 → 0..1022 · 1023 = u32 escape<br>`2.1–…` Content: the bare unit stream | `0.1–0.8` Key<br>`1.1` 1<br>`1.2–1.4` Class `001`<br>`1.5–1.6` **enc** 0 raw · 1 u5b lower · 2 dict ref · **3 u5b upper**<br>`1.7–1.8` lw<br>`2.1–…` Size, lw bytes LE<br>`then` Content: the bare unit stream |
+| `"SKU-4217-hola"`, key 3 | `3C 0B` + 11-byte payload = **13 B** | `03 9C 0B` + 11-byte payload = **14 B** |
+| against raw | `30 0D` + 13 bytes = 15 B | `03 90 0D` + 13 bytes = 16 B |
+
+One byte off every packed string field, under both widths. Against `name`'s
+frames that is about 12% — larger than everything the packing kernel won, and it
+costs no encode time at all.
+
+**What each side gives up.** K8 burns its last reserved `enc` value, so a future
+fifth encoding would need a different home. K4 needs a `STRING` class whose
+nibble differs from `BLOB`'s, which is entirely in K4's spirit — the schema
+already knows the field is a string — but it trades the 11-bit inline size the
+plan calls out as a K4 advantage down to 10 bits (2047 → 1022 in two header
+bytes). For the short records packed5 targets that ceiling is never approached.
+
+Both are implemented in `field_test.go` — descriptors, encoders, decoders and
+round-trip tests for all four combinations, with the encoding itself unchanged.
+It lives here rather than in `codec/` because this is a `BYTE_ALIGNED_PLAN.md`
+change to a file another agent owns; the code is reference, not a patch.
+
+**Measured, per field** (`BenchmarkField`, best of two; `raw` is the same
+descriptor with packing off, so a ratio above 1 reads as "a string field costs
+more than the string" rather than as packing failing):
+
+| corpus | K4 raw | K4 framed | **K4 direct** | K8 raw | K8 framed | **K8 direct** |
+| --- | --- | --- | --- | --- | --- | --- |
+| name | 14.43 | 11.50 | **10.50** | 15.43 | 12.50 | **11.50** |
+| sku | 16.72 | 15.16 | **14.16** | 17.72 | 16.16 | **15.16** |
+| spanish | 30.72 | 21.43 | **20.43** | 31.72 | 22.43 | **21.43** |
+| sentence | 34.57 | 24.47 | **23.47** | 35.57 | 25.47 | **24.47** |
+| paragraph | 266.0 | 170.0 | **167.0** | 268.0 | 171.0 | **168.0** |
+
+(Bytes per field, key included.) As ratios against the source string:
+
+| corpus | K4 framed → direct | K8 framed → direct |
+| --- | --- | --- |
+| name | 0.9255 → **0.8450** (−8.7%) | 1.006 → **0.9255** (−8.0%) |
+| sku | 1.030 → **0.9618** (−6.6%) | 1.098 → **1.030** (−6.2%) |
+| spanish | 0.7463 → **0.7115** (−4.7%) | 0.7811 → **0.7463** (−4.5%) |
+| sentence | 0.7514 → **0.7207** (−4.1%) | 0.7821 → **0.7514** (−3.9%) |
+| paragraph | 0.6439 → **0.6326** (−1.8%) | 0.6477 → **0.6364** (−1.7%) |
+
+Encode throughput is unchanged to within noise (3.5–4.3 ms/MB either way on the
+short corpora): the saving costs nothing, because the work removed — writing and
+then patching a frame header — is work the framed form was doing.
+
+**The saving is exactly the standalone frame's own overhead**, which
+`TestFieldSavesTheFrameHeader` asserts per input: one byte for any payload the
+frame's five length bits hold, three past 30 bytes where the standalone form
+escapes to a uvarint the descriptor's size field was already carrying. Nothing
+is approximated and nothing is corpus-dependent.
+
+Two things worth reading off the table. **K8 direct lands exactly where K4
+framed does** — 11.50 bytes on `name`, 15.16 on `sku` — so the proposal buys K8
+parity with today's K4 on string fields, which is the width it currently loses on
+(`BYTE_ALIGNED_PLAN.md` §"blob-heavy records"). And **K4 direct beats raw by 27%
+on `name`** where framed managed 20%.
+
+### The tail: why there is no tail-shape bit
+
+A natural question, since the stream rarely ends on a group boundary: should the
+last group switch to `uint16` triples (3 units in 2 bytes) rather than continuing
+the `uint64` shape, with a header bit to say which?
+
+No, twice over.
+
+**No bit is needed.** L already pins the unit count at `floor(8L/w)`. The decoder
+derives the tail from the length the frame already carries; a bit would be
+restating information that is on the wire.
+
+**And the triple is never smaller.** `packWide64` does not round the tail up to a
+group — it writes the remaining r units into a word and advances `ceil(5r/8)`
+bytes, so the payload is always exactly `ceil(5U/8)`. A `uint16` holds 3 units in
+16 bits and throws away one by construction; a `uint64` holds 8 in 40 and throws
+away none. Bytes for a tail of r units:
+
+| r | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| dense (current) | **1** | 2 | 2 | **3** | 4 | 4 | **5** |
+| uint16 triples | 2 | 2 | 2 | 4 | 4 | 4 | 6 |
+
+Dense wins outright at r = 1, 4, 7 and ties elsewhere. `TestDenseTailDominates`
+pins it. Switching tails to triples costs +1.5% to +4.2% on the corpora — the
+triple *creates* the waste it was meant to remove.
+
+**And the waste being chased is the smaller of the two roundings.** What is left
+at the end is not group padding but the unavoidable rounding of 5U bits up to a
+whole number of bytes, `8L − 5U ∈ {0..4}`. Measured against the header byte it is
+paying for:
+
+| corpus | tail rounding | header byte |
+| --- | --- | --- |
+| name | 2.30% | **10.53%** |
+| sku | 2.03% | **7.60%** |
+| spanish | 1.10% | **5.15%** |
+| sentence | 0.89% | **4.45%** |
+| paragraph | 0.00% | 1.79% |
+
+(Share of encoded bytes. `TestTailWasteVsHeader` asserts the ordering.) The
+header is four to six times the tail on every short-record corpus, which is why
+the `enc = 3` idea in the previous section is the one worth spending effort on:
+it removes 8 bits per frame where the tail can only ever remove 4, and does so
+without a format branch.
+
+The only way to take the tail rounding to zero is to let a stream end mid-byte
+and have the next field start there — which is exactly the byte alignment this
+whole experiment was about buying.
+
+One genuine use for the idea, on the write side rather than the format: the tail
+store is a full `PutUint64` regardless of r, which is why buffers need 8 bytes of
+slack. Choosing the store width by r would cut that to 2. It is 8 bytes once per
+column, so it has not been worth a branch.
+
+### A whole string, end to end
+
+`"SKU-4217-hola"` under u5b. `TestU5BWireFormat` pins these bytes.
+
+Tokenising gives 18 units opening with `28` = CASE_TOGGLE_LONG, because the
+string starts uppercase. That token is hoisted into `0.3`, leaving 17:
 
 ```
-bit  0     packed        0 = raw bytes follow, 1 = packed unit stream
-bit  1     drop          1 = the payload's last unit is padding
-bit  2     upper         the stream starts in uppercase mode
-bits 3-7   length        payload byte length, 31 = uvarint follows
+ 18 10 20   29 12    31  5 13   29  7   29 12   28    7 14 11  0
+  S  K  U    -       "421"       "7"     -     →lower  h  o  l  a
 ```
 
-Identical overhead to packed5 — one byte for any payload up to 30. The only
-difference is what the flag bits are spent on.
+17 units x 5 bits = 85 bits → L = 11 bytes. `floor(8*11/5) = 17`, so `drop = 0`.
 
-`drop` needs a single bit: for a payload of P bytes holding U units of width w,
-`w*U <= 8P < w*U+8`, so `floor(8P/w)` is U or U+1 and never more, for w of 5 and
-of 6 alike. That freed a bit, which turned out to matter — see `u5b`.
+```
+header  0.1-0.5 L      = 11
+        0.6     upper  = 1
+        0.7     drop   = 0
+        0.8     packed = 1     →  0x5D  = 0101 1101
+group 0 [18 10 20 29 12 31 5 13]  → 0x69_7ECED152  →  52 D1 CE 7E 69
+group 1 [29  7 29 12 28  7 14 11] → 0x5B_8FC674FD  →  FD 74 C6 8F 5B
+tail    [0]                        → 5 bits, 1 byte →  00
+```
+
+```
+5D 52 D1 CE 7E 69 FD 74 C6 8F 5B 00      12 bytes for 13 characters
+```
+
+packed5 encodes the same string in 13. Two more, for comparison:
+
+```
+"Lima norte"  39 7B 21 06 74 73 71 12   8 bytes   upper=0, L=7, 11 units
+"hola"        19 C7 2D 00               4 bytes   upper=0, L=3,  4 units
+```
 
 ### `u5` — packed5, unit-ised, no planner
 
@@ -176,8 +393,9 @@ The fix does not need the planning pass back. Tokenise as usual; then, if
 One comparison on a slice that has already been built. Nothing is planned and
 nothing is rescanned, and `"SKU-4217-hola"` goes from 13 bytes to 12.
 
-`u5b` also carries the 3-digit number token described under
-[Negative results](#negative-results); it is nearly free either way.
+`u5b` makes one more frame change and no token changes: it pads to the unit
+grid with a trailing `CASE_TOGGLE_SIMPLE` rather than with the `drop` flag, which
+retires that bit for free. Its tokeniser is `u5Tokenize` verbatim.
 
 ### `p6` — six bits flat, no state at all
 
@@ -201,7 +419,7 @@ units are 48 bits, so it packs in the same shape as `wide64` (store 8, advance 6
 | corpus | packed5 | u5 | u5 fused | **u5b** | u5b tab | p6 |
 | --- | --- | --- | --- | --- | --- | --- |
 | name | 5.02 / 0.791 | 4.09 / 0.765 | 3.67 | **3.91 / 0.765** | 4.39 | 2.37 / 0.859 |
-| sku | 6.06 / 0.893 | 3.96 / 0.942 | 3.92 | **3.54 / 0.893** | 4.04 | 2.41 / 0.952 |
+| sku | 6.06 / 0.8934 | 3.96 / 0.9423 | 3.92 | **3.94 / 0.8939** | 4.28 | 2.41 / 0.9515 |
 | spanish | 4.39 / 0.697 | 2.28 / 0.677 | 2.36 | **2.16 / 0.677** | 2.55 | 1.96 / 0.801 |
 | sentence | 5.75 / 0.701 | 3.49 / 0.690 | 3.24 | **3.24 / 0.690** | 3.82 | 1.80 / 0.793 |
 | paragraph | 2.88 / 0.640 | 1.34 / 0.636 | 1.76 | **1.23 / 0.636** | 1.66 | 1.76 / 0.761 |
@@ -229,9 +447,10 @@ below for how not to attack it.
 
 ## What the numbers say
 
-**`u5b` is strictly better than packed5 on this corpus set**: 1.3x to 2.3x faster
-to encode, 1.1x to 2.1x faster to decode, and never larger. The wins compose from
-three separate places, none of which is the bit packing on its own:
+**`u5b` is faster than packed5 everywhere and smaller almost everywhere**: 1.3x
+to 2.3x faster to encode, 1.1x to 2.1x faster to decode, smaller on four corpora
+and 0.06% larger on `sku`. The wins compose from three separate places, none of
+which is the bit packing on its own:
 
 - deleting the planning pass (32-46% of encode time),
 - grouping the packing (3.4x on the kernel, which is a smaller slice),
@@ -265,16 +484,23 @@ on `name`. The flat-6-bit argument wins on speed, not on size.
 Both are left in the tree, wired into the benchmark, so they are not proposed
 again later.
 
-**A fixed-width 3-digit number token is worth 0.06%.** The reasoning was sound —
-a leading zero cannot go through a value-ranged number token, since `"0042"`
-would decode as `"42"`, so both codecs shred it into lone digits. Making the
-token exactly three zero-padded digits at 15 bits fixes that at five bits per
-digit, flat. It does work: `"SKU-0042-hola"` goes from 14 bytes to 13. But the
-corpus generates `SKU-%04d` from a uniform `0..9999`, so only one SKU in ten has
-a leading zero at all, and the corpus-wide effect is 0.9423 -> 0.9417. The real
-`sku` gap was the case toggle, which the dump above found in a minute and this
-token never touched. `u5b` keeps it because it is free, not because it earned
-its way in.
+**A fixed-width 3-digit number token — tried, measured, reverted.** The
+reasoning was sound: a leading zero cannot go through a value-ranged number
+token, since `"0042"` would decode as `"42"`, so both codecs shred it into lone
+digits. Making the token exactly three zero-padded digits at 15 bits fixes that
+at five bits per digit flat, and it does work per string — `"SKU-0042-hola"` goes
+from 14 bytes to 13.
+
+It failed twice over. The corpus draws `SKU-%04d` from a uniform `0..9999`, so
+only one SKU in ten has a leading zero and the corpus-wide effect was 0.9423 ->
+0.9417 — 0.06%. And against that it is a real *regression* wherever digit runs
+are one or two long, because it has no short form: u5 spends 15 bits on `"12"`
+through its variable-width number, the fixed form had to spend 20. That showed up
+only when a test compared u5b against u5 on `"ab 12 ab 12 ..."`, not in any
+corpus number. The token is gone; `u5b` tokenises with `u5Tokenize` verbatim.
+
+The lesson is about the corpus, not the token: a synthetic generator decided both
+that the change looked free and that its cost was invisible.
 
 **Table-driven classification is slower than the comparison chain.**
 `u5bTokenizeTab` replaces the `isLetter` / `== ' '` / `isDigit` / symbol-lookup
@@ -293,7 +519,7 @@ way at it is SWAR or SIMD over several bytes at once, not a smarter table.
 ## 5. The rest of the design space
 
 Measured above: `wide64`, `triple16`, unit-ising, deleting the planner, hoisting
-the case toggle, flat 6-bit, 3-digit numbers, class tables. Everything below came
+the case toggle, grid padding, flat 6-bit, 3-digit numbers, class tables. Everything below came
 out of the same brainstorm and is **not** measured — recorded so the options are
 not re-derived later.
 
@@ -393,6 +619,9 @@ self-delimiting unless the raw length is carried up front.
 
 ## Next steps
 
+- **Land the embedded field layouts.** `field_test.go` has working encoders and
+  decoders for both; they need lifting into `BYTE_ALIGNED_PLAN.md` §2.6 and then
+  into `codec/`, which is another agent's territory.
 - **Take `u5b` into `packed5/` proper.** It is faster and smaller than the
   current codec on every corpus here, and the format changes are all things
   pre-alpha status allows. It needs fuzzing and a hostile-input pass first.
@@ -423,6 +652,8 @@ self-delimiting unless the raw length is carried up front.
 | `kernel_test.go` | `dense` / `wide64` / `triple16` pack and unpack, round-trip tests, `ns/unit` benchmarks |
 | `frame_test.go` | the shared one-byte header |
 | `u5_test.go` | the unit-ised 5-bit codec, staged and fused encoders |
-| `u5b_test.go` | `u5` plus the header case hoist, the 3-digit number token, and the class-table classifier |
+| `u5b_test.go` | `u5` plus the header case hoist and grid padding, the class-table classifier, and the wire-format golden test |
 | `p6_test.go` | the flat 6-bit codec |
+| `tail_test.go` | what the last group costs, and why there is no tail-shape bit |
+| `field_test.go` | the embedded K4/K8 string field: proposed descriptors, both baselines, and the per-field measurement |
 | `bench_test.go` | the corpus, the round-trip / never-inflate / cross-encoder tests, end-to-end and plan-split benchmarks |

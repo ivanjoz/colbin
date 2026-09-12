@@ -153,8 +153,14 @@ bit pattern. See `codec/integer.go`.
 - **`TestArrayDecodeGarbage`**, **`TestArrayTruncated`**, **`FuzzArrayDecode`** —
   arbitrary and truncated input must never panic.
 
-## Status
+## The Rust port
 
-The Rust port has **not** been brought over and still implements the `(k, M)`
-codec. The two ports disagree; see `wire/README.md` for the same note and what
-re-enabling the cross-language check needs.
+`rust/src/column.rs`, which mirrors this package: the same transforms, the same
+blocked cost scoring, the same one-load unpack and the same tail gather.
+
+It is pinned by the corpus rather than by description. `rust/vectors/main.go`
+encodes fourteen column shapes with **this** codec — the transforms it actually
+picks, across all four element widths, with a partial last block — and
+`rust/tests/vectors.rs` asserts that Rust produces the same bytes and reads the
+same values back. A change to the transform search or to the block layout fails
+there until both sides move.

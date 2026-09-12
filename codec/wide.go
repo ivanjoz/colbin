@@ -13,9 +13,10 @@ package codec
 //
 // # Choosing the width
 //
-// Narrow keys are the default and the fast path: 5.4 ns to encode a ten-field
-// record against 6.0 for wide, and 14.8 ns to decode against 24.0. A type goes
-// wide when it has to:
+// Narrow keys are the default and the fast path, though what that now means is
+// the read and the byte count rather than the write: on a ten-field record the
+// two widths encode in 5.3 ns and 5.4, and narrow decodes in 14.8 against 25.4
+// and writes 9 bytes against 11. A type goes wide when it has to:
 //
 //   - a field id above fifteen, which four key bits cannot carry; or
 //   - packed5 on and a string field to spend it on, because the encoding code
