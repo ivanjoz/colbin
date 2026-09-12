@@ -243,7 +243,10 @@ pub fn append(out: &mut Vec<u8>, bytes: &[u8]) {
     // repeated growth an unsized append would do while the tokens are written.
     out.reserve(payload);
     let mut writer = BitWriter::new(out);
-    writer.write_bits((payload * 8 - usize::from(PAD_BITS_WIDTH) - bits) as u32, PAD_BITS_WIDTH);
+    writer.write_bits(
+        (payload * 8 - usize::from(PAD_BITS_WIDTH) - bits) as u32,
+        PAD_BITS_WIDTH,
+    );
     write_stream(&mut writer, bytes, upper, number);
     writer.flush();
 }
@@ -262,13 +265,17 @@ pub fn size(bytes: &[u8]) -> usize {
 
 /// The packed payload size for a token cost of `bits`.
 const fn payload_bytes(bits: usize) -> usize {
-    (PAD_BITS_WIDTH as usize + bits + 7) / 8
+    (PAD_BITS_WIDTH as usize + bits).div_ceil(8)
 }
 
 /// The number of framing bytes a payload of `n` bytes needs: the header byte,
 /// plus a uvarint once the length outgrows the header's length bits.
 const fn frame_overhead(n: usize) -> usize {
-    if n <= LEN_INLINE { 1 } else { 1 + uvarint_len(n) }
+    if n <= LEN_INLINE {
+        1
+    } else {
+        1 + uvarint_len(n)
+    }
 }
 
 const fn uvarint_len(mut value: usize) -> usize {
@@ -841,7 +848,10 @@ mod tests {
                 "a5dfacf38a96de1230499bd1db80052ed65bfe0b00",
             ),
             ("Factura 2024-1023", "65d805884923d05f194f7effff"),
-            ("user.name@example.com", "81a79244af0d30d221b980bd45bc0ac700"),
+            (
+                "user.name@example.com",
+                "81a79244af0d30d221b980bd45bc0ac700",
+            ),
             (
                 "{\"id\":1023,\"name\":\"ana\"}",
                 "c07b226964223a313032332c226e616d65223a22616e61227d",

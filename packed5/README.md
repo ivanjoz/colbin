@@ -9,7 +9,7 @@ packed form would not actually be smaller.
 ```go
 import "github.com/ivanjoz/colbin/packed5"
 
-buf := packed5.Append(nil, "el niño comió jamón")  // 17 bytes, from 22
+buf := packed5.Append(nil, "el niño comió jamón")  // 16 bytes, from 22
 s, n, err := packed5.Decode(buf)                   // s == the original, n == 17
 ```
 
@@ -158,11 +158,11 @@ Frame size against raw byte length, including framing:
   10    8  p5+N    "product123"
   19   14  p5      "the quick brown fox"
   19   14  p5+U    "THE QUICK BROWN FOX"
-  22   17  p5      "el niño comió jamón"
-  25   22  p5+N    "Móvil Samsung Galaxy S23"
+  22   16  p5      "el niño comió jamón"
+  25   21  p5+N    "Móvil Samsung Galaxy S23"
   17   13  p5+N    "Factura 2024-1023"
-  21   18  p5      "user.name@example.com"
-  24   26  raw     "{\"id\":1023,\"name\":\"ana\"}"
+  21   17  p5      "user.name@example.com"
+  24   25  raw     "{\"id\":1023,\"name\":\"ana\"}"
 ```
 
 `p5+U` is `UPPERCASE_DOMINANT`, `p5+N` is `ENABLE_NUMBER_0_1023`. The last row is

@@ -111,7 +111,8 @@ impl<'a> BitmapWriter<'a> {
             return;
         }
         let (code, width) = size_code_for(value);
-        self.buf.push(descriptor(CLASS_INT, INT_POSITIVE_FLAG | code));
+        self.buf
+            .push(descriptor(CLASS_INT, INT_POSITIVE_FLAG | code));
         append_magnitude(self.buf, value, width);
     }
 
@@ -154,13 +155,11 @@ impl<'a> BitmapWriter<'a> {
             return;
         }
         if value <= 0xFF {
-            self.buf
-                .push(descriptor(CLASS_INT, INT_POSITIVE_FLAG | 1));
+            self.buf.push(descriptor(CLASS_INT, INT_POSITIVE_FLAG | 1));
             self.buf.push(value as u8);
             return;
         }
-        self.buf
-            .push(descriptor(CLASS_INT, INT_POSITIVE_FLAG | 2));
+        self.buf.push(descriptor(CLASS_INT, INT_POSITIVE_FLAG | 2));
         self.buf.extend_from_slice(&value.to_le_bytes());
     }
 
@@ -181,7 +180,8 @@ impl<'a> BitmapWriter<'a> {
             return;
         }
         let (code, width) = size_code_for(u64::from(value));
-        self.buf.push(descriptor(CLASS_INT, INT_POSITIVE_FLAG | code));
+        self.buf
+            .push(descriptor(CLASS_INT, INT_POSITIVE_FLAG | code));
         append_magnitude(self.buf, u64::from(value), width);
     }
 
@@ -239,7 +239,7 @@ impl<'a> BitmapReader<'a> {
             inner.fail(Error::Truncated);
             return Self::failed(inner);
         };
-        if width < 1 || width > MAX_BITMAP_BYTES || message.len() < 1 + width {
+        if !(1..=MAX_BITMAP_BYTES).contains(&width) || message.len() < 1 + width {
             let mut inner = Reader8::new(message);
             inner.fail(Error::BadBitmap);
             return Self::failed(inner);

@@ -61,8 +61,8 @@ pub mod wire;
 mod error;
 
 pub use codec::{
-    Colbin, ColumnKind, ColumnSpec, MapValue, ROOT_STRUCT_NARROW, ROOT_STRUCT_WIDE, TABLE_THRESHOLD,
-    assign_ids, fnv8,
+    Colbin, ColumnKind, ColumnSpec, MapValue, ROOT_STRUCT_NARROW, ROOT_STRUCT_WIDE,
+    TABLE_THRESHOLD, assign_ids, fnv8,
 };
 pub use error::Error;
 

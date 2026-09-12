@@ -1022,3 +1022,181 @@ The lesson is the one the narrow side already taught, and the reason it recurred
 is that the fix was applied where it was measured rather than everywhere it
 applied. A generic function taking a `*Writer` or a `*Reader` is a bug in this
 package, not a style preference.
+
+## The Rust port, rewritten against the one format
+
+**Context** — The Rust crate implemented the *previous* three modes: a compact
+bitstream, a columnar standard mode, an early minimal mode with big-endian
+magnitudes and LEB128 continuations, and a schema-driven `Kind`/`Value` tree to
+read them through. None of that describes the wire any more. Worse, its tests
+passed: it asserted against its own copy of a vector rather than one the Go side
+generates, so the two ports had diverged in silence and neither build said so.
+
+**Decision** — Deleted, and written again against the one format. The crate is
+now `wire` (all three key framings), `column`, `packed5` and a `codec` module
+holding the `Colbin` trait, the root descriptor and the id assignment — the same
+four layers the Go side has, file for file. The dynamic `Schema`/`Kind`/`Value`
+path is gone entirely: `#[derive(Colbin)]` emits the straight-line calls, which
+is what `codec.Generate` emits for Go and measured 5.4 ns against a plan walk's
+18. There is no reflective path in Rust to fall back to, so there is no reason
+to carry a second, slower one.
+
+**Rationale** — Four choices are worth naming.
+
+*The widths are separate types, not a flag.* `Writer`/`Reader`,
+`Writer8`/`Reader8` and `BitmapWriter`/`BitmapReader`, exactly as in `wire/`.
+§5 of the plan suggests a const generic here, and it would work — but the two
+widths differ in more than a number: K4 has no class in its descriptor and K8
+has an inline value form, so a single body would be a `match` on the width in
+every method rather than a parameter the monomorphiser folds. The value codecs
+underneath are shared, which is where the duplication would have cost something.
+
+*Sticky errors, as in Go.* A reader holds its first failure and parks its cursor
+at the end, every later read answers zero, and a decode checks once at the end.
+A `Result` per field would have been more idiomatic and would have put a branch
+on every read of a message that almost never fails; this way the generated
+`match` arms are assignments.
+
+*Ids are a `const fn`, not a third implementation.* An untagged field's id is
+`fnv8` of its name, linear probed past the explicit ones — and that rule now
+lives once, in `colbin::assign_ids`, which the derive *calls* at compile time
+rather than reimplementing. The keys stay literal constants, so the decode is
+still a `match` on constants and not an if-chain.
+
+*The corpus is the specification, and it is generated.* `rust/vectors/main.go`
+writes every message with `colbin.Marshal`, every field id with
+`colbin.FieldIDs` and every column with `column.AppendArray`; the Rust tests
+hold the same values and assert both directions. `go test ./rust/vectors` fails
+if the committed corpus is stale, which is the check whose absence let the
+previous port drift.
+
+### What the corpus caught immediately
+
+A `[]uint64` holding `u64::MAX`. The Rust port encoded it as an eight-byte
+magnitude; Go encodes it as one byte of two's complement, because
+`isSigned[uint64]()` answers **true** — `-1` converted to a `uint64` and read
+back through `int64` is still −1. The comment beside that test says it is what
+"keeps a `uint64` past 2^63 from being mistaken for a negative number", and it
+does not do that.
+
+It is not a data bug: the narrowing and the sign extension are exact inverses,
+so Go round-trips such a column, and it is *smaller* — one byte against eight.
+It is an inconsistency between what the code does and what it says, and between
+`uint64` and the three narrower unsigned types, which do take the magnitude
+form. The Rust side mirrors the behaviour rather than the comment, because the
+wire is what Go writes; both are worth correcting together, and neither can be
+corrected alone now that a corpus fails when they disagree.
+
+The same corpus also pinned `packed5` byte for byte, where the Go README's own
+worked-example table had drifted — it quotes 17, 22, 18 and 26 bytes for four
+frames the encoder now writes in 16, 21, 17 and 25. The numbers in a table go
+stale; the bytes in a test do not.
+
+### A protobuf comparison without protoc
+
+The corpus needed protobuf twins, and `protoc` is not installed on this machine.
+It turned out not to be needed. protoc's only job in the pipeline is turning
+`.proto` text into a FileDescriptorProto — and a descriptor is an ordinary
+protobuf message, which can be built directly. `protoc-gen-go` is a plain
+program reading a CodeGeneratorRequest on stdin, and it ships inside the
+`google.golang.org/protobuf` module the repo already depends on.
+
+So `internal/protogen` builds the descriptor in Go, pipes it through the plugin
+out of the module cache, and writes `bench/corpus.pb.go`. No protoc, no network,
+no new dependency. The cost is that the Go program is the source of truth and
+`bench/corpus.proto` is written out as documentation rather than read back,
+because nothing here parses `.proto` text.
+
+**The comparison gives protobuf its best form, not the matching one.** Cents are
+`int64` rather than `sint64`: sint64 zigzags, which costs a bit, and every
+amount in the corpus is non-negative. Using sint64 because colbin's field is
+signed would have been a handicap dressed up as fairness.
+
+### What the corpus then showed
+
+| | protobuf | colbin | |
+|---|---:|---:|---:|
+| users, 100 rows | 6 275 B | 6 187 B | −1.4% |
+| products, 200 rows | 12 996 B | 12 876 B | −0.9% |
+| sales, 300 rows | 33 489 B | **26 856 B** | **−19.8%** |
+| metrics, 2 000 rows | 22 000 B | 21 680 B | −1.5% |
+
+The flat tables are a wash, and that is the honest result: both formats omit
+zero fields and spend a key on each present one, so on a flat record there is
+almost nothing between them. Every byte colbin wins overall comes from the
+nested one, where a slice of integer-only structs is transposed into columns.
+
+That is worth stating plainly because the earlier single-record benchmarks
+implied a broader size advantage than exists. On speed the margin is real and
+general — 4× encoding a flat row, 1.7–1.9× on the nested one — but on size, the
+claim is specifically about columnar data.
+
+**One thing the corpus exposed and nobody has fixed.** Encoding the 300 sales
+allocates 108 times: two buffers per sale that crosses the table threshold, and
+54 of them do. `Codec.Append` declares `var buf scratch` per call, so the
+transposition buffer cannot be reused across records. Holding it on the Codec
+would break the promise that a Codec is safe for concurrent use; a sync.Pool
+would not. Not done, because it is a change to a public guarantee and nobody has
+asked for the allocation back yet.
+
+## The inline budget is part of the format's speed, so it is now asserted
+
+**Context** — `wire`'s width-typed writers exist because a `uint16` can only be
+one byte or two: `U16` is a few appends with no call under them and Go inlines
+it, where a generic `Uint` carrying all seven widths does not fit. That is the
+whole reason the entry points are duplicated per width — and nothing was
+checking it. Two changes since then quietly broke it. The unsigned inline nibble
+added a branch to every narrow writer, and the K8 varint added a length
+comparison to every wide one. Both are wins on the wire. Both pushed their
+writers past the inliner's budget:
+
+| ten-field record, five fields set | encode |
+|---|---:|
+| narrow key, as the change left it | 7.6 ns |
+| wide key, as the change left it | 18.9 ns |
+
+The wide figure is the one that gives it away. It was 6.2 ns when the table in
+`wire/README.md` was written, and nothing about the bytes it writes had got
+three times harder. `Writer8.U16` cost 107 units against a budget of 80, so
+seven of the record's ten fields went out of line — and a method that does not
+inline sends *every* value through a call, not only the wide one it grew the
+branch for.
+
+**Decision** — Shape the integer writers around the budget, and check it.
+
+A call costs 57 of the 80 units, which leaves room for the inline-value case,
+the omit-zero test and one call. Three things buy that back:
+
+- **The omit-zero test folds into the inline comparison** as `value-1 <
+  uintInlineMax`, because zero wraps. One compare where the obvious spelling
+  takes two, and zero — the value that writes nothing — still costs nothing.
+- **The cold half sits behind `//go:noinline`.** A one-line wrapper that the
+  inliner *would* fold back in is what put `Writer8.U32` at 81 against 80. The
+  pragma reads backwards and is the point.
+- **`Writer8.U16` decides the varint against a constant** rather than measuring
+  both forms: at two bytes the varint wins in exactly one window, 256..1023, so
+  the decision is a comparison rather than a length computation.
+
+| ten-field record, five fields set | encode | |
+|---|---:|---:|
+| narrow key | 7.6 → **5.3 ns** | 1.4× |
+| wide key | 18.9 → **5.4 ns** | 3.5× |
+
+Nothing on the wire moved: the corpus in `rust/vectors` is byte-identical, which
+is what says so.
+
+**What guards it now.** `TestWideWidthTypedWritersMatchUint` writes every
+`uint16` there is through both `U16` and `Uint` and requires the same bytes, so
+the hand-placed window cannot drift from the length computation it stands in
+for; the corpus gained `wide.integer widths`, which pins the same boundary
+across the two ports. The rule itself is item 3 of `wire/README.md`'s speed
+list, with the one-line check —
+`go build -gcflags=-m=2 ./wire | grep 'inline (\*Writer'` — because the failure
+mode here is silent: the tests pass, the bytes are right, and the record simply
+costs three times more to write.
+
+**What is still out of line.** `Writer.Int` and `Writer.I32`. A signed field's
+cheapest form is a descriptor *and* a magnitude byte, and a two-argument append
+costs four units more than the one-argument append an unsigned nibble needs —
+84 against the budget's 80. Left alone rather than contorted: the four units
+would have to come out of the append itself, and there is nothing there to cut.

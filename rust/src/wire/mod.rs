@@ -158,7 +158,7 @@ pub(crate) const INLINE_COMPOSITE_LENGTH: usize = 0xFF;
 /// eight.
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) fn size_code_for(magnitude: u64) -> (u8, usize) {
-    let width = (bit_length(magnitude) + 7) / 8;
+    let width = bit_length(magnitude).div_ceil(8);
     if width >= 7 {
         return (SIZE_CODE_8BYTES, 8);
     }
@@ -245,8 +245,21 @@ pub(crate) fn read_count(body: &[u8]) -> Option<(usize, usize)> {
 
 /// Every integer type an array field can hold.
 pub trait Integer: Copy {
-    /// Whether the type has a sign, which decides whether a negative element can
-    /// turn the array into two's complement.
+    /// Whether an element of this type can read as negative, which is what
+    /// decides between a magnitude array and a two's complement one.
+    ///
+    /// It is not quite "is this type signed". Go answers the question with
+    /// `isSigned`, which converts −1 to the element type and asks whether the
+    /// result is still negative *as an `int64`* — and a `uint64` holding
+    /// `1<<64 - 1` is −1 there, so a `[]uint64` travels as two's complement
+    /// where a `[]uint32` travels as magnitudes. That is lossless in both
+    /// directions, since the narrowing and the sign extension are bit-exact
+    /// inverses, and it is usually *smaller*: `u64::MAX` costs one byte as −1
+    /// against eight as a magnitude.
+    ///
+    /// It is spelled out per type here rather than derived, because the wire is
+    /// what Go writes and a port that computed a better answer would simply
+    /// disagree with it.
     const SIGNED: bool;
     /// Go's `int64(value)`.
     fn as_i64(self) -> i64;
@@ -281,7 +294,10 @@ macro_rules! impl_integer {
 
 impl_integer!(
     i8 => true, i16 => true, i32 => true, i64 => true,
-    u8 => false, u16 => false, u32 => false, u64 => false
+    u8 => false, u16 => false, u32 => false,
+    // Not a slip: see `SIGNED`. `u64::MAX` widens to −1, so Go's `isSigned`
+    // answers true here and the array is two's complement.
+    u64 => true
 );
 
 /// The one pass that decides both the sign flag and the width: a negative

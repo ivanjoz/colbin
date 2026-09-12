@@ -52,12 +52,16 @@ Measured on the same ten-field record, five fields set:
 
 | | encode | decode | bytes |
 |---|---:|---:|---:|
-| narrow key | **5.5 ns** | **14.0 ns** | 11 |
-| wide key | 6.2 ns | 24.7 ns | 12 |
-| wide key, presence bitmap | 20.9 ns | 39.0 ns | **10** |
+| narrow key | **5.3 ns** | **14.8 ns** | **9** |
+| wide key | 5.4 ns | 25.4 ns | 11 |
+| wide key, presence bitmap | 21.4 ns | 44.4 ns | 10 |
 
-The bitmap is the smallest and the slowest: it is for a wire that is size-bound,
-and the narrow key is for one that is not.
+The two key widths now cost the same to write — what the wide one buys is paid
+for on the read and in the byte count, not at the writer. The bitmap is the
+slowest of the three and only wins on size when most fields are present: ten of
+ten it is 15 bytes against the narrow key's 18, and five of ten it is a byte
+larger. It is for a wire that is size-bound and full; the narrow key is for
+every other one.
 
 ## Composites
 
@@ -163,36 +167,56 @@ The reader defends against the network; the writer trusts its own program.
 
 ## Speed, if you are changing it
 
-Five things carry the numbers above, each worth re-measuring after any edit:
+Six things carry the numbers above, each worth re-measuring after any edit:
 
 1. **Byte alignment.** No bitstream, no cross-byte packing, and no varint.
 2. **Width-typed entry points** — `U16`, `U32` beside the generic `Uint`. A
    `uint64` parameter forces the method to carry all seven widths, which pushes
    it past Go's inline budget; a `uint16` can only be one byte or two, so `U16`
    is two appends with no call underneath and it inlines. Using the writer that
-   matches each field's Go type took a ten-field encode from 16.9 ns to 5.5 ns.
-3. **Both of a type's widths inline, not just the narrow one.** `Reader.U16`
+   matches each field's Go type took a ten-field encode from 16.9 ns to 5.3 ns.
+3. **Every integer writer stays under the inliner's budget**, which is 80 units
+   and of which a call costs 57. So a writer may hold its inline-value case, its
+   omit-zero test and *one* call, and no more — which is why the omit-zero test
+   is folded into the inline comparison by the wrap `value-1 < uintInlineMax`,
+   why the cold half sits behind `//go:noinline`, and why `Writer8.U16` decides
+   the varint against a constant rather than measuring both forms. A writer that
+   drops out sends **every** field of the record through a call, not only the
+   wide one: that is what made the wide key 18.9 ns to write against 5.4 now.
+   `go build -gcflags=-m=2 ./wire | grep 'inline (\*Writer'` is the check, and
+   the boundary that spelling hard-codes is asserted by
+   `TestWideWidthTypedWritersMatchUint` for every `uint16` there is.
+4. **Both of a type's widths inline, not just the narrow one.** `Reader.U16`
    handled one byte inline and sent two bytes to a call — but a `uint16` holding
    something above 255 is what the type is *for*. Inlining the second width, with
    `More` no longer testing an error the parked cursor already answers, took a
    ten-field decode from 19.2 ns to 13.9.
-4. **No pointer in a generic signature.** `WriteInts[T](w *Writer, ...)` is
+5. **No pointer in a generic signature.** `WriteInts[T](w *Writer, ...)` is
    reached through a shape dictionary, and the escape information a caller in
    *another package* gets for it is conservative enough to heap-allocate the
    writer. That is why there is a concrete `Int32s`, `Uint16s` and so on beside
    the generic form, and why the generic work below them takes slices and values
    only. Getting the pointer out was worth an allocation and 3 ns per record on
    codec's plan walk.
-5. **No per-field key check**, as above.
+6. **No per-field key check**, as above.
 
 ## The Rust port
 
-`rust/src/narrow.rs`, exposed as `colbin::MinimalReader` and
-`colbin::MinimalWriter`.
+`rust/src/wire/`, which mirrors this package file for file: `narrow.rs`,
+`wide.rs` and `bitmap.rs` are `Writer`/`Reader`, `Writer8`/`Reader8` and
+`BitmapWriter`/`BitmapReader`, and the composites, the table and the packed
+string sit where they do here.
 
-> **Stale.** The Rust port still implements the previous wire — big-endian, the
-> old size codes, LEB128 continuations — and its tests pass because it asserts
-> its own copy of the cross-language vector rather than a shared one. The two
-> ports have silently diverged and must not be used against each other until the
-> port is brought over. That the divergence is silent is itself a defect: the
-> vector belongs in `rust/vectors/`, read by both sides, like the other modes'.
+It is pinned to this side rather than to its own copy of anything.
+`rust/vectors/main.go` writes the corpus with these packages and
+`rust/tests/vectors.rs` asserts both directions against it — Go's bytes decoded
+to Rust's values, and Rust's values encoded to Go's bytes — so a change here
+fails there. `go test ./rust/vectors` fails if the committed corpus is stale.
+
+> **One thing to know when changing `arrayPlanOf`.** `isSigned[uint64]()`
+> answers **true**: `-1` converted to a `uint64` and read back through `int64`
+> is still −1. So a `[]uint64` travels as two's complement where a `[]uint32`
+> travels as magnitudes — which is lossless in both directions, and usually
+> smaller, but is not what the comment beside the test says it is doing. The
+> Rust side mirrors the behaviour rather than the comment, because the wire is
+> what this package writes.

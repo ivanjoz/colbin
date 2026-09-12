@@ -503,12 +503,7 @@ fn scatter_ints<T: Colbin>(out: &mut [T], column: usize, values: &[i64], rows: u
     }
 }
 
-fn scatter_strings<T: Colbin>(
-    out: &mut [T],
-    column: usize,
-    values: &mut Vec<String>,
-    rows: usize,
-) {
+fn scatter_strings<T: Colbin>(out: &mut [T], column: usize, values: &mut Vec<String>, rows: usize) {
     if values.len() < rows {
         return;
     }

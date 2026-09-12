@@ -13,20 +13,20 @@ its generated code:
 
 | one flat record | protobuf | colbin | |
 |---|---:|---:|---|
-| encode, reusing a buffer | 110 ns | **34 ns** | 3.2× |
-| encode, onto a fresh buffer | 128 ns | **72 ns** | 1.8× |
-| decode | 102 ns | **54 ns** | 1.9× |
+| encode, reusing a buffer | 123 ns | **39 ns** | 3.2× |
+| encode, onto a fresh buffer | 140 ns | **76 ns** | 1.8× |
+| decode | 116 ns | **61 ns** | 1.9× |
 | bytes | 32 | **27** | |
 
 | one order, three nested lines | protobuf | colbin | |
 |---|---:|---:|---|
-| encode | 247 ns | **74 ns** | 3.3× |
-| decode | 452 ns | **274 ns** | 1.7× |
+| encode | 271 ns | **81 ns** | 3.3× |
+| decode | 485 ns | **314 ns** | 1.5× |
 | bytes | 49 | **46** | |
 
 colbin through `Codec[T]`, protobuf through its generated code. Generating the
-colbin codec instead takes the flat record to **25 ns** encode and **48 ns**
-decode — 4.3× and 2.1×.
+colbin codec instead takes the flat record to **27 ns** encode and **55 ns**
+decode — 4.5× and 2.1×.
 
 `go test ./bench -bench .` on an i7-1355U, Go 1.27, best of eight in one run.
 packed5 off. Run a benchmark alone and it lands 5–10% faster than it does in the
@@ -96,10 +96,10 @@ faster than the reflective walk:
 
 | ten-field record | encode | decode |
 |---|---:|---:|
-| hand-written against `wire` | **7.8 ns** | **14.3 ns** |
-| generated | 8.0 ns | 19.5 ns |
-| `Codec[T]` handle | 19.6 ns | 24.3 ns |
-| `Marshal` / `Unmarshal` | 44.5 ns | 42.5 ns |
+| hand-written against `wire` | **5.1 ns** | **14.8 ns** |
+| generated | 8.8 ns | 21.1 ns |
+| `Codec[T]` handle | 22.3 ns | 25.3 ns |
+| `Marshal` / `Unmarshal` | 50.9 ns | 43.3 ns |
 
 Taken in one run; absolute figures move ±20% between runs on this machine, so
 compare rows against each other rather than against a number taken elsewhere.
@@ -115,7 +115,7 @@ A field id is four bits or eight, chosen **per key run** rather than per message
 
 | | cost | buys |
 |---|---|---|
-| 4-bit | — | the fast path: 5.5 ns encode, 13.9 ns decode |
+| 4-bit | — | the fast path: 5.3 ns encode, 14.8 ns decode |
 | 8-bit | a byte per present field | 256 ids, `Skip` over an unknown field, packed5 |
 
 ### The three ways to hand colbin a struct
@@ -124,12 +124,12 @@ Same six-field sensor reading, same run, protobuf through its generated code:
 
 | | encode | decode | bytes |
 |---|---:|---:|---:|
-| protobuf | 121 ns | 112 ns | 32 |
-| **colbin + tags** (4-bit keys) | **37.7 ns** | **57.2 ns** | **27** |
-| colbin untagged (8-bit keys) | 41.9 ns | 66.7 ns | 33 |
-| colbin + packed5 (8-bit keys) | 50.3 ns | 66.0 ns | 33 |
+| protobuf | 123 ns | 116 ns | 32 |
+| **colbin + tags** (4-bit keys) | **40.6 ns** | **62.3 ns** | **27** |
+| colbin untagged (8-bit keys) | 44.2 ns | 70.5 ns | 33 |
+| colbin + packed5 (8-bit keys) | 52.1 ns | 69.4 ns | 33 |
 
-Untagged costs 11% on encode and 17% on decode, and six bytes — one per present
+Untagged costs 9% on encode and 13% on decode, and six bytes — one per present
 field. All of that is the key width, not the hashing, which happens once when the
 plan is built.
 
@@ -139,9 +139,9 @@ still close to a wash:
 
 | string-heavy product | encode | decode | bytes |
 |---|---:|---:|---:|
-| protobuf | 166 ns | 360 ns | 81 |
-| **colbin + tags** | **41.3 ns** | **190 ns** | 81 |
-| colbin + packed5 | 245 ns | 344 ns | **80** |
+| protobuf | 170 ns | 389 ns | 81 |
+| **colbin + tags** | **43.1 ns** | **230 ns** | 81 |
+| colbin + packed5 | 282 ns | 427 ns | **80** |
 
 One byte, for six times the encode cost. The packing saves 7 bytes and the wide
 key it forces costs 6. **Turn it on only when strings dominate the record and
@@ -249,8 +249,59 @@ wire/     the format: field framing, all three key-run framings,
 column/   the column codec: blocks of 128 residuals at a chosen bit width
 codec/    the reflection façade and the source generator
 packed5/  the opt-in string packing
+corpus/   a reproducible, real-shaped dataset: users, products, sales
 bench/    the comparison against protocol buffers
 ```
+
+### The corpus
+
+`corpus.Generate(corpus.Seed, corpus.Small)` builds the same seven tables every
+time — users, products, categories, stores, sales with nested `Detail
+[]SaleLine`, events and metrics. Money is integer cents throughout; a sale holds
+no string and no float.
+
+The line count per sale straddles the table threshold on purpose, so one dataset
+reaches both layouts:
+
+| 300 sales, 1 514 lines | sales | lines | B/line |
+|---|---:|---:|---:|
+| list of structs (<8 lines) | 246 | 820 | 21.9 |
+| table, transposed (≥8) | 54 | 694 | **12.8** |
+
+#### Against protocol buffers, same rows both sides
+
+`bench/corpus.pb.go` is the protobuf twin, field for field. Cents are `int64`
+rather than `sint64` because every amount is non-negative and int64 is the
+shorter of the two — protobuf gets its best form, not the matching one.
+
+| table | rows | protobuf | colbin | |
+|---|---:|---:|---:|---:|
+| users | 100 | 6 275 | 6 187 | −1.4% |
+| products | 200 | 12 996 | 12 876 | −0.9% |
+| **sales** (nested detail) | 300 | 33 489 | **26 856** | **−19.8%** |
+| metrics | 2 000 | 22 000 | 21 680 | −1.5% |
+| total | | 74 760 | **67 599** | −9.6% |
+
+Per row, in one run:
+
+| | protobuf | colbin | |
+|---|---:|---:|---:|
+| user encode | 141 ns | **35 ns** | 4.0× |
+| user decode | 244 ns | **86 ns** | 2.9× |
+| sale encode | 616 ns | **363 ns** | 1.7× |
+| sale decode | 967 ns | **504 ns** | 1.9× |
+| metric encode | 61 ns | **15 ns** | 4.0× |
+
+Decoding a sale allocates 5.1 times against protobuf's 9.1.
+
+Note the shape of the size result: on flat records the two formats are within
+1.5% of each other — both omit zero fields and write a key per present field, so
+there is little to choose between them. **The whole of colbin's size advantage is
+in the nested table**, where a slice of integer-only structs is transposed into
+columns and protobuf has no equivalent.
+
+`go test ./corpus -run Report -v` prints bytes per row for every table;
+`go test ./bench -run CorpusSizes -v` prints the comparison above.
 
 `wire` and `column` have no reflection and no type registry — they are driven by
 a caller that already knows the Go type, which is what `codec.Generate` emits.
@@ -277,11 +328,34 @@ ends and no state crosses a boundary.
 - `RATIONALE.md` — the decisions, including the ones the measurements reversed
   and the optimisations that did not pay
 - `wire/README.md`, `column/README.md` — the layouts
+- `rust/README.md` — the Rust port
+
+## Rust
+
+`rust/` is the same format in Rust: the wire at all three key framings, the
+column codec, packed5, and a `#[derive(Colbin)]` that emits the straight-line
+encode and decode rather than a reflective walk.
+
+```rust
+#[derive(Colbin)]
+struct Charge {
+    #[cb(0)] company_id: u32,
+    #[cb(1)] note: String,
+}
+```
+
+The two ports are pinned to each other rather than to a description.
+`rust/vectors/main.go` writes a corpus with the Go codecs — the messages, the
+field ids and the columns — and the Rust tests assert both directions against
+it, so neither side can move without the other failing.
+
+```sh
+go run ./rust/vectors && go test ./rust/vectors
+cargo test -p colbin --features derive
+```
 
 ## Status
 
-Alpha. The wire format is settled for Go and the façade covers everything in the
-table above. Interfaces have no form on the wire yet.
-
-**The Rust port is behind and still implements the previous wire** — the two
-disagree, and the cross-language vectors are skipped until it is brought over.
+Alpha. The wire format is settled, the Go façade covers everything in the table
+above, and the Rust port covers the same ground. Interfaces have no form on the
+wire yet.

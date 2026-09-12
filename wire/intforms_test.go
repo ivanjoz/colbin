@@ -112,6 +112,53 @@ func TestWideUintRoundTrips(t *testing.T) {
 	}
 }
 
+// TestWideWidthTypedWritersMatchUint is what lets U16 decide the varint with a
+// comparison against a constant instead of computing both lengths. The
+// hand-placed boundary is only as good as this: every uint16 there is, and the
+// values around every crossing for a uint32, must leave the same bytes U16 and
+// U32's generic sibling leaves.
+func TestWideWidthTypedWritersMatchUint(t *testing.T) {
+	for value := range 1 << 16 {
+		typed, generic := Writer8{}, Writer8{}
+		typed.U16(9, uint16(value))
+		generic.Uint(9, uint64(value))
+		if string(typed.Buffer) != string(generic.Buffer) {
+			t.Fatalf("U16(%d) wrote % x where Uint wrote % x",
+				value, typed.Buffer, generic.Buffer)
+		}
+		if value == 0 {
+			continue
+		}
+		reader := NewReader8(typed.Buffer)
+		if got := reader.U16(); got != uint16(value) || reader.Err() != nil {
+			t.Fatalf("U16(%d) came back %d: %v", value, got, reader.Err())
+		}
+	}
+
+	values := []uint32{0, 1, 127, 128, 255, 256, 0x3FF, 0x400, 0xFFFF, 0x1_0000,
+		0x1_FFFF, 0x2_0000, 0xFF_FFFF, 0x100_0000, math.MaxUint32}
+	random := rand.New(rand.NewSource(17))
+	for range 20000 {
+		values = append(values, random.Uint32(), uint32(random.Intn(1<<20)))
+	}
+	for _, value := range values {
+		typed, generic := Writer8{}, Writer8{}
+		typed.U32(9, value)
+		generic.Uint(9, uint64(value))
+		if string(typed.Buffer) != string(generic.Buffer) {
+			t.Fatalf("U32(%d) wrote % x where Uint wrote % x",
+				value, typed.Buffer, generic.Buffer)
+		}
+		if value == 0 {
+			continue
+		}
+		reader := NewReader8(typed.Buffer)
+		if got := reader.U32(); got != value || reader.Err() != nil {
+			t.Fatalf("U32(%d) came back %d: %v", value, got, reader.Err())
+		}
+	}
+}
+
 // TestWideVarintIsSkippable is the reason the form lives under a class at all: a
 // reader that does not know the key still has to be able to step over it.
 func TestWideVarintIsSkippable(t *testing.T) {
