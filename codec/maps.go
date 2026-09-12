@@ -40,14 +40,25 @@ import (
 
 // mapKind is what a map's key or value is, narrowed to the set the wire carries
 // as a bare element.
+//
+// Like fieldOp, these values go on the wire in a schema section and must not be
+// reordered. The two float widths are separate kinds for that reason and no
+// other: a Go decoder reads the width off the destination field, but a reader
+// working from a section has no destination, and a 32-bit reversed bit pattern
+// read as a 64-bit one is silent nonsense rather than an error.
 type mapKind uint8
 
 const (
 	mapString mapKind = iota
 	mapInt
 	mapUint
-	mapFloat
+	mapFloat64
 	mapBool
+	mapFloat32
+
+	// mapKindCount bounds the block, so a section naming a kind this version
+	// does not assign is refused.
+	mapKindCount
 )
 
 // mapKindOf narrows a type to a map kind, or refuses it.
@@ -59,11 +70,16 @@ func mapKindOf(t reflect.Type, what string) (mapKind, error) {
 		return mapInt, nil
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		return mapUint, nil
-	case reflect.Float32, reflect.Float64:
+	case reflect.Float32:
 		if what == "key" {
 			return 0, fmt.Errorf("a float is not a map key this format carries")
 		}
-		return mapFloat, nil
+		return mapFloat32, nil
+	case reflect.Float64:
+		if what == "key" {
+			return 0, fmt.Errorf("a float is not a map key this format carries")
+		}
+		return mapFloat64, nil
 	case reflect.Bool:
 		if what == "key" {
 			return 0, fmt.Errorf("a bool is not a map key this format carries")
@@ -111,7 +127,7 @@ func writeMapValue(writer *wire.Writer8, kind mapKind, value reflect.Value) {
 		writer.ElementInt(value.Int())
 	case mapUint:
 		writer.ElementUint(value.Uint())
-	case mapFloat:
+	case mapFloat32, mapFloat64:
 		// A float rides in the integer shape with its bytes reversed, the same
 		// way a scalar float field does.
 		writer.ElementUint(reverseFloatBits(value))
@@ -155,7 +171,7 @@ func readMapValue(reader *wire.Reader8, kind mapKind, into reflect.Value) {
 		into.SetInt(reader.ElementInt())
 	case mapUint:
 		into.SetUint(reader.ElementUint())
-	case mapFloat:
+	case mapFloat32, mapFloat64:
 		setFloatFromReversed(into, reader.ElementUint())
 	case mapBool:
 		into.SetBool(reader.ElementUint() == 1)

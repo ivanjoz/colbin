@@ -21,6 +21,9 @@ func SetPacked5(on bool) {
 	// effect on types already in use — and why it has to be set at startup
 	// rather than mid-flight.
 	planCache.Clear()
+	// A schema section states that same key width, for the one run that cannot
+	// say it on the wire, so it goes stale with the plans it was built from.
+	schemaCache.Clear()
 }
 
 // Packed5 reports whether the packed5 string encoding is on.

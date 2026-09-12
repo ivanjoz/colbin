@@ -241,6 +241,66 @@ descriptor classes, so a reader dispatches on what it finds. A struct with a
 nested struct or a slice inside it cannot be a column and stays row-wise however
 long it gets.
 
+## Reading a message without the Go type
+
+The wire carries no type — that is where the speed comes from — so a browser, a
+`jq`-style tool or any dynamically typed client cannot name a field or tell a
+float from an integer. A **schema section** gives it those. It is the same plan
+the encoder already resolves from the struct, written out as bytes: a key, a
+name and a type code per field, with nested structs hoisted into an indexed
+table so a recursive type describes itself in finite space.
+
+Send it once per connection, then send ordinary messages:
+
+```go
+schema, _ := colbin.SchemaFor[Sale]()
+send(schema.Bytes())                       // once
+
+for _, sale := range sales {
+    data, _ := colbin.Marshal(&sale)       // unchanged, and unchanged in size
+    send(data)
+}
+```
+
+and on the other side:
+
+```go
+schema, _ := colbin.ParseSchema(section)
+text, _ := colbin.ToJSON(schema, message)  // {"ID":1,"UserID":42,...}
+value, _ := colbin.DecodeAny(schema, message)
+```
+
+`colbin.MarshalSelfDescribing(&sale)` puts the section in front of the body
+instead, for a document that has to stand alone. Its root byte is `0xD4` or
+`0xDC` — the schema bit, `0x04` — and `Unmarshal` steps over the section, so a
+self-describing message still decodes into the Go type.
+
+It is the wrong default for a stream. Measured on the corpus:
+
+| table | schema | B/message | schema/msg |
+|---|---:|---:|---:|
+| users | 61 B | 61.9 B | 1.0x |
+| sales (with detail) | 173 B | 89.5 B | 1.9x |
+| metrics | 28 B | 10.8 B | 2.6x |
+
+The JSON is what `encoding/json` would have written for the same record, down to
+the escaping and the spelling of numbers — with two exceptions the wire forces:
+an empty slice or map is indistinguishable from a nil one and comes out `null`,
+and a NaN or an infinity is **refused** rather than quietly written as `null`.
+`DecodeAny` keeps them.
+
+Going straight to text is also the faster direction, because the intermediate
+`map[string]any` is where all the allocation is:
+
+| 100 corpus users | ns/op | B/op |
+|---|---:|---:|
+| `colbin.AppendJSON` | 29 500 | 6 512 |
+| `encoding/json` on the structs | 40 000 | 14 327 |
+| `colbin.DecodeAny` | 41 000 | 54 712 |
+
+Writing colbin *from* JSON is not in this: it needs type inference, and it is a
+separate job.
+
 ## Layout
 
 ```
@@ -359,3 +419,7 @@ cargo test -p colbin --features derive
 Alpha. The wire format is settled, the Go façade covers everything in the table
 above, and the Rust port covers the same ground. Interfaces have no form on the
 wire yet.
+
+The schema section is Go-only so far: it changes nothing about the bytes an
+ordinary message carries, so the Rust port reads and writes those unaffected,
+but it cannot yet produce or consume a section of its own.

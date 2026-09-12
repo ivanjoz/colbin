@@ -1,6 +1,8 @@
 package colbin_test
 
 import (
+	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/ivanjoz/colbin"
@@ -160,5 +162,76 @@ func TestPacked5IsAWriterSetting(t *testing.T) {
 		if back.Name != sample.Name {
 			t.Fatalf("%s: name round-tripped as %q", label, back.Name)
 		}
+	}
+}
+
+// The out-of-band delivery, end to end through the public API: describe the type
+// once, send the section, and turn ordinary messages into JSON on the other side
+// with no Go type in sight.
+func TestSchemaOutOfBand(t *testing.T) {
+	schema, err := colbin.SchemaFor[charge]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What crosses the wire once, and what crosses it every time.
+	section, err := colbin.ParseSchema(schema.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := colbin.Marshal(&sample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := colbin.ToJSON(section, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := json.Marshal(&sample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got, expected any
+	if err := json.Unmarshal(text, &got); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, text)
+	}
+	if err := json.Unmarshal(want, &expected); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, expected) {
+		t.Fatalf("\n got %s\nwant %s", text, want)
+	}
+
+	value, err := colbin.DecodeAny(section, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name := value.(map[string]any)["Name"]; name != sample.Name {
+		t.Fatalf("DecodeAny gave Name = %v", name)
+	}
+}
+
+// A self-describing message needs no schema passed in, and still decodes into
+// the Go type: the section is additive rather than a second format.
+func TestMarshalSelfDescribing(t *testing.T) {
+	data, err := colbin.MarshalSelfDescribing(&sample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !colbin.IsColbin(data) {
+		t.Fatalf("byte 0 is %#02x, outside colbin's range", data[0])
+	}
+	var back charge
+	if err := colbin.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(back, sample) {
+		t.Fatalf("round-tripped as %+v", back)
+	}
+	text, err := colbin.ToJSON(nil, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(text) {
+		t.Fatalf("not valid JSON: %s", text)
 	}
 }

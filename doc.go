@@ -34,10 +34,19 @@
 //
 //	wire     the format: field framing, both key widths, composites, tables
 //	column   the column codec: blocks of 128 residuals at a chosen bit width
-//	codec    the reflection façade, and a source generator for the hot path
+//	codec    the reflection façade, a source generator for the hot path, and
+//	         the schema section that lets a reader without the Go type get JSON
 //	packed5  an opt-in string packing, off by default
 //
 // A caller that knows its Go type can drive wire.Writer directly and skip the
 // reflection: that is about three times faster than the façade, and
 // codec.Generate emits the source so it does not have to be written by hand.
+//
+// # A reader without the Go type
+//
+// The type is not on the wire, so a reader that has not got it cannot name a
+// field or tell a float from an integer. Schema is the type written out as
+// bytes — send it once per connection and turn messages into JSON with ToJSON,
+// or put it in front of one message with MarshalSelfDescribing. The body is
+// unchanged either way, and so is everything an ordinary decode costs.
 package colbin

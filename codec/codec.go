@@ -21,6 +21,17 @@ import (
 // explicit `cb:"N"` with N under sixteen, and a type that does not number its
 // fields is refused rather than hashed into ids that would not fit.
 
+// fieldOp says what a field is. It is the whole of what a plan holds about a
+// field's type, and — since the schema section — the whole of what the *wire*
+// holds about it too.
+//
+// # These values are on the wire
+//
+// A schema section describes a field as a key, a name and one of these numbers.
+// Reordering the block therefore retypes every field of every section already
+// written: an op is a byte, every byte is a valid op, and a reader would decode
+// a string as an integer without anything looking wrong. New ops go on the end
+// and none of these ever moves. TestFieldOpsArePinned is what catches it.
 type fieldOp uint8
 
 const (
@@ -49,6 +60,10 @@ const (
 	opStructs
 	opMap
 	opPointer
+
+	// opCount bounds the block, so a schema section carrying a number this
+	// version does not assign is refused rather than indexed on.
+	opCount
 )
 
 type planField struct {
@@ -68,6 +83,15 @@ type planField struct {
 
 type typePlan struct {
 	fields []planField
+	// names is what each field is called, parallel to fields. It is the one
+	// thing a schema section carries that the encode and decode paths never
+	// read — see schema.go.
+	//
+	// It is a slice beside fields rather than a string inside planField because
+	// planField is loaded once per field per *message* and a name is read once
+	// per *type*: putting it in the struct would drag sixteen bytes through the
+	// cache on every field of every decode to serve a path that does not run.
+	names []string
 	// What decides the key width, resolved once with the plan. See wide.go.
 	anyKeyPastNarrow bool
 	hasStrings       bool
@@ -89,6 +113,12 @@ type typePlan struct {
 	// Such an id lands anywhere in 0..255, so the type uses eight-bit keys. See
 	// assignKeys.
 	derivedKeys bool
+	// fromSchema says this plan was parsed off a wire section rather than
+	// resolved from a Go type, which means **it has no layout in it**: every
+	// offset and stride is zero, and writing a field through one would store
+	// over the head of the record. Only the JSON walkers may use such a plan.
+	// See schema_plan.go.
+	fromSchema bool
 }
 
 var planCache sync.Map // reflect.Type -> *typePlan or error
@@ -214,6 +244,10 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 	if err := plan.assignKeys(structType, hashNames, fieldNames, declared); err != nil {
 		return nil, err
 	}
+	// The name a field hashes to an id by is the name a reader without the Go
+	// type calls it: `cb:"label,3"` names the field as well as numbering it, and
+	// an untagged field is called what Go calls it. One name, not two.
+	plan.names = hashNames
 	plan.indexKeys()
 	plan.isWide = plan.wide()
 	plan.canTable = plan.transposable()
@@ -565,16 +599,22 @@ func errUnknownNarrowKey(key uint8, what reflect.Type) error {
 // largest line in the profile, for a lookup whose answer is fixed the moment the
 // plan is built.
 func (plan *typePlan) find(key uint8) *planField {
+	if index := plan.findIndex(key); index >= 0 {
+		return &plan.fields[index]
+	}
+	return nil
+}
+
+// findIndex is find for a caller that needs the field's position as well as the
+// field — which is what a walk carrying a name per field does, and what a
+// present-field bitmap is indexed by. See json.go.
+func (plan *typePlan) findIndex(key uint8) int {
 	// A key past the largest the type declares is the unknown-field case, which
 	// is the one this has to get right rather than index into.
 	if int(key) >= len(plan.byKey) {
-		return nil
+		return -1
 	}
-	index := plan.byKey[key]
-	if index < 0 {
-		return nil
-	}
-	return &plan.fields[index]
+	return int(plan.byKey[key])
 }
 
 // indexKeys builds the lookup table. It is sized to the largest key rather than

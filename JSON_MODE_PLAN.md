@@ -4,7 +4,27 @@ A plan for bringing back what `codec/schema.go` and `codec/schema_decode.go` did
 before the collapse to one format — a message a reader can decode **without the
 Go type** — rebuilt on the current descriptors rather than ported.
 
-Status: proposed. Nothing below is implemented.
+Status: **implemented**, in `codec/schema.go`, `codec/schema_plan.go`,
+`codec/json.go`, `codec/jsontext.go` and `codec/any.go`. All nine phases are in,
+with tests in `codec/schema_test.go`, `codec/json_test.go` and
+`corpus/json_test.go`.
+
+Four things came out differently from the proposal below, and each is marked
+**[built]** where it belongs:
+
+1. **A structDef carries its key width.** §3.3 is wrong: a *narrow* list's
+   element is a length and a body with no descriptor between them, so its key
+   width is the one thing the wire does not say. The section says it, for every
+   struct rather than only that one.
+2. **`mapKind` splits the two float widths.** A map value's float width came
+   from the destination Go field, which a schema-only reader does not have.
+3. **The names.** `Schema` is the parsed type, so the constructors are
+   `SchemaFor[T]()`, `SchemaOf(v)` and `ParseSchema(section)`; `Schema.Bytes()`
+   is what §7 called `Schema[T]() []byte`. A nil schema means "the message
+   carries its own".
+4. **The measurements.** A `Sale` section is 173 bytes, not the ~215 estimated
+   in §4 — 1.9x a mean sale body rather than 2.4x. `go test ./corpus -run
+   ReportSchema -v` prints the table.
 
 ---
 
@@ -80,7 +100,8 @@ The root byte is an ordinary K8 descriptor whose class is STRUCT — class 5, so
 range is now reserved and documented in `codec/root.go`; the other 240 values
 are guaranteed never to be written, and belong to the application.
 
-Four detail bits, two allocated today:
+Four detail bits, two allocated today (**[built]** and now written, so four of
+the sixteen root bytes are assigned and twelve are still refused):
 
 ```
 0x08  wide     eight-bit keys inside
@@ -116,6 +137,13 @@ field     := [key:1] [nameLen:1] name [desc]
 desc      := [op:1] extra
 ```
 
+**[built]** with one byte more per struct and one length rule throughout:
+
+```
+structDef := [flags:1] [fieldCount] field{fieldCount}     flags bit 0: wide keys
+field     := [key:1] [nameLen] name [desc]                nameLen as every length
+```
+
 `extra` by op:
 
 | op | extra |
@@ -145,6 +173,15 @@ feature and should be stated in the docs.
 The key width. Each run's own descriptor already says it — `rootOf` for the
 root, the `k8` bit for a nested struct, the table's own bit for its columns. The
 decoder reads it from the wire, as the Go decoder does.
+
+**[built] This is wrong, and it is the one hole the implementation found.** A
+narrow list's element is `[len][body]` with no descriptor between them — that
+missing byte per element is exactly what makes a narrow list of small structs
+smaller than a wide one — so nothing on the wire says what width the run inside
+it uses. `structDef` therefore begins with a flags byte whose bit 0 is "eight-bit
+keys", stated for every struct rather than only for that case, because one rule
+is cheaper to hold than an exception. It is also why `SetPacked5` now drops the
+schema cache: packed5 is one of the two things that decide a type's width.
 
 ---
 
@@ -228,6 +265,13 @@ round-trip-exact form. NaN and ±Inf have no JSON representation; the format has
 refuse. Recommend refuse, loudly, because silently turning NaN into null loses
 data.
 
+**[built] Refused**, and refused *before* anything is written, so a caller's
+buffer is either the whole document or exactly what it was. The number format is
+not `'g'` but `encoding/json`'s own rule — `'f'` until the exponent leaves
+±(1e-6, 1e21), then `'e'` with the leading zero trimmed off the exponent — so the
+two write the same bytes and a test can compare them directly rather than through
+a JSON parser. A `float32` is formatted at 32 bits, so `1.1` prints as `1.1`.
+
 ### 6.3 Maps
 
 - **Key order is not stable** (Go map iteration). JSON objects are unordered, so
@@ -236,6 +280,12 @@ data.
   golden-vector test. Already true today; must be written down.
 - **Integer keys.** JSON object keys are strings. `map[int64]string` must render
   keys as `"42"`. Decoding back the other way is out of scope.
+- **[built] Float values needed a width.** `mapKind` collapsed `float32` and
+  `float64` into one code, because the Go decoder takes the width from the
+  destination field. A schema-only reader has no destination, and a 32-bit
+  reversed bit pattern read as a 64-bit one is a plausible-looking number rather
+  than an error. `mapFloat32` and `mapFloat64` are now separate kinds, and the
+  kinds are pinned by a test alongside the ops.
 
 ### 6.4 Pointers
 
@@ -283,11 +333,30 @@ Proposed:
 
 Open for the owner to overrule — the old names can be kept as aliases.
 
+**[built]** `Schema` is the *type* — a parsed schema, however it was obtained —
+so it cannot also be the constructor. What shipped:
+
+| | |
+|---|---|
+| `SchemaFor[T]() (*Schema, error)` | from the Go type |
+| `SchemaOf(v) (*Schema, error)` | from a value |
+| `ParseSchema(section) (*Schema, error)` | from the wire |
+| `Schema.Bytes() []byte` | the section, to send — §7's `Schema[T]()` |
+| `MarshalSelfDescribing(v)` | as proposed |
+| `AppendJSON(dst, schema, data)` / `ToJSON(schema, data)` | as proposed |
+| `DecodeAny(schema, data)` | as proposed |
+
+A **nil** schema on the three decode entries means "the message carries its own",
+so the self-describing path needs no second set of names.
+
 ---
 
 ## 8. Phases
 
-Each phase ends green and is independently useful.
+Each phase ends green and is independently useful. **[built] All nine are in**;
+the tests landed in `codec/schema_test.go`, `codec/json_test.go` and
+`corpus/json_test.go`, with two fuzz targets — one over the section, one over the
+message — because both are untrusted input.
 
 | # | deliverable | test |
 |---|---|---|
@@ -325,4 +394,9 @@ is most of a REST payload. Phases 4–5 are where the real work is.
   maintain alongside it.
 - **~215 bytes** of schema for a `Sale`, if sent inline.
 - No cost at all to the existing encode/decode paths: nothing above changes a
-  byte of what `Marshal` writes today.
+  byte of what `Marshal` writes today. **[built] Measured**: eleven benchmarks
+  over encode, decode, nesting, tables and maps, before and against after, are
+  unchanged or marginally faster, and identical to the byte in allocation. The
+  field names a section needs live in a slice beside `typePlan.fields` rather
+  than inside `planField`, so the decode path does not drag sixteen bytes per
+  field through the cache for a name it never reads.
