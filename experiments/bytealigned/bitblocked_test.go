@@ -26,10 +26,10 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/ivanjoz/colbin/varint"
+	"github.com/ivanjoz/colbin/column"
 )
 
-func varintSize(vals []int64) int { return len(varint.AppendArray(nil, vals)) }
+func varintSize(vals []int64) int { return len(column.AppendArray(nil, vals)) }
 
 // asUint64s lets a block be unpacked straight into the caller's []int64 and
 // reinterpreted afterwards, rather than through a second buffer.

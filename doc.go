@@ -1,33 +1,43 @@
-// Package colbin implements a compact columnar binary format for homogeneous
-// Go records. Integer columns use the adaptive varint codec and strings use
-// self-delimiting packed5 frames; nested structs, slices, maps, pointers, and
-// interface values are also supported.
+// Package colbin is a byte-aligned binary format for Go structs.
 //
-// Marshal and Unmarshal derive the wire schema from the Go type and cb struct
-// tags, so callers must decode with a compatible type.
+// This file is the package's overview; colbin.go is its API.
 //
-// MarshalJSON writes the same payload behind a schema section naming the fields
-// and recording what the columns leave out, so a reader with no matching Go type
-// can turn the message into JSON with DecodeJSON or DecodeAny.
+// # One format
 //
-// MarshalForceCompact takes compact mode -- the bit-level layout for one to
-// three records -- whenever the type permits it, instead of letting Marshal pick
-// the mode on size. Compact mode carries nested structs, arrays of structs, maps
-// and nested slices; it cannot carry an interface field, whose concrete type has
-// no tag on that wire.
+// A message is a root descriptor byte and then a sequence of fields:
 //
-// MarshalMinimal is a third mode: a byte-aligned key/value layout for one record
-// of at most sixteen numbered primitive fields, where a zero-valued field costs
-// nothing. It is for small records on a hot path, encodes about ten times faster
-// than compact mode at about the same size, and gives up what that speed costs --
-// no nested types, no hashed ids, and a message Unmarshal cannot read.
+//	[key][descriptor][payload]
 //
-// Codec[T] is the same format through a cached, typed handle: the field layout
-// and the mode decision are resolved once instead of on every call, and encoding
-// onto a reused buffer allocates nothing. Use it for many small messages.
+// Nothing is packed across a byte boundary. No size is a varint — a header
+// carries the common size and, when it does not fit, names the width of the one
+// that follows, so no read is ever a loop whose trip count is data. A field
+// holding its zero value is not written at all, which is where most of the
+// saving comes from.
 //
-// SetOmitEmpty turns on omit-empty encoding, where a column holding nothing but
-// empty values is written as its type byte alone rather than as a slot per
-// record. It also lets compact mode carry pointer fields, at the price of nil
-// and a pointer to the zero value becoming the same thing.
+// There used to be three modes — a columnar one, a bitstream one and this — and
+// a byte at the front to tell them apart. There is now one, and the byte at the
+// front is the root value's own descriptor: it says the class and the key width,
+// which is everything the version bytes carried that was not simply a
+// consequence of the layout.
+//
+// # Key widths
+//
+// A field id is four bits or eight, chosen per key run rather than per message.
+// Four is the default and the fast path. Eight costs a byte per present field
+// and buys 256 ids, the ability to skip a field the reader has never heard of,
+// and the packed5 string encoding.
+//
+// A type goes wide when it has a field id above fifteen, or when SetPacked5 is
+// on and it has a string to spend it on. Nothing else changes.
+//
+// # Layers
+//
+//	wire     the format: field framing, both key widths, composites, tables
+//	column   the column codec: blocks of 128 residuals at a chosen bit width
+//	codec    the reflection façade, and a source generator for the hot path
+//	packed5  an opt-in string packing, off by default
+//
+// A caller that knows its Go type can drive wire.Writer directly and skip the
+// reflection: that is about three times faster than the façade, and
+// codec.Generate emits the source so it does not have to be written by hand.
 package colbin

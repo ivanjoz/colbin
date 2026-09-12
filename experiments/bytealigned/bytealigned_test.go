@@ -14,7 +14,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/ivanjoz/colbin/varint"
+	"github.com/ivanjoz/colbin/column"
 )
 
 const (
@@ -499,7 +499,7 @@ func shapes() map[string][]int64 {
 
 func TestSizes(t *testing.T) {
 	for name, vals := range shapes() {
-		bit := varint.AppendArray(nil, vals)
+		bit := column.AppendArray(nil, vals)
 		fixed := AppendFixed(nil, vals)
 		blocked := AppendBlocked(nil, vals)
 		per := func(b []byte) float64 { return float64(len(b)) / float64(len(vals)) }
@@ -544,7 +544,7 @@ func BenchmarkEncode(b *testing.B) {
 		b.Run(name+"/bit-varint", func(b *testing.B) {
 			buf := make([]byte, 0, 1<<14)
 			for b.Loop() {
-				buf = varint.AppendArray(buf[:0], vals)
+				buf = column.AppendArray(buf[:0], vals)
 			}
 			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*len(vals)), "ns/elem")
 		})
@@ -569,9 +569,9 @@ func BenchmarkDecode(b *testing.B) {
 	for name, vals := range shapes() {
 		out := make([]int64, len(vals))
 		b.Run(name+"/bit-varint", func(b *testing.B) {
-			buf := varint.AppendArray(nil, vals)
+			buf := column.AppendArray(nil, vals)
 			for b.Loop() {
-				if _, err := varint.DecodeArray(buf, len(vals), out); err != nil {
+				if _, err := column.DecodeArray(buf, len(vals), out); err != nil {
 					b.Fatal(err)
 				}
 			}

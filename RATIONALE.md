@@ -364,3 +364,661 @@ One deliberate difference from the Go decoder: a string that is not valid UTF-8 
 than a value. `packed5` carries bytes and the Go codec is byte exact for input that is not valid
 UTF-8; a Rust `String` cannot be, and `from_utf8_lossy` would silently substitute characters into
 data a caller may be authenticating.
+
+## One byte-aligned format: what the wire gave up, and what it refused to
+
+`BYTE_ALIGNED_PLAN.md` is the design; this is the record of the decisions that
+changed while implementing it, and of the ones the measurements reversed.
+
+### Little-endian, where the format was big-endian
+
+Every multi-byte quantity is now little-endian. A fixed-width element becomes one
+native load on every machine this runs on, and a variable-width integer becomes a
+`Uint64` load and a mask rather than a shift chain. The cost is that the format
+no longer reads left-to-right in a hex dump, which is a cost paid by whoever
+debugs it and not by anything in production.
+
+### Size codes are byte counts, and no code is unassigned
+
+An integer's three size bits were a code into `{1,2,3,4,6,8}` with code 7
+reserved. They are now the byte count outright: 0 means the value is one, 1..6
+are themselves, 7 is eight. That makes five-byte integers representable — a byte
+saved on every value in `[2^32, 2^40)`, which is where a millisecond timestamp
+offset or a large row id lands — and it costs nothing, because a seven-byte
+magnitude already rounded up to eight.
+
+It also removes the unassigned code, and with it `ErrBadSizeCode`. A reserved
+door in a four-bit descriptor was never going to be wide enough for the
+self-describing variant it was being kept for; that variant is the eight-bit key
+width, which has a whole class field.
+
+### No varint anywhere, including where it was cheapest
+
+LEB128 continuations are gone from sizes, counts and element lengths. A header
+now carries the common size and, when it does not fit, names the *width* of the
+size that follows. Reading a length is a branch and one load instead of a loop.
+
+This deletes `appendSizeExtension`, `continuedSize`, the nine-byte continuation
+guard and the class of bug they existed to prevent: a peer-controlled run that
+accumulates past what an `int` holds and wraps into a small size whose bounds
+check then passes. What is left to refuse is a size this platform cannot
+address.
+
+The escape costs less than the varint did, not more. When `more` is set the three
+size bits carry nothing, so they name the escape width instead: a 5 KB string
+pays one extra byte where LEB128 paid three.
+
+### A float trims the opposite end from an integer
+
+The plan said a float rides in the integer shape "with trailing zero bytes
+trimmed". Under the little-endian rule that trims the *high* bytes — the exponent
+and sign, which are never zero for a non-zero float. Measured, it saved nothing:
+8.00 bytes per value on every float column tried.
+
+An integer's zero bytes are its most significant; a float's are its *least*. So a
+float writes its pattern with the bytes reversed, and the integer path then works
+unchanged. Round quarters go from 7.99 bytes to 2.93, and a `float64` holding a
+value that is exactly a `float32` has twenty-nine zero low bits — three whole
+bytes and five over — and costs five. Nothing was added to detect that case; it
+falls out.
+
+### A pointer must not appear in a generic signature
+
+`WriteInts[T](w *Writer, ...)` is reached through a shape dictionary, and the
+escape information a caller **in another package** gets for it is conservative
+enough to put the writer on the heap. That is one allocation per message and
+3 ns per record on codec's plan walk, for a function whose body allocates
+nothing.
+
+So there is a concrete `Int32s`, `Uint16s` and so on beside the generic form, and
+the generic work underneath them takes slices and values only. The repetition is
+the point, and it is why the generic entry points now document that they cost the
+caller an allocation.
+
+This is invisible in the source, invisible in `go vet`, and only visible in
+`-gcflags=-m` at `derefs=0`. It will be reintroduced by anyone who tidies the
+concrete methods into wrappers.
+
+### The column codec: bits inside byte-aligned blocks
+
+The `(k, M)` bit varint is replaced by blocks of 128 residuals at an exact bit
+width chosen per block. The arithmetic that makes it work is that 128 values at
+`w` bits occupy `128w/8 = 16w` bytes — a whole number of bytes for every `w`, and
+a whole number of 64-bit words too. A block is therefore byte-aligned at both
+ends, wastes no padding, and carries no state across a boundary, while the width
+ladder stays one bit fine.
+
+Measured over five column shapes it is **smaller than the codec it replaced on
+every one of them**, from −59% to +1%, and 2–3× faster to decode, 4–5× faster to
+encode. This was the one place where byte alignment looked like a size sacrifice,
+and it turned out not to be one.
+
+Three rules the measurements insisted on, each of which was wrong first:
+
+- **The base goes in the clear.** Folding delta's first value into the residuals
+  sets the first block's width from one element: +97% on a column of timestamps.
+- **The transform is scored against its blocked cost**, not the column's widest
+  residual. The latter picks frame-of-reference for a column of small ids and
+  loses 76% where delta loses 14%.
+- **Constant is scored, not taken on sight.** A single value taken as "constant"
+  costs nine bytes where raw costs three. And a column of zeros is *not*
+  constant: a width-0 block carries nothing, so 256 zeros are three bytes against
+  constant's nine. The encoder finds this; the test that expected otherwise was
+  wrong.
+
+The old `trFixed` fallback is gone. It existed to bound the output at the element
+width; the widest block width bounds it now, at one byte per 128 values — +0.1%
+on incompressible data, and a byte or two on a column of one to three elements.
+
+This broke `compact.GetInts`, which bounded array counts by "at least one byte
+per element". That floor no longer exists: 128 residuals at width zero occupy one
+byte, so a thousand elements can arrive in nine, and valid messages were being
+refused as truncated. A column is bounded by its header and one width byte per
+block, and nothing else.
+
+### The key width is split across functions, not tested per field
+
+Measured on a ten-field record: one decoder carrying a `k8 bool` runs at 11.7 ns
+where a decoder per width runs at 8.7. The branch is not the cost — it goes the
+same way on every field and predicts perfectly. The cost is that a width the
+compiler cannot see is a width it cannot fold: the field stride stops being a
+constant, the descriptor's position stops being a constant, and the function
+grows past the budget that would have inlined it.
+
+So the framing is written once per key width and the value codecs are written
+once and shared. The seam is: reading the key and decoding the descriptor differ;
+the magnitude load, the blob slice and the array elements do not.
+
+Two corollaries. In Rust this is a const generic and the source is written once.
+In Go it cannot be — two distinct empty type parameters share a GC shape, so a
+generic reader goes through a dictionary and the constant never folds — so the
+duplication is the honest cost of the approach on this side.
+
+### The presence bitmap is smaller and *slower*, which reverses the plan
+
+`BYTE_ALIGNED_PLAN.md` §2.7 argued that replacing a wide key run's per-field keys
+with a presence bitmap is smaller *and* faster, and used that to argue K4 might
+be droppable. Half of that is right.
+
+Smaller, measured on the ten-field record: **10 bytes against the narrow key's 11
+and the wide key's 12**, and 15 against 20 and 22 with every field set. Better
+than the plan predicted, because the plan counted a key byte for a field that has
+none.
+
+But slower, by a lot, and it stayed slower after two rounds of optimisation:
+
+| ten-field record, five set | encode | decode | bytes |
+|---|---:|---:|---:|
+| narrow key | 5.2 ns | 14.3 ns | 11 |
+| wide key | 6.0 ns | 24.0 ns | 12 |
+| wide key, presence bitmap | 18.7 ns | 38.4 ns | **10** |
+
+Width-typed writers took the encode from 18.9 to 18.1 and a trailing-zero scan
+over a word took the decode from 48 to 38.4. Holding the bitmap in a register
+rather than read-modify-writing the buffer removed 22% of the encode profile and
+gave it all back to the patch loop that replaced it.
+
+The remaining gap is that a bitmap run cannot be walked with the cursor
+arithmetic a keyed run is walked with: the reader has to find the next set bit,
+back the cursor up, and dispatch, and none of those inline into a caller's
+switch the way `Reader.U16` does.
+
+**So K4 stays, and the case for it is stronger than before.** The bitmap is the
+right choice for a wire that is size-bound and the wrong one for a wire that is
+latency-bound, which is the case this format exists to serve.
+
+### Negative results, recorded so they are not retried
+
+- **`//go:noinline` on the wide fallbacks.** The idea was to keep `U32` small
+  enough for the inliner by stopping `u32Wide` being folded into it. Measured
+  14.1 ns against 13.9 — nothing. Reverted.
+- **Splitting the column unpack's tail.** The profiler attributes 9% to
+  `unpackTail`; running the fast path for the values whose eight-byte load still
+  fits, and gathering only the rest, measured within noise both on a 1024-element
+  column and on a 16-element one that is *entirely* tail. Reverted. Computing the
+  boundary per block rather than per column measured 8% *slower*.
+- **A presence bitmap under K4.** Rejected on arithmetic rather than
+  measurement: K4's key rides in the descriptor byte the field needs anyway, so
+  removing the key removes nothing and the bitmap is pure addition.
+
+## Composites, tables and a generator
+
+### A composite's length is written forward and patched
+
+A nested struct's length is not known until its body is. The writer reserves one
+byte, writes the body, and patches it; a body past 255 bytes makes room for four
+by shifting what follows. The alternative — walking the value twice to size it
+first — costs a pass over every nested value on every message to save a rare
+copy on the large ones, which are the ones least able to notice it.
+
+The reserved byte is what makes this affordable. Reserving four would cost three
+bytes on every nested struct in every message, and most nested structs are small.
+
+### Every composite carries a byte length, and that is the point
+
+`compact.ErrSkipComposite` exists to say that a nested struct, array or map
+cannot be stepped over without its sub-schema. Spending a length on each one is
+what removes that limitation: `Reader8.Skip` steps over a struct, a list, a map,
+a table and a column without knowing anything about what is inside. Measured on
+a record holding all four, a reader that knows only its last field still finds
+it.
+
+### A table is a field class, not a mode
+
+The columnar layout is now the `TABLE` class: a length, a row count, and a key
+run whose fields are *columns* rather than values. That is exactly what the old
+standard mode was — the key a row-wise list spends once per field per element is
+spent once per column — except that it is now a per-field decision rather than a
+per-message one. A record can hold a three-element list and a ten-thousand-row
+table and encode each the right way.
+
+Measured, on a four-field row:
+
+| rows | table | list of structs |
+|---:|---:|---:|
+| 1 | 21 B | 18 B |
+| 3 | 50 B | 57 B |
+| 128 | 1034 B | 2524 B |
+| 4096 | 31896 B (7.8 B/row) | 84371 B (20.6 B/row) |
+
+The crossover is three rows, and the table is 2.6× smaller by four thousand. The
+old format put that threshold at three records too, and chose it once for a whole
+message; it is now chosen per field and measured rather than asserted.
+
+An all-zero column is not written, and an absent column key is what says so. That
+is the old format's omit-empty version byte deleted: the columns are keyed, so
+absence already carries the information, and there is nothing to turn on.
+
+### The generator emits what a hand-written codec would
+
+The plan walk costs 16.7 ns to encode a ten-field record where the straight-line
+calls it stands in for cost 5.3. The difference is not the reflection, which
+happens once — it is the switch, the offsets loaded from the plan and the
+`unsafe.Add` per field, none of which the compiler can fold because none is a
+constant.
+
+`GenerateMinimal` turns them into constants, and the result is measured at the
+hand-written number:
+
+| ten-field record | plan walk | generated | hand-written |
+|---|---:|---:|---:|
+| encode | 16.7 ns | **5.4 ns** | 5.3 ns |
+| decode | 26.4 ns | **16.5 ns** | 14.5 ns |
+
+It works from a `reflect.Type` and the existing plan builder rather than by
+parsing source. That is a deliberate constraint: there is one definition of what
+a field id is, which type maps to which width-typed call, and which fields are
+encodable, and the generator cannot disagree with the reflective path about any
+of it. The cost is that a caller writes a three-line generator program instead of
+adding a `//go:generate` comment.
+
+Two things the generated code carries that hand-written code usually forgets:
+the compile-time key assertion the writer's documentation prescribes, and a test
+that regenerating produces the same source — so a change to the format cannot
+leave stale generated code quietly compiling against it.
+
+## Phase 6: one format, and the repository that says so
+
+The three modes are gone. What is left is the format, and the packages are named
+for what they are rather than for which mode they served.
+
+	wire     was minimal/   the format: framing, both key widths, composites, tables
+	column   was varint/    the column codec, which has not been a varint since it
+	                        became blocks of 128 residuals
+	codec                   the reflection façade and the source generator
+	packed5                 an opt-in string encoding, off by default
+
+Deleted outright: `compact/`, the standard mode's half of `codec/` (encode,
+decode, typeinfo, schema, any, null maps, omit-empty, the float SIMD scan, the
+column pool), `comparison/`, and the Go-side vector generators for the old wire.
+Around six thousand lines. Nothing was left deprecated: a mode that no longer
+exists is not a compatibility surface, it is dead code with tests holding it up.
+
+What went with them is real and worth naming: nested structs, maps, interfaces,
+JSON mode and the self-describing schema are not reachable through `Marshal`
+again until the façade grows to use the composites `wire` now has. The wire can
+express all of them; the reflection over it cannot yet.
+
+### The root descriptor, at last
+
+`Marshal` now writes byte 0 as the root value's own descriptor — `0xD0` for a
+narrow-keyed struct, `0xD8` for a wide-keyed one — and the decoder dispatches on
+it. That is the last piece of §2.1: the mode bit, the shape bits, the
+omit-empty flag and `ALL_POSITIVE` are all either in that byte or gone, and no
+message the old format wrote can be mistaken for one, because every legal root
+byte is even and above 0x90.
+
+It costs one byte and, on the encode path, about 1.5 ns.
+
+### packed5 is a flag, not a mode
+
+`SetPacked5` is off by default and process-wide. It is a **writer** setting: the
+encoding lives in a BLOB's own descriptor, so a decoder reads either form without
+being told which, and turning it on is a size decision rather than a wire
+version.
+
+It only reaches the wide key width — four descriptor bits have no room for an
+encoding code — so a type with strings goes wide when the flag is on. That is
+the honest shape of the trade rather than a special case: the flag buys about a
+third of a short upper-case token and costs a pass over every string on both
+sides, plus the byte per field the wide key costs.
+
+The encoder still chooses per string. `packed5.Size` is exact, so a token that
+would not pack smaller is written raw and the descriptor says so — which means
+turning the flag on can never make a message larger.
+
+### Two regressions the root descriptor introduced, and the profile that found them
+
+Decode went from 27 ns to 45 the moment the root byte landed, which had nothing
+to do with the byte:
+
+- **Boxing.** `rootOf(data, dst)` took the record as an `any` so it could name
+  the type in an error. That allocated on every decode — to describe a failure
+  that does not happen. It now returns a bool and the caller formats the error
+  out of line.
+- **`plan.find` was a linear scan**, O(fields) per field and so O(fields²) per
+  record: 24% of the profile, the largest single line in it. It is now a
+  `[]int16` lookup table sized to the largest declared key, built with the plan.
+  This is the optimisation §5.2 of the plan has recommended from the start; it
+  took a profile to make it the obvious thing to do rather than the next thing.
+
+Both together: 45 ns back to 26, which is under where it started.
+
+## Against protocol buffers
+
+`bench/` is the comparison: the same fields with the same numbers on both sides,
+protobuf through its generated code — its fast path, not its reflective one —
+and colbin three ways.
+
+| one flat record, six fields | protobuf | colbin | |
+|---|---:|---:|---|
+| encode, reusing a buffer | 110 ns | **23.1** straight-line · 33.0 handle | **4.8× · 3.3×** |
+| encode, allocating | 126 ns | **70.3** | 1.8× |
+| decode | 103 ns | **54.6** straight-line · 60.6 handle · 75.1 façade | **1.9× · 1.7× · 1.4×** |
+| bytes | 32 B | **27 B** | |
+
+| one order, three nested lines | protobuf | colbin | |
+|---|---:|---:|---|
+| encode | 241 ns | **84.2** | **2.9×** |
+| decode | 458 ns | **264** | **1.7×** |
+| bytes | **49 B** | 55 B | |
+
+Faster everywhere, and smaller on the flat record. The nested record is six bytes
+larger, and the reason is worth writing down rather than rounding off.
+
+### Where the six bytes go, and the fix that is not written yet
+
+A struct holding a composite is forced to eight-bit keys, because a composite
+carries a byte length and only a wide descriptor has room for a class to hang it
+on. The keys themselves are 1, 3, 5, 6 — all of which four bits would hold. So
+every *scalar* in that struct pays a byte it does not need, to make room for the
+two fields that do.
+
+The format already has the answer and the implementation does not use it:
+§2.5 gives the narrow nibble a composite form, `[key:4][lw:2][k8:1][—:1]`,
+because a narrow reader takes the class from the schema and needs no class bits
+on the wire. Writing that would let a struct with nested fields stay narrow and
+close most of the gap.
+
+What *is* implemented, and was worth five of the eleven bytes it started at: the
+key width is per scope, so a nested run uses four-bit keys whenever its own ids
+allow, however wide its parent is. That is the `k8` bit in the `STRUCT`
+descriptor doing the job it was specified for.
+
+### Two optimisations found by profiling the comparison
+
+- **`Marshal` grew its buffer three times.** protobuf sizes a message before
+  writing it, which is why its `Marshal` is one allocation. A bound taken from
+  the plan — the root byte, plus the widest a fixed field can be, plus a little
+  for the variable ones — gets the same answer for every record without a pass
+  over the value. Three allocations to one, 95 ns to 83.
+- **It then resolved the plan twice**, once to size the buffer and once inside
+  `Append`. 83 ns to 68.
+
+### A negative result: the exact-width store
+
+`appendMagnitude` stores eight bytes and cuts back rather than storing exactly
+`width` through a switch. The over-store looked like the thing to fix when the
+allocation profile pointed at it, so it was replaced with a switch — and a
+six-field encode went from 23.0 ns to 30.5. The jump table costs more than the
+discarded stores, and the capacity the over-store leaves behind is wanted anyway
+by the next field. Reverted, with the number in the comment.
+
+The allocations it was blamed for were ordinary slice growth from a nil buffer,
+which is what the size hint above actually fixed.
+
+## Finishing the façade: tables, maps, and the narrow composite
+
+### A slice of structs picks its own layout, per value
+
+The row count is data, not type, so the plan cannot decide between a list of
+structs and a transposed table. The encoder does, at `tableThreshold` rows, and
+because the two are different descriptor classes the reader dispatches on what it
+finds rather than on anything it was told. That is the old standard-vs-compact
+mode decision made per field instead of per message.
+
+Measured on a six-field row: 16.9 bytes a row as a list at seven rows, 11.0 as a
+table at a thousand.
+
+Not every slice can be one. A column has to be a column *of* something, so a
+struct with a nested struct or a slice inside it stays row-wise however long it
+gets. That is a property of the element type and the plan resolves it once.
+
+The transposition buffers are held on a scratch and reserved once per table.
+Growing them column by column cost twenty-one allocations on a thousand-row
+table; reserving costs three.
+
+### Maps pay reflection, and the comment says so
+
+Every other field kind is reached by offset with no reflection left at encode
+time. A map cannot be — Go gives no way to walk or fill one through an unsafe
+pointer — so it uses `MapRange` and `SetMapIndex` and pays for them. That is the
+cost of the kind rather than an oversight: a map field is already a hash lookup
+per entry on both sides, and the reflection sits on top of something that was
+never going to be a strided store.
+
+Keys are strings or integers; values add floats and bools. A map of structs is
+refused with the field named, because silently dropping it would be worse than
+saying there is no form for it yet.
+
+### The narrow composite, and the seven bytes it was worth
+
+Until it, a struct holding any composite had to use eight-bit keys: the composite
+needed a byte length, a byte length needed a class, and a class needed the wide
+descriptor. Every *scalar* in that struct then paid a byte it did not need, to
+make room for the one or two fields that did.
+
+§2.5 said the narrow nibble could carry a composite — a narrow reader has the
+schema, so it already knows the shape and needs only the length. Implementing it
+took a four-field order with three nested lines from **55 bytes to 48**, against
+protobuf's 49, and dropped the nested encode from 84 ns to 72 with its last
+allocation.
+
+The detail nibble turned out to be bit for bit the wide one's. The wide
+descriptor spends its extra nibble on the class and K4 takes the class from the
+schema; everything below that is shared, including the length-widening backpatch.
+
+What it does not buy is skipping: a narrow reader still cannot step over a field
+it does not recognise, composite or not. That is K4's standing trade and the
+reason the wide width still exists.
+
+### A bug the narrow elements introduced
+
+`ElementUint(0)` wrote size code 0, which means *the value is one* — the code
+that makes a true bool a single byte. A scalar field never reaches it with a
+zero, because a zero field is omitted; a map's value is not a field, and zero is
+a value it can legitimately hold. A `map[string]bool` round-tripped every `false`
+as `true` until the element writer spent a byte to say so.
+
+The wide element writer never had the bug, because its inline form encodes zero
+as itself. Two implementations of the same idea, and only one of them met the
+case.
+
+### Against protocol buffers, finally
+
+| | protobuf | colbin | |
+|---|---:|---:|---|
+| flat record, encode | 110 ns | **24.5 ns** | 4.5× |
+| flat record, decode | 98 ns | **48.7 ns** | 2.0× |
+| flat record, bytes | 32 | **27** | |
+| nested, encode | 238 ns | **71.8 ns** | 3.3× |
+| nested, decode | 415 ns | **268 ns** | 1.5× |
+| nested, bytes | 49 | **48** | |
+
+Faster and smaller on both shapes, with packed5 off — which is what it was for.
+
+### Pointers: the one place a zero goes on the wire
+
+Every other field in this format expresses "zero" by not being there. A pointer
+cannot, and that is the whole difficulty: `nil` and `new(int32)` are different
+values, and the omit-zero rule would write neither of them.
+
+So the rule splits. A nil pointer is omitted, which costs nothing and reads back
+nil because the decoder zeroes the record first — absence was already the
+encoding for it. A **non-nil pointer to a zero value** writes an explicit zero:
+`Writer.Zero` for a number, `EmptyString` for a string. That is the only value in
+the format written solely to be distinguishable from its own absence.
+
+`Zero` writes an integer descriptor, not a typed one, and the float and bool
+readers both go through `Uint` — so one two-byte form covers `*int32`, `*bool`,
+`*float64` and the rest without a case per type. A `*string` is a zero-length
+blob.
+
+**Scalars only.** A pointer to a struct, a slice or a map is refused. Those carry
+a length already, so they *can* express absence — but a nil composite and an
+empty one are the same thing on this wire today, and deciding what `*[]T` nil
+means is a format question nothing has asked yet. Refusing is reversible;
+guessing is not.
+
+The cost to everything else is a `case` in four switches and a `fieldOp` the
+jump tables already had room for. A type with no pointer in it never reaches any
+of it.
+
+### The scalar walk, and the cost the narrow composite had been hiding
+
+Landing §2.5 made `writePlan` and `readField` handle composites on the narrow
+path, which they had not had to before — a composite used to force the wide
+width. Three new arms, each calling out of line and taking a scratch buffer.
+
+The bill went to every record, nested or not. On a ten-field flat record the
+handle encode went 18.7 → 23.9 ns and the decode 25.5 → 29.0, a fifth of both,
+for cases those types never reach. The hand-written path was untouched at 5.5 ns,
+which is what pinned the cost to the plan walk rather than to `wire` or to the
+machine.
+
+So the walk splits on a flag resolved with the plan. `simple` means no struct,
+slice-of-struct, map or pointer field, and a simple plan goes to `appendScalars`
+/ `readScalars` in scalars.go — the same switch with the out-of-line arms absent,
+so there is no scratch buffer and nothing to spill around a call.
+
+| | before | after |
+|---|---:|---:|
+| ten-field handle, encode | 23.9 ns | **19.0 ns** |
+| ten-field handle, decode | 29.0 ns | **22.4 ns** |
+| six-field handle, decode | 68.5 ns | **57.5 ns** |
+
+It is the two-key-widths argument again: a case the compiler can see is absent is
+a case it can stop paying for. It duplicates a switch, which is the same price
+`wire` pays to keep K4 and K8 apart, and for the same reason.
+
+Nested types are unchanged — they take the general walk, as they must.
+
+### Correcting the benchmark table
+
+The numbers this file and the README carried for the flat record (24.5 ns encode,
+48.7 ns decode) do not reproduce. They cannot: the *hand-written* straight-line
+encoder for that same six-field record measures 28.7 ns, so no reflective path
+was ever below it. The table has been replaced with a single sweep in which both
+sides are measured together, and the generated and handle paths are now listed
+separately rather than collapsed.
+
+colbin is still faster and smaller than protobuf on both shapes — 3.3× encode and
+1.8× decode on the flat record, 3.4× and 1.6× nested — which was the claim. The
+margin on decode was overstated.
+
+### Two integer encodings, one per key width
+
+K8 cost a whole byte more than K4 for the same small value, and the complaint
+that started this was that it should cost four bits more, not eight.
+
+It cannot. Four of those eight bits *are* the extra key bits — that is what 256
+ids means — and byte alignment cannot spend twelve. What was reclaimable is the
+descriptor waste on each side, and the two sides waste differently, so they are
+now encoded differently. The logic branches, which is the same trade `wire`
+already makes to keep the widths in separate files.
+
+**K4: the sign bit on an unsigned field.** A narrow reader has the schema, so it
+already knows the field is unsigned — and `Uint` was setting a `positive` bit
+that is *always* set, one bit of four, on the width most of this wire uses. The
+nibble is now a sixteen-code table: `0..7` is the value itself with no payload,
+`8..15` is a magnitude of one to eight bytes.
+
+Two things fall out. Small unsigned values become a single whole byte, key
+included. And the widths are exact — a seven-byte magnitude costs seven, where
+the signed form still rounds it up to eight because it has only three bits to
+name a width with.
+
+It also deleted a special case rather than adding one: `ElementUint(0)` used to
+spend two bytes explaining that it meant zero, because the signed code 0 means
+"the value is one". Zero is now just the code 0.
+
+**K8: a varint, but only when it wins.** A wide field has already spent a byte
+on its key, so its descriptor byte begins with none of the value in it — and
+class INT spends all four detail bits on a sign and a byte count. 300 therefore
+cost four bytes: key, descriptor, two magnitude bytes.
+
+The new form puts three value bits in the descriptor and continues seven at a
+time, under `SPECIAL` with detail bit 3 set. 300 costs three.
+
+The measurements are why it did not simply *replace* the byte-count form. Seven
+bits per byte loses to eight once a value is wide:
+
+| average bytes per field | byte-count | varint only | writer picks |
+|---|---:|---:|---:|
+| small ids 0..1000 | 3.60 | 3.34 | **3.34** |
+| deltas −1000..1000 | 3.67 | 3.41 | **3.42** |
+| random int32 | 5.99 | 6.49 | **5.99** |
+| random int64 | 9.99 | 10.97 | **9.99** |
+
+So both forms stay and the writer emits whichever is shorter. That makes the
+change strictly a saving — there is no value anywhere in ±2²² that got larger,
+and a test asserts it against the old size function directly.
+
+A signed field zigzags into the varint and an unsigned one does not, which would
+be ambiguous if anything read it without the schema. Nothing does: the same
+split is what K4 has always relied on. An unknown field is still skippable,
+because the varint is self-delimiting and sits under a class.
+
+**What it bought.** The nested order went from 48 bytes to **46**, against
+protobuf's 49. Encode and decode ratios did not move.
+
+**What it also did, unexpectedly.** The bitmap experiment in `bitmap.go` used to
+beat the narrow key on its best case — ten small fields, 13 bytes against 20.
+Reclaiming the sign bit put seven of those ten values entirely inside their
+nibble and narrow now ties it at 13, while still carrying a key per field. On
+the five-of-ten shape narrow now wins outright, 9 against 10. The bitmap's
+remaining argument is thinner than it was.
+
+### What the K4 nibble actually costs, measured properly
+
+A first reading said the unsigned nibble had made the hand-written ten-field
+encode 25% slower, 5.47 ns against 6.84. That was machine drift: re-running the
+*unchanged* code an hour later reproduced the slow number, and a 7 ns benchmark
+on a P/E-core laptop under load swings ±20% between runs.
+
+The honest measurement is an A/B in one process, both encodings writing the same
+record:
+
+| | bytes | ns |
+|---|---:|---:|
+| sign bit and size code | 11 | 5.25 |
+| unsigned nibble | **9** | 5.46 |
+
+**3% slower, 18% smaller.** One extra compare on the write path, and it is only
+one because the omit-zero test folds into the inline test — zero is a code the
+nibble carries, so `value <= 7` subsumes `value == 0` and the compare count is
+what it was.
+
+The lesson is about the method rather than the result: no absolute benchmark
+number in this repo is comparable against one taken in a different run. Where a
+claim is about a change rather than about protobuf, it needs both arms measured
+together.
+
+### Untagged structs, and the escape trap the wide side still had
+
+Benchmarking the three ways a caller can hand colbin a struct — tagged,
+untagged, packed5 — needed the untagged one to exist. It had been refused, with
+an error telling the caller to number the fields.
+
+The previous format's rule is restored, which is the one already-written readers
+expect: `fnv8` of the field name, then a linear probe upward past whatever is
+taken. Explicit ids are reserved in a first pass so a hash can never squat on a
+number somebody asked for; unnumbered fields probe in a second. A derived id
+lands anywhere in 0..255, so any type with one uses eight-bit keys. Numbering
+the fields is therefore also how a type asks for the narrow width.
+
+**What the benchmark then exposed.** The untagged record allocated where the
+tagged one did not — once on encode, twice on decode — and that had nothing to do
+with tagging. Two separate causes, both on the wide path only:
+
+1. `writeVec[T](w *Writer8, ...)` and `readVec[T](r *Reader8, ...)` put a pointer
+   in a *generic* signature. This is the exact trap recorded above for the narrow
+   writers, which were fixed by keeping pointers out and passing slices. The wide
+   twins were never fixed. `appendVec` now takes and returns the buffer; the
+   readers share framing through an ordinary method and decode through a generic
+   that sees only slices.
+
+2. The wide walk had no scalar fast path, so a flat wide record carried a
+   scratch buffer for a transposition it could never do — and because escape
+   analysis is per *variable*, declaring one writer for both branches heaped it
+   on the flat path too. The branches now declare their own.
+
+| untagged flat record | before | after |
+|---|---:|---:|
+| encode | 55.4 ns, 1 alloc | **41.3 ns, 0 allocs** |
+| decode | 80.2 ns, 2 allocs | **63.4 ns, 1 alloc** |
+
+The lesson is the one the narrow side already taught, and the reason it recurred
+is that the fix was applied where it was measured rather than everywhere it
+applied. A generic function taking a `*Writer` or a `*Reader` is a bug in this
+package, not a style preference.

@@ -1,38 +1,42 @@
 [package]
 name = "colbin"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-rust-version = "1.85"
-description = "Decoder for the colbin binary format (compact and standard modes)"
+rust-version = "1.88"
+description = "The colbin binary format: a byte-aligned [key][descriptor][payload] wire, a blocked column codec, and the packed5 string codec"
 license = "MIT"
 repository = "https://github.com/ivanjoz/colbin"
 readme = "README.md"
 
-# No runtime dependencies: this crate is a wire-format reader, and a format
-# reader that drags a dependency tree behind it is one more thing to keep in
-# step with whatever else the consumer links.
+# No runtime dependencies: this crate is a wire format, and a wire format that
+# drags a dependency tree behind it is one more thing to keep in step with
+# whatever else the consumer links.
 [dependencies]
 # The derive macro, which is a procedural macro and so has to be its own crate.
 # Optional: a consumer who does not derive links neither it nor the three
 # build-time crates it needs, which is what keeps the "no dependencies" promise
 # above true for everyone who does not opt in.
-colbin-derive = { version = "0.1", path = "derive", optional = true }
+colbin-derive = { version = "0.2", path = "derive", optional = true }
 
 [features]
 default = []
-# Only the macro is optional. `Colbin`, `TypedCodec` and the field reader and
-# writer it generates against are always present, so a caller can hand-write an
-# impl without pulling in a proc-macro toolchain.
+# Only the macro is optional. The `Colbin` trait and the readers and writers it
+# generates against are always present, so a caller can hand-write an impl
+# without pulling in a proc-macro toolchain.
 derive = ["dep:colbin-derive"]
 
-# The benchmark measures the typed path against the dynamic one, so it needs the
-# derive. Declared rather than cfg'd inside the file, so `--all-targets` without
-# the feature simply does not build it.
-[[example]]
-name = "bench"
+[dev-dependencies]
+# Only the cross-language vector corpus needs this; a consumer sees neither it
+# nor the corpus.
+serde_json = "1.0"
+
+# Every test drives the derive, which is what the generated encode and decode
+# are. Declared here rather than cfg'd inside each file, so `--all-targets`
+# without the feature simply does not build them.
+[[test]]
+name = "derive"
 required-features = ["derive"]
 
-[dev-dependencies]
-# Only the vector corpus needs these; a consumer of the decoder sees neither.
-base64 = "0.22"
-serde_json = "1.0"
+[[test]]
+name = "vectors"
+required-features = ["derive"]

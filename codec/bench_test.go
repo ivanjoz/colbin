@@ -1,291 +1,138 @@
 package codec
 
 import (
-	"fmt"
-	"math/rand"
-	"reflect"
 	"testing"
+
+	"github.com/ivanjoz/colbin/wire"
 )
 
-// --- random data generators (deterministic via the passed *rand.Rand) ---
+// The three ways to write the same record, so the cost of each layer is visible:
+// the wire package straight-line (what a generated codec emits), the reflection
+// façade over a cached plan, and compact mode through its typed handle.
 
-func randString(rng *rand.Rand, maxLen int) string {
-	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
-	n := rng.Intn(maxLen + 1)
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = alphabet[rng.Intn(len(alphabet))]
-	}
-	return string(b)
+type benchRecord struct {
+	CompanyID    int32  `cb:"0"`
+	UserID       int32  `cb:"1"`
+	RouteID      uint16 `cb:"2"`
+	CPU          uint16 `cb:"3"`
+	Inference    uint16 `cb:"4"`
+	ExtraAllowed bool   `cb:"5"`
+	Access1      uint16 `cb:"6"`
+	Access2      uint16 `cb:"7"`
+	Access3      uint16 `cb:"8"`
+	Access4      uint16 `cb:"9"`
 }
 
-// randScalarRecords builds ERP-ish rows: IDs drift upward by small steps (the
-// case adaptive varint columns are built for), plus small ages, occasional negatives,
-// short names and floats.
-func randScalarRecords(n int, rng *rand.Rand) []ScalarRecord {
-	recs := make([]ScalarRecord, n)
-	userID := int64(100000 + rng.Intn(1000))
-	for i := range recs {
-		userID += int64(rng.Intn(20)) // monotonic-ish -> tiny deltas
-		recs[i] = ScalarRecord{
-			UserID:    userID,
-			CompanyID: int32(1 + rng.Intn(8)), // few distinct values
-			Age:       int16(rng.Intn(100)),
-			Balance:   int32(rng.Intn(4000) - 2000), // signed column
-			Active:    rng.Intn(2) == 0,
-			Name:      randString(rng, 16),
-			Weight:    float32(rng.Intn(20000)) / 100,
-			Score:     rng.Float64() * 100,
-		}
-	}
-	return recs
+var benchCharge = benchRecord{
+	CompanyID: 7, UserID: 42, RouteID: 103, CPU: 5, Access1: 0x0139,
 }
 
-func randTag(rng *rand.Rand) Tag {
-	return Tag{Key: randString(rng, 8), Weight: int32(rng.Intn(200) - 50)}
+// appendChargeByHand is what a macro or a generator would emit: one call per
+// field, each picking the writer that matches the field's static Go type.
+func appendChargeByHand(buffer []byte, charge *benchRecord) []byte {
+	writer := wire.Writer{Buffer: buffer}
+	writer.U32(0, uint32(charge.CompanyID))
+	writer.U32(1, uint32(charge.UserID))
+	writer.U16(2, charge.RouteID)
+	writer.U16(3, charge.CPU)
+	writer.U16(4, charge.Inference)
+	writer.Bool(5, charge.ExtraAllowed)
+	writer.U16(6, charge.Access1)
+	writer.U16(7, charge.Access2)
+	writer.U16(8, charge.Access3)
+	writer.U16(9, charge.Access4)
+	return writer.Buffer
 }
 
-func randNestedRecords(n int, rng *rand.Rand) []NestedRecord {
-	recs := make([]NestedRecord, n)
-	base := int64(500)
-	// zero-length slices are left nil: colbin does not distinguish nil from an
-	// empty slice, so the generated data mirrors that (else DeepEqual would fail).
-	for i := range recs {
-		base += int64(rng.Intn(10))
-		var scores []int32
-		for j, m := 0, rng.Intn(7); j < m; j++ {
-			scores = append(scores, int32(rng.Intn(1000)))
-		}
-		var labels []string
-		for j, m := 0, rng.Intn(4); j < m; j++ {
-			labels = append(labels, randString(rng, 10))
-		}
-		var tags []Tag
-		for j, m := 0, rng.Intn(5); j < m; j++ {
-			tags = append(tags, randTag(rng))
-		}
-		var grid [][]int32
-		for j, m := 0, rng.Intn(4); j < m; j++ {
-			var row []int32
-			for k, mm := 0, rng.Intn(5); k < mm; k++ {
-				row = append(row, int32(rng.Intn(500)))
-			}
-			grid = append(grid, row)
-		}
-		recs[i] = NestedRecord{
-			ID: base, Scores: scores, Labels: labels,
-			Meta: randTag(rng), Tags: tags, Grid: grid,
-		}
-	}
-	return recs
-}
-
-// TestRandomRoundTrip guards the benchmark data path: random values (incl. large
-// deltas and negatives) must survive a colbin round-trip exactly.
-func TestRandomRoundTrip(t *testing.T) {
-	rng := rand.New(rand.NewSource(42))
-	scalars := randScalarRecords(500, rng)
-	data, err := Marshal(scalars)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var gotScalars []ScalarRecord
-	if err := Unmarshal(data, &gotScalars); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(scalars, gotScalars) {
-		t.Fatal("scalar random round-trip mismatch")
-	}
-
-	nested := randNestedRecords(500, rng)
-	data, err = Marshal(nested)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var gotNested []NestedRecord
-	if err := Unmarshal(data, &gotNested); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(nested, gotNested) {
-		t.Fatal("nested random round-trip mismatch")
-	}
-}
-
-// TestSizeReport logs encoded payload sizes on representative 1000-row batches.
-func TestSizeReport(t *testing.T) {
-	rng := rand.New(rand.NewSource(7))
-	scalars := randScalarRecords(1000, rng)
-	col, _ := Marshal(scalars)
-	t.Logf("scalar x1000: colbin=%d B", len(col))
-
-	nested := randNestedRecords(1000, rng)
-	col, _ = Marshal(nested)
-	t.Logf("nested x1000: colbin=%d B", len(col))
-}
-
-// --- benchmarks: throughput reported via b.SetBytes (encoded size) ---
-
-const benchN = 1000
-
-func BenchmarkAllZeroFloat64s(b *testing.B) {
-	for _, n := range []int{64, 256, 1024, 4096} {
-		vals := make([]float64, n)
-		b.Run(fmt.Sprintf("n%d", n), func(b *testing.B) {
-			for b.Loop() {
-				if !allZeroFloat64s(vals) {
-					b.Fatal("zero column reported non-zero")
-				}
-			}
-		})
-	}
-}
-
-func BenchmarkColbinEncodeScalar(b *testing.B) {
-	recs := randScalarRecords(benchN, rand.New(rand.NewSource(1)))
-	out, _ := Marshal(recs)
-	b.SetBytes(int64(len(out)))
+func BenchmarkAppendByHand(b *testing.B) {
+	buffer := make([]byte, 0, 64)
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		out, _ = Marshal(recs)
-	}
-	_ = out
-}
-
-func BenchmarkColbinDecodeScalar(b *testing.B) {
-	recs := randScalarRecords(benchN, rand.New(rand.NewSource(1)))
-	data, _ := Marshal(recs)
-	b.SetBytes(int64(len(data)))
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		var out []ScalarRecord
-		_ = Unmarshal(data, &out)
+	for b.Loop() {
+		buffer = appendChargeByHand(buffer[:0], &benchCharge)
 	}
 }
 
-func BenchmarkColbinEncodeNested(b *testing.B) {
-	recs := randNestedRecords(benchN, rand.New(rand.NewSource(1)))
-	out, _ := Marshal(recs)
-	b.SetBytes(int64(len(out)))
+func BenchmarkAppendReflected(b *testing.B) {
+	buffer := make([]byte, 0, 64)
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		out, _ = Marshal(recs)
-	}
-	_ = out
-}
-
-func BenchmarkColbinDecodeNested(b *testing.B) {
-	recs := randNestedRecords(benchN, rand.New(rand.NewSource(1)))
-	data, _ := Marshal(recs)
-	b.SetBytes(int64(len(data)))
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		var out []NestedRecord
-		_ = Unmarshal(data, &out)
+	for b.Loop() {
+		buffer, _ = Append(buffer[:0], &benchCharge)
 	}
 }
 
-// JSON mode, measured against the same fixtures: encoding costs the schema copy
-// on top of Marshal, and decoding trades the typed columns for maps of values.
-
-func BenchmarkColbinEncodeScalarJSONMode(b *testing.B) {
-	recs := randScalarRecords(benchN, rand.New(rand.NewSource(1)))
-	out, _ := MarshalJSON(recs)
-	b.SetBytes(int64(len(out)))
+func BenchmarkMarshal(b *testing.B) {
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		out, _ = MarshalJSON(recs)
+	for b.Loop() {
+		_, _ = Marshal(&benchCharge)
 	}
-	_ = out
 }
 
-func BenchmarkColbinDecodeScalarToAny(b *testing.B) {
-	recs := randScalarRecords(benchN, rand.New(rand.NewSource(1)))
-	data, _ := MarshalJSON(recs)
-	b.SetBytes(int64(len(data)))
+func BenchmarkUnmarshal(b *testing.B) {
+	message, _ := Marshal(&benchCharge)
+	back := benchRecord{}
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if _, err := DecodeAny(data); err != nil {
-			b.Fatal(err)
+	for b.Loop() {
+		_ = Unmarshal(message, &back)
+	}
+}
+
+func BenchmarkCodecAppend(b *testing.B) {
+	codec := MustCodec[benchRecord]()
+	buffer := make([]byte, 0, 64)
+	b.ReportAllocs()
+	for b.Loop() {
+		buffer = codec.Append(buffer[:0], &benchCharge)
+	}
+}
+
+func BenchmarkCodecUnmarshal(b *testing.B) {
+	codec := MustCodec[benchRecord]()
+	message := codec.Encode(&benchCharge)
+	back := benchRecord{}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = codec.Unmarshal(message, &back)
+	}
+}
+
+// readChargeByHand is the decode half of what a generator would emit.
+func readChargeByHand(message []byte, charge *benchRecord) error {
+	*charge = benchRecord{}
+	reader := wire.NewReader(message)
+	for reader.More() {
+		switch reader.Key() {
+		case 0:
+			charge.CompanyID = int32(reader.U32())
+		case 1:
+			charge.UserID = int32(reader.U32())
+		case 2:
+			charge.RouteID = reader.U16()
+		case 3:
+			charge.CPU = reader.U16()
+		case 4:
+			charge.Inference = reader.U16()
+		case 5:
+			charge.ExtraAllowed = reader.Bool()
+		case 6:
+			charge.Access1 = reader.U16()
+		case 7:
+			charge.Access2 = reader.U16()
+		case 8:
+			charge.Access3 = reader.U16()
+		case 9:
+			charge.Access4 = reader.U16()
+		default:
+			reader.Skip()
 		}
 	}
+	return reader.Err()
 }
 
-func BenchmarkColbinDecodeScalarToJSON(b *testing.B) {
-	recs := randScalarRecords(benchN, rand.New(rand.NewSource(1)))
-	data, _ := MarshalJSON(recs)
-	b.SetBytes(int64(len(data)))
+func BenchmarkReadByHand(b *testing.B) {
+	message := appendChargeByHand(nil, &benchCharge)
+	back := benchRecord{}
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if _, err := DecodeJSON(data); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkColbinDecodeNestedToJSON(b *testing.B) {
-	recs := randNestedRecords(benchN, rand.New(rand.NewSource(1)))
-	data, _ := MarshalJSON(recs)
-	b.SetBytes(int64(len(data)))
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if _, err := DecodeJSON(data); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-// Many small messages of one type, decoded in a loop -- the shape where the
-// per-call cost is the whole cost, and the one the per-type caches and the
-// column pools exist for. The batch benchmarks above amortise that away.
-
-func BenchmarkColbinDecodeSmallRepeated(b *testing.B) {
-	data, _ := Marshal(grantCorpus()[0].Grants)
-	b.SetBytes(int64(len(data)))
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		var out []grantRow
-		if err := Unmarshal(data, &out); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-// The same, through a Codec: the handle already holds the layout, so the
-// columnar path never goes back through reflect for it.
-func BenchmarkColbinDecodeSmallRepeatedCodec(b *testing.B) {
-	c := MustCodec[grantRow]()
-	data, _ := Marshal(grantCorpus()[0].Grants)
-	b.SetBytes(int64(len(data)))
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		var out []grantRow
-		if err := c.UnmarshalSlice(data, &out); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-// Small messages whose records each hold an array of structs, which re-enters
-// the sub-table once per column per message.
-func BenchmarkColbinDecodeSmallRepeatedNested(b *testing.B) {
-	data, _ := Marshal(grantCorpus())
-	b.SetBytes(int64(len(data)))
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		var out []grantHolder
-		if err := Unmarshal(data, &out); err != nil {
-			b.Fatal(err)
-		}
+	for b.Loop() {
+		_ = readChargeByHand(message, &back)
 	}
 }
