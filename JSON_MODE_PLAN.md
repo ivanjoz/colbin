@@ -75,19 +75,30 @@ through pointers into a known layout, and there is no layout here.
 
 ### 3.1 Root bytes
 
-Today:
+The root byte is an ordinary K8 descriptor whose class is STRUCT — class 5, so
+`1 101 dddd` — which is why every colbin message begins in **0xD0..0xDF**. That
+range is now reserved and documented in `codec/root.go`; the other 240 values
+are guaranteed never to be written, and belong to the application.
+
+Four detail bits, two allocated today:
 
 ```
-0xD0  narrow-key struct
-0xD8  wide-key struct        (0x08 = wide)
+0x08  wide     eight-bit keys inside
+0x04  schema   (this plan)
+0x02  —        unallocated
+0x01  —        unallocated
 ```
 
-Add one bit, `0x04`, meaning *a schema section precedes the body*:
+Taking `0x04` for *a schema section precedes the body*:
 
 ```
 0xD4  schema section, then a narrow-key struct
 0xDC  schema section, then a wide-key struct
 ```
+
+So a self-describing message is identified by its **first byte**, with no magic
+prefix and no length probe: `data[0] & 0x04 != 0`. `colbin.IsColbin` already
+separates colbin from an application's own framing.
 
 `rootOf` gains two cases and `Unmarshal` learns to step over a schema section it
 does not need — so **a schema-carrying message still decodes into the Go type**,
