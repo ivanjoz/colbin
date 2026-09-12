@@ -46,6 +46,27 @@ func Unmarshal(data []byte, dst any) error { return codec.Unmarshal(data, dst) }
 // another language. Reading them out of the tags by hand is how they drift.
 func FieldIDs(v any) (map[string]uint8, error) { return codec.FieldIDs(v) }
 
+// RootFirst and RootLast bound the first byte of every colbin message.
+//
+// A message always begins in 0xD0..0xDF, because the root is a struct and the
+// root descriptor is an ordinary descriptor with STRUCT in its class bits. The
+// other 240 values are guaranteed never to be written by colbin, so an
+// application may use them as its own framing — an envelope tag, a compression
+// marker, a protocol discriminator — and tell the two apart with IsColbin.
+//
+// Do not assume every byte *inside* the range is valid: twelve of the sixteen
+// are unassigned and a reader refuses them, which is the room the format has to
+// grow into.
+const (
+	RootFirst = codec.RootFirst
+	RootLast  = codec.RootLast
+)
+
+// IsColbin reports whether data begins with a byte in colbin's reserved range.
+// It is a dispatch check, not a validation: a message can start correctly and
+// still be truncated further in.
+func IsColbin(data []byte) bool { return codec.IsColbin(data) }
+
 // Codec is a handle for one type, with the plan resolved once and held. It is
 // what a hot path should use: encoding a record then costs neither the type
 // lookup nor the reflect entry that Marshal repeats on every call, and it

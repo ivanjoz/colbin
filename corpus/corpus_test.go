@@ -221,3 +221,86 @@ func TestSalesStraddleTheTableThreshold(t *testing.T) {
 	}
 	t.Logf("%d sales as a list, %d transposed into a table", short, long)
 }
+
+// TestEveryMessageStartsInTheReservedRange pins the guarantee an application
+// builds its own framing on: colbin never writes a first byte outside
+// 0xD0..0xDF, so every other value is free for a caller to claim.
+//
+// It runs over the corpus rather than over a handful of literals because the
+// range has to hold for every shape at once — narrow and wide keys, a
+// transposed table, a map, floats, an empty-ish record.
+func TestEveryMessageStartsInTheReservedRange(t *testing.T) {
+	built := Generate(Seed, Small)
+	seen := map[byte]string{}
+
+	encode := func(v any) []byte {
+		t.Helper()
+		data, err := colbin.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	check := func(table string, data []byte) {
+		t.Helper()
+		if !colbin.IsColbin(data) {
+			t.Fatalf("%s: first byte %#02x is outside %#02x..%#02x",
+				table, data[0], colbin.RootFirst, colbin.RootLast)
+		}
+		seen[data[0]] = table
+	}
+	for index := range built.Users {
+		check("users", encode(&built.Users[index]))
+	}
+	for index := range built.Products {
+		check("products", encode(&built.Products[index]))
+	}
+	for index := range built.Stores {
+		check("stores", encode(&built.Stores[index]))
+	}
+	for index := range built.Sales {
+		check("sales", encode(&built.Sales[index]))
+	}
+	for index := range built.Events {
+		check("events", encode(&built.Events[index]))
+	}
+	for index := range built.Metrics {
+		check("metrics", encode(&built.Metrics[index]))
+	}
+	// packed5 puts a type on the wide path, which is the other root byte.
+	colbin.SetPacked5(true)
+	for index := range built.Products {
+		check("products+packed5", encode(&built.Products[index]))
+	}
+	colbin.SetPacked5(false)
+
+	for root, table := range seen {
+		t.Logf("root %#02x written by %s", root, table)
+	}
+	if len(seen) < 2 {
+		t.Fatalf("only %d distinct root bytes: the corpus is not reaching both "+
+			"key widths, so this proves less than it looks", len(seen))
+	}
+}
+
+// TestNonColbinFirstBytesAreRejected is the other half: a byte an application
+// claimed must not be mistaken for a message.
+func TestNonColbinFirstBytesAreRejected(t *testing.T) {
+	body := colbin.MustCodec[Metric]().Encode(&Metric{SeriesID: 1, At: 2, Value: 3})
+	for value := range 256 {
+		first := byte(value)
+		data := append([]byte{first}, body[1:]...)
+		inRange := first >= colbin.RootFirst && first <= colbin.RootLast
+		if colbin.IsColbin(data) != inRange {
+			t.Fatalf("IsColbin disagrees with the range on %#02x", first)
+		}
+		if inRange {
+			continue
+		}
+		var into Metric
+		if err := colbin.Unmarshal(data, &into); err == nil {
+			t.Fatalf("%#02x decoded as a message; it is supposed to be free "+
+				"for an application to use", first)
+		}
+	}
+}

@@ -33,12 +33,13 @@ import (
 	"github.com/ivanjoz/colbin/wire"
 )
 
-// Root descriptors, from BYTE_ALIGNED_PLAN.md §2.1. Both are even and above
-// 0x90, which is what no message the old format wrote could begin with — so an
-// old reader rejects a new message rather than misparsing it.
+// Root descriptors, from BYTE_ALIGNED_PLAN.md §2.1. They are the STRUCT class of
+// an ordinary K8 descriptor, which is what puts every colbin message in
+// 0xD0..0xDF — see root.go for the reservation that follows from it, and for the
+// 240 first bytes an application may claim.
 const (
-	rootStructNarrow byte = 0xD0
-	rootStructWide   byte = 0xD8
+	rootStructNarrow byte = RootFirst
+	rootStructWide   byte = RootFirst | rootWide
 )
 
 // wide reports whether a plan must use eight-bit keys.
