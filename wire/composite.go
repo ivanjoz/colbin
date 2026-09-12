@@ -104,6 +104,19 @@ func appendCount(buffer []byte, count int) []byte {
 	return binary.LittleEndian.AppendUint32(append(buffer, elementSizeEscape), uint32(count))
 }
 
+// AppendLength writes a length the way this format writes every count and every
+// element length: one byte, escaping to four behind 0xFF. There is no varint
+// here or anywhere else, so reading one back is a compare and a load.
+//
+// It is exported for the schema section, which is a byte layout of colbin's own
+// outside any field framing and should not invent a second rule for a length —
+// see codec/schema.go.
+func AppendLength(buffer []byte, value int) []byte { return appendCount(buffer, value) }
+
+// ReadLength reverses AppendLength, returning the value and how many bytes it
+// occupied.
+func ReadLength(buffer []byte) (value, width int, ok bool) { return readCount(buffer) }
+
 // Close patches a composite's length. Every Open must have exactly one Close,
 // and they must nest.
 func (w *Writer8) Close(mark Mark) {

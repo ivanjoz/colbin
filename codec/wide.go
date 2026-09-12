@@ -40,6 +40,10 @@ import (
 const (
 	rootStructNarrow byte = RootFirst
 	rootStructWide   byte = RootFirst | rootWide
+	// The same two with a schema section in front of the body, which is what
+	// MarshalSelfDescribing writes. See schema.go.
+	rootStructNarrowSchema byte = RootFirst | rootSchema
+	rootStructWideSchema   byte = RootFirst | rootWide | rootSchema
 )
 
 // wide reports whether a plan must use eight-bit keys.
@@ -218,6 +222,12 @@ func rootOf(data []byte) (body []byte, wide, ok bool) {
 		return data[1:], false, true
 	case rootStructWide:
 		return data[1:], true, true
+	case rootStructNarrowSchema, rootStructWideSchema:
+		// A typed decode does not need the section — it has the Go type — so it
+		// steps over it and reads the body behind. That is what keeps a
+		// self-describing message an ordinary message to everyone else.
+		_, body, ok := splitSchemaSection(data[1:])
+		return body, data[0]&rootWide != 0, ok
 	default:
 		return nil, false, false
 	}

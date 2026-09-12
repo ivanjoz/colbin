@@ -104,7 +104,7 @@ func writeNarrowMapValue(writer *wire.Writer, kind mapKind, value reflect.Value)
 		writer.ElementInt(value.Int())
 	case mapUint:
 		writer.ElementUint(value.Uint())
-	case mapFloat:
+	case mapFloat32, mapFloat64:
 		writer.ElementUint(reverseFloatBits(value))
 	case mapBool:
 		if value.Bool() {
@@ -237,7 +237,7 @@ func readNarrowMapValue(reader *wire.Reader, kind mapKind, into reflect.Value) {
 		into.SetInt(reader.ElementInt())
 	case mapUint:
 		into.SetUint(reader.ElementUint())
-	case mapFloat:
+	case mapFloat32, mapFloat64:
 		setFloatFromReversed(into, reader.ElementUint())
 	case mapBool:
 		into.SetBool(reader.ElementUint() == 1)

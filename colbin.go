@@ -90,6 +90,71 @@ func NewCodec[T any]() (*Codec[T], error) { return codec.NewCodec[T]() }
 // programming error and there is nobody to return it to.
 func MustCodec[T any]() *Codec[T] { return codec.MustCodec[T]() }
 
+// Schema is a type described in bytes rather than in Go: what a reader without
+// the Go type needs to turn a message into JSON.
+//
+// The wire carries no type — that is where colbin's speed comes from — so a
+// browser, a `jq`-style tool or any dynamically typed client cannot name a field
+// or say whether a payload is a float or an integer. A schema is what gives it
+// those, and it is the same plan the encoder already resolves, written out.
+//
+// Send it once per connection and then send ordinary messages:
+//
+//	schema, _ := colbin.SchemaFor[Sale]()
+//	send(schema.Bytes())                      // once
+//	for _, sale := range sales {
+//	    send(colbin.Marshal(&sale))           // unchanged, and unchanged in size
+//	}
+//
+// and on the other side:
+//
+//	schema, _ := colbin.ParseSchema(sectionBytes)
+//	text, _ := colbin.ToJSON(schema, message)
+//
+// For a corpus Sale the section is 173 bytes against a mean body of 90, so
+// sending it per message would send the schema nearly twice over every time.
+// That is what MarshalSelfDescribing is for, and why it is not the default.
+type Schema = codec.Schema
+
+// SchemaFor describes T, which must be a struct the format accepts.
+func SchemaFor[T any]() (*Schema, error) { return codec.SchemaFor[T]() }
+
+// SchemaOf describes the type of v, which must be a struct or a pointer to one.
+func SchemaOf(v any) (*Schema, error) { return codec.SchemaOf(v) }
+
+// ParseSchema reads a section written by Schema.Bytes, or the one carried in
+// front of a self-describing message. Everything in it is checked: a section
+// arrives from a peer.
+func ParseSchema(section []byte) (*Schema, error) { return codec.ParseSchema(section) }
+
+// MarshalSelfDescribing encodes v with its schema section in front of it, so the
+// message stands alone. The body behind the section is byte for byte what
+// Marshal writes, and Unmarshal accepts either form.
+//
+// It is the wrong default for a stream — see Schema — and the right one for a
+// single document that has nowhere to put a schema of its own.
+func MarshalSelfDescribing(v any) ([]byte, error) { return codec.MarshalSelfDescribing(v) }
+
+// ToJSON renders a message as JSON using schema. Pass a nil schema for a message
+// written by MarshalSelfDescribing, which carries its own.
+//
+// The output is what encoding/json would have written for the same record: every
+// field is present, a []byte is base64, and the numbers are spelled the same
+// way. Two things it cannot match, because the wire cannot: an empty slice or
+// map is indistinguishable from a nil one and comes out as null, and a NaN or an
+// infinity is refused rather than written as null — use DecodeAny to keep one.
+func ToJSON(schema *Schema, data []byte) ([]byte, error) { return codec.ToJSON(schema, data) }
+
+// AppendJSON is ToJSON onto dst, for a caller with a buffer to reuse.
+func AppendJSON(dst []byte, schema *Schema, data []byte) ([]byte, error) {
+	return codec.AppendJSON(dst, schema, data)
+}
+
+// DecodeAny decodes a message into map[string]any and the shapes underneath it.
+// It is the slower of the two — the intermediate map is where the allocation is
+// — so prefer ToJSON when the answer is going out as text anyway.
+func DecodeAny(schema *Schema, data []byte) (any, error) { return codec.DecodeAny(schema, data) }
+
 // SetPacked5 turns the packed5 string encoding on or off for every encoder in
 // the process. It is **off** by default.
 //

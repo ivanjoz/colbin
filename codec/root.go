@@ -18,13 +18,13 @@ package codec
 //
 // # The reservation
 //
-//	0xD0 .. 0xDF   colbin. Sixteen detail combinations, two used today.
+//	0xD0 .. 0xDF   colbin. Sixteen detail combinations, four used today.
 //	everything else  never written by colbin, and rejected on read.
 //
 // Four detail bits, allocated:
 //
 //	0x08  wide     eight-bit keys inside, rather than four
-//	0x04  schema   a schema section precedes the body (see JSON_MODE_PLAN.md)
+//	0x04  schema   a schema section precedes the body (see schema.go)
 //	0x02  —        unallocated
 //	0x01  —        unallocated
 //
@@ -51,8 +51,11 @@ const (
 
 // Root detail bits, the low nibble of the root byte.
 const (
-	rootWide   byte = 0x08
-	rootSchema byte = 0x04 // reserved; not yet written. See JSON_MODE_PLAN.md.
+	rootWide byte = 0x08
+	// rootSchema says a schema section sits between this byte and the body, so
+	// that the message describes its own type. MarshalSelfDescribing writes it
+	// and rootOf steps over it. See schema.go.
+	rootSchema byte = 0x04
 )
 
 // IsColbin reports whether data begins with a byte in colbin's reserved range.
