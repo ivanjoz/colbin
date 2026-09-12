@@ -1,120 +1,164 @@
 package colbin_test
 
 import (
-	"reflect"
 	"testing"
 
 	"github.com/ivanjoz/colbin"
 )
 
-func TestPublicFacadeRoundTrip(t *testing.T) {
-	type row struct {
-		ID   int64
-		Name string
-	}
-	in := []row{{ID: 1, Name: "uno"}, {ID: 2, Name: "dos"}}
+// The façade, exercised through the public API only — which is the point of this
+// file: everything below it has its own tests, and this one is what a caller
+// actually touches.
 
-	data, err := colbin.Marshal(in)
+type charge struct {
+	CompanyID    int32    `cb:"0"`
+	UserID       int32    `cb:"1"`
+	RouteID      uint16   `cb:"2"`
+	Name         string   `cb:"3"`
+	Grants       []uint16 `cb:"4"`
+	ExtraAllowed bool     `cb:"5"`
+	Ratio        float64  `cb:"6"`
+}
+
+var sample = charge{
+	CompanyID: 7, UserID: 42, RouteID: 103,
+	Name: "responses.go:539", Grants: []uint16{0x0139, 0x008B},
+	ExtraAllowed: true, Ratio: 1.5,
+}
+
+func TestMarshalRoundTrip(t *testing.T) {
+	data, err := colbin.Marshal(&sample)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var out []row
-	if err := colbin.Unmarshal(data, &out); err != nil {
+	var back charge
+	if err := colbin.Unmarshal(data, &back); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(out, in) {
-		t.Fatalf("got %#v want %#v", out, in)
+	if back.CompanyID != sample.CompanyID || back.Name != sample.Name ||
+		back.Ratio != sample.Ratio || !back.ExtraAllowed ||
+		len(back.Grants) != 2 || back.Grants[0] != 0x0139 {
+		t.Fatalf("round-tripped as %+v", back)
 	}
 }
 
-func TestPublicFacadeJSONMode(t *testing.T) {
-	type row struct {
-		ID   int64  `json:"id"`
-		Name string `json:"name"`
-		Tags []string
-	}
-	in := []row{{ID: 1, Name: "uno", Tags: []string{"a"}}, {ID: 2, Name: "dos"}}
-
-	data, err := colbin.MarshalJSON(in)
+// A value, not a pointer, must work the same: the plan reads fields by offset,
+// so a non-addressable value is copied once into somewhere it can.
+func TestMarshalAcceptsAValue(t *testing.T) {
+	fromValue, err := colbin.Marshal(sample)
 	if err != nil {
 		t.Fatal(err)
 	}
-	text, err := colbin.DecodeJSON(data)
+	fromPointer, err := colbin.Marshal(&sample)
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = `[{"Tags":["a"],"id":1,"name":"uno"},{"Tags":null,"id":2,"name":"dos"}]`
-	if string(text) != want {
-		t.Fatalf("got  %s\nwant %s", text, want)
-	}
-	// The typed decoder still reads the same message.
-	var out []row
-	if err := colbin.Unmarshal(data, &out); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(out, in) {
-		t.Fatalf("got %#v want %#v", out, in)
-	}
-	// And the untyped one needs no Go type at all.
-	v, err := colbin.DecodeAny(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := v.([]any)[0].(map[string]any)["name"]; got != "uno" {
-		t.Fatalf("name = %v, want uno", got)
+	if string(fromValue) != string(fromPointer) {
+		t.Fatalf("value %x, pointer %x", fromValue, fromPointer)
 	}
 }
 
-// A struct numbered `cb:"1"`.. and driven through a cached Codec: the shape this
-// is built for, one record per message and many of them.
-type stats struct {
-	Quantity                int32 `cb:"1,quantity"`
-	QuantityPendingDelivery int32 `cb:"2,quantityPendingDelivery"`
-	SubQuantity             int16 `cb:"3,subQuantity"`
-	TotalAmount             int32 `cb:"4,totalAmount"`
+// An omitted field is a zero field, and the decoder clears the destination
+// rather than leaving whatever it held.
+func TestOmittedFieldsClearTheDestination(t *testing.T) {
+	data, err := colbin.Marshal(&charge{CompanyID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	back := sample // deliberately dirty
+	if err := colbin.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Name != "" || back.Grants != nil || back.ExtraAllowed || back.Ratio != 0 {
+		t.Fatalf("omitted fields left %+v", back)
+	}
+	if back.CompanyID != 1 {
+		t.Fatalf("the one set field read as %d", back.CompanyID)
+	}
 }
 
-var statsCodec = colbin.MustCodec[stats]()
-
-func TestPublicFacadeCodec(t *testing.T) {
-	records := []stats{
-		{Quantity: 480, QuantityPendingDelivery: 120, SubQuantity: 12, TotalAmount: 145900},
-		{Quantity: 1},
-		{},
-	}
-
-	buf := make([]byte, 0, 64)
-	for i, rec := range records {
+func TestAppendReusesTheBuffer(t *testing.T) {
+	buffer := make([]byte, 0, 128)
+	for range 3 {
 		var err error
-		if buf, err = statsCodec.Append(buf[:0], &rec); err != nil {
-			t.Fatal(err)
-		}
-
-		var out stats
-		if err := statsCodec.Unmarshal(buf, &out); err != nil {
-			t.Fatal(err)
-		}
-		if out != rec {
-			t.Fatalf("record %d: got %#v, want %#v", i, out, rec)
-		}
-		// The same bytes the package functions would have written and read.
-		want, err := colbin.Marshal(rec)
+		buffer, err = colbin.Append(buffer[:0], &sample)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(buf) != string(want) {
-			t.Fatalf("record %d: codec wrote %x, Marshal wrote %x", i, buf, want)
-		}
-		out = stats{}
-		if err := colbin.Unmarshal(buf, &out); err != nil {
-			t.Fatal(err)
-		}
-		if out != rec {
-			t.Fatalf("record %d via Unmarshal: got %#v, want %#v", i, out, rec)
+	}
+	var back charge
+	if err := colbin.Unmarshal(buffer, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Name != sample.Name {
+		t.Fatalf("round-tripped as %+v", back)
+	}
+}
+
+func TestCodecHandle(t *testing.T) {
+	handle := colbin.MustCodec[charge]()
+	message := handle.Encode(&sample)
+	var back charge
+	if err := handle.Unmarshal(message, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.RouteID != sample.RouteID {
+		t.Fatalf("round-tripped as %+v", back)
+	}
+	// The handle and the façade must agree byte for byte.
+	viaFacade, err := colbin.Marshal(&sample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(message) != string(viaFacade) {
+		t.Fatalf("handle %x, façade %x", message, viaFacade)
+	}
+}
+
+func TestFieldIDs(t *testing.T) {
+	ids, err := colbin.FieldIDs(charge{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]uint8{
+		"CompanyID": 0, "UserID": 1, "RouteID": 2, "Name": 3,
+		"Grants": 4, "ExtraAllowed": 5, "Ratio": 6,
+	} {
+		if ids[name] != want {
+			t.Fatalf("%s has id %d, want %d", name, ids[name], want)
 		}
 	}
+}
 
-	if _, err := colbin.NewCodec[[]stats](); err == nil {
-		t.Error("NewCodec on a non-struct returned no error")
+// The packed5 switch is a writer setting, so a message written with it on must
+// read back with it off and the other way round.
+func TestPacked5IsAWriterSetting(t *testing.T) {
+	if colbin.Packed5() {
+		t.Fatal("packed5 should be off by default")
+	}
+	defer colbin.SetPacked5(false)
+
+	off, err := colbin.Marshal(&sample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	colbin.SetPacked5(true)
+	if !colbin.Packed5() {
+		t.Fatal("SetPacked5(true) did not take")
+	}
+	on, err := colbin.Marshal(&sample)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	colbin.SetPacked5(false)
+	for label, message := range map[string][]byte{"off": off, "on": on} {
+		var back charge
+		if err := colbin.Unmarshal(message, &back); err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		if back.Name != sample.Name {
+			t.Fatalf("%s: name round-tripped as %q", label, back.Name)
+		}
 	}
 }

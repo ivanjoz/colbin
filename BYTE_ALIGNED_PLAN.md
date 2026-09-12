@@ -236,8 +236,8 @@ the same operation on the other end of the word. The reader knows which rule
 applies because it knows the field is a float — from the schema under K4, from
 the `ANY` type tag under K8. Two things fall out for free: `0.0` is omitted like
 every other zero, and a `float64` holding a value that is exactly a `float32` has
-29 zero low bits and trims to four bytes without anything being added to detect
-it.
+29 zero low bits — three whole bytes and five over — and trims to five without
+anything being added to detect it.
 
 Under K8, a **`LIST`'s elements carry a descriptor of their own**, which is how a
 list of structs gets a key width, a list of blobs gets an encoding, and a list of
@@ -368,7 +368,9 @@ Two things hold in every row:
 
 | class | name | 4-BIT KEY (K4) | 8-BIT KEY (K8) |
 |---|---|---|---|
-| 0 | `INT` `FLOAT` | `0.1–0.4` Key (0..15)<br>`0.5` Positive? 1 = magnitude, 0 = negative<br>`0.6–0.8` n: 0 → the value is 1 · 1–6 → n bytes · 7 → 8 bytes<br>`1.1–…` Magnitude, n bytes LE (absent when n = 0)<br>*a float instead writes its pattern big-endian, low zero bytes trimmed (§2.3)* | `0.1–0.8` Key (0..255)<br>`1.1` **0 = inline**<br>`1.2–1.8` Value, 0..127 — no payload<br>— or —<br>`1.1` **1 = explicit**<br>`1.2–1.4` Class `000`<br>`1.5` Positive?<br>`1.6–1.8` n, as K4<br>`2.1–…` Magnitude, n bytes LE |
+| 0 | `INT` `FLOAT`<br>**signed** | `0.1–0.4` Key (0..15)<br>`0.5` Positive? 1 = magnitude, 0 = negative<br>`0.6–0.8` n: 0 → the value is 1 · 1–6 → n bytes · 7 → 8 bytes<br>`1.1–…` Magnitude, n bytes LE (absent when n = 0)<br>*a float instead writes its pattern big-endian, low zero bytes trimmed (§2.3)* | `0.1–0.8` Key (0..255)<br>`1.1` **0 = inline**<br>`1.2–1.8` Value, 0..127 — no payload<br>— or —<br>`1.1` **1 = explicit**<br>`1.2–1.4` Class `000`<br>`1.5` Positive?<br>`1.6–1.8` n, as K4<br>`2.1–…` Magnitude, n bytes LE<br>— or the varint below, when it is shorter — |
+| 0 | `INT` `FLOAT`<br>**unsigned**<br>*(K4 only)* | `0.1–0.4` Key (0..15)<br>`0.5–0.8` code: 0–7 → **the value itself**, no payload · 8–15 → a magnitude of (code − 7) bytes<br>`1.1–…` Magnitude, (code − 7) bytes LE<br>*no sign bit: a K4 reader has the schema and knows the field is unsigned, so all sixteen codes carry information and the widths are exact — seven bytes costs seven* | *K8 has no separate unsigned form: its key already costs a byte, so the inline and varint forms below cover the same ground* |
+| 7 | `INT` **varint**<br>*(K8 only)* | *—* | `0.1–0.8` Key<br>`1.1` 1<br>`1.2–1.4` Class `111`<br>`1.5` **1 = varint**<br>`1.6–1.8` Value bits 0–2<br>`2.1–…` ( `x.1` More? · `x.2–x.8` next 7 value bits )+ — at least one byte<br>*raw when the field is unsigned, zigzag when signed; the writer picks this over class `000` only when it is shorter, so no value ever grew* |
 | 1 | `BLOB` | `0.1–0.4` Key<br>`0.5` More? 0 = 11-bit size · 1 = 32-bit size<br>`0.6–0.8` Size, high 3 bits *(More=0)*<br>`1.1–1.8` Size, low 8 bits *(More=0)* → 0..2047<br>`1.1–4.8` Size, u32 LE *(More=1)*<br>`then` Content, Size bytes<br>*enc comes from the schema, not the wire* | `0.1–0.8` Key<br>`1.1` 1<br>`1.2–1.4` Class `001`<br>`1.5–1.6` enc: 0 raw · 1 packed5 · 2 dict ref · 3 rsv<br>`1.7–1.8` lw: 0→1B · 1→2B · 2→4B · 3→8B<br>`2.1–…` Size, lw bytes LE<br>`then` Content, Size bytes |
 | 2 | `VEC` | `0.1–0.4` Key<br>`0.5` Positive? 0 = two's complement at width w<br>`0.6–0.7` w: 0→1B · 1→2B · 2→4B · 3→8B<br>`0.8` More? 0 = 8-bit count · 1 = 32-bit count<br>`1.1–1.8` Count *(More=0)* → 0..255<br>`1.1–4.8` Count, u32 LE *(More=1)*<br>`then` Count × w bytes, each element LE | `0.1–0.8` Key<br>`1.1` 1<br>`1.2–1.4` Class `010`<br>`1.5–1.6` w<br>`1.7` Positive?<br>`1.8` lw: 0→1B · 1→4B<br>`2.1–…` Byte length, lw bytes LE<br>`then` that many bytes; Count = length >> w |
 | 3 | `COL` | `0.1–0.4` Key<br>`0.5–0.6` kind: 0 = blocked (§3) · 1–3 rsv<br>`0.7–0.8` lw<br>`1.1–…` Byte length, lw bytes LE<br>`then` `[transform:2][zigzag:1][—:5]`, a 8-byte base if delta or FOR, then blocks | `0.1–0.8` Key<br>`1.1` 1<br>`1.2–1.4` Class `011`<br>`1.5–1.6` kind<br>`1.7–1.8` lw<br>`2.1–…` Byte length, lw bytes LE<br>`then` the column, as K4 |
@@ -376,7 +378,7 @@ Two things hold in every row:
 | 5 | `STRUCT` | `0.1–0.4` Key<br>`0.5` k8 — key width *inside*: 0 = 4-bit, 1 = 8-bit<br>`0.6–0.7` lw<br>`0.8` —<br>`1.1–…` Byte length, lw bytes LE<br>`then` a key run of exactly that many bytes | `0.1–0.8` Key<br>`1.1` 1<br>`1.2–1.4` Class `101`<br>`1.5` k8<br>`1.6–1.7` lw<br>`1.8` —<br>`2.1–…` Byte length, lw bytes LE<br>`then` a key run of exactly that many bytes |
 | 6 | `MAP`<br>(sub=0) | `0.1–0.4` Key<br>`0.5` sub = 0<br>`0.6` More? 0 = 10-bit count · 1 = 32-bit count<br>`0.7–0.8` Count, high 2 bits *(More=0)*<br>`1.1–1.8` Count, low 8 bits *(More=0)* → 0..1023<br>`1.1–4.8` Count, u32 LE *(More=1)*<br>`then` Count × ( key payload · value payload ), both shaped by the schema | `0.1–0.8` Key<br>`1.1` 1<br>`1.2–1.4` Class `110`<br>`1.5` sub = 0<br>`1.6` — *(a map has no key width: its keys are values)*<br>`1.7–1.8` lw<br>`2.1–…` Byte length, lw bytes LE<br>`…` Count, lw bytes LE<br>`then` Count × ( Desc·Payload key · Desc·Payload value ) |
 | 6 | `TABLE`<br>(sub=1) | `0.1–0.4` Key<br>`0.5` sub = 1<br>`0.6` k8 — width of the **column** keys<br>`0.7–0.8` lw<br>`1.1–…` Byte length, lw bytes LE<br>`…` Row count, lw bytes LE<br>`then` one keyed column per field, each a `VEC`, `COL` or `LIST` of Row count elements | `0.1–0.8` Key<br>`1.1` 1<br>`1.2–1.4` Class `110`<br>`1.5` sub = 1<br>`1.6` k8<br>`1.7–1.8` lw<br>`2.1–…` Byte length, lw bytes LE<br>`…` Row count, lw bytes LE<br>`then` the columns, as K4 |
-| 7 | `SPECIAL` | `0.1–0.4` Key<br>`0.5–0.8` detail: 0 null · 1 true · 2 false · 3 NaN · 4 +Inf · 5 −Inf · 6 present-but-empty · 7 unavailable · 8–13 rsv · 14 version escape, root only · 15 rsv<br>*no payload* | `0.1–0.8` Key<br>`1.1` 1<br>`1.2–1.4` Class `111`<br>`1.5–1.8` detail, as K4 but 7 = `ANY`<br>*`ANY`:* `2.1–2.8` type tag, then a full descriptor and its payload |
+| 7 | `SPECIAL` | `0.1–0.4` Key<br>`0.5–0.8` detail: 0 null · 1 true · 2 false · 3 NaN · 4 +Inf · 5 −Inf · 6 present-but-empty · 7 unavailable<br>*details 8–15 are the varint integer above — bit `.5` set means the rest is a value, not a code*<br>*no payload* | `0.1–0.8` Key<br>`1.1` 1<br>`1.2–1.4` Class `111`<br>`1.5–1.8` detail, as K4 but 7 = `ANY`<br>*`ANY`:* `2.1–2.8` type tag, then a full descriptor and its payload |
 
 Worked example — the benchmark record of `codec/minimal_bench_test.go`,
 `CompanyID=7 UserID=42 RouteID=103 CPU=5 Access1=0x0139`, five of ten fields set,
@@ -429,11 +431,17 @@ each stripped of its key. Skipping still works — the descriptors still carry
 their lengths — and so does naming an unknown field, because its key is its bit
 position.
 
-**It is smaller and faster at the same time.** Faster because there is no key to
-read and no key to look up: the decoder walks its plan and the set bits in
-lockstep, which is the O(f²) `find` scan of §5.2 deleted rather than optimised.
-Smaller whenever `1 + b < p` for `p` present fields, so with `b = 2` (keys 0..15)
-it wins from four present fields up.
+> **Measured, and half of this was wrong.** It is smaller — more so than the
+> arithmetic below predicted — and it is **slower**, by about 3.5×, after two
+> rounds of optimisation. The corrected numbers and what they mean for K4 are in
+> `RATIONALE.md`; this section is kept as written, with its error marked, because
+> the reasoning is what the measurement had to be run against.
+
+**It was expected to be smaller and faster at the same time.** Faster because
+there is no key to read and no key to look up: the decoder walks its plan and the
+set bits in lockstep, which is the O(f²) `find` scan of §5.2 deleted rather than
+optimised. ~~Smaller~~ — that part holds — whenever `1 + b < p` for `p` present
+fields, so with `b = 2` (keys 0..15) it wins from four present fields up.
 
 The arithmetic on the benchmark record — ten fields, five set, values 7, 42, 103,
 5 and 313:
@@ -490,8 +498,12 @@ against dense, and the writer picks per record for free). K4 is the third, it
 wins by one or two bytes on a narrow band, and it is the only one of the three
 that also costs the sixteen-field ceiling, `Skip`, and `ANY`.
 
-That is an argument, not a conclusion. It stays open in §8 until there is a
-corpus to weigh the band it wins on.
+That is an argument, not a conclusion — and the measurement settled it the other
+way. **K4 stays.** The bitmap, which was the case for dropping it, is 3.5× slower
+than the narrow key; the third framing costs a prologue per port, not a format,
+and all three are now implemented. K4 is what a latency-bound wire wants, the
+bitmap is what a size-bound one wants, and the keyed wide form is what a struct
+past sixteen fields or an unknown field wants.
 
 ---
 
