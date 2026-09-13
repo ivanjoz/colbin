@@ -154,6 +154,19 @@ export class JSONSink {
     this.jsonString(value)
   }
 
+  /**
+   * A string that was expanded into `scratch` rather than found in the message.
+   *
+   * A packed string has no bytes on the wire to hand back a view of — it is a
+   * unit stream, and the characters only exist once they are unpacked. So the
+   * decoder unpacks into a scratch buffer and this reads the span back out of
+   * it, which keeps the one copy that is genuinely needed and adds none.
+   */
+  textScratch(scratch: Writer, from: i32): void {
+    this.beforeValue()
+    this.jsonString(scratch.buf.subarray(from, scratch.len))
+  }
+
   text(value: string): void {
     this.beforeValue()
     this.utf8String(String.UTF8.encode(value))

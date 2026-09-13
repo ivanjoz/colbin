@@ -603,3 +603,55 @@ func TestJSONRecursiveTypes(t *testing.T) {
 	}
 	matchesEncodingJSON(t, value)
 }
+
+// TestPackedNarrowStringThroughEveryReader pins that a packed string under
+// four-bit keys reads back through every entry point, not only the typed one.
+//
+// packed5 used to force the wide key, so a narrow string could never be packed
+// and the schema walk's narrow path could read it with Bytes. Once the encoding
+// moved into the blob header's escape codes that stopped being true, and Marshal
+// began writing messages ToJSON and DecodeAny refused with "unassigned size
+// escape code" -- while Unmarshal, which had been updated, read them fine. A
+// message that only some of its own readers accept is the failure this package
+// is arranged to prevent.
+func TestPackedNarrowStringThroughEveryReader(t *testing.T) {
+	type narrowStrings struct {
+		Name string `cb:"0"`
+		City string `cb:"1"`
+	}
+
+	SetPacked5(true)
+	defer SetPacked5(false)
+
+	value := narrowStrings{Name: "Tin Light", City: "Arequipa"}
+	data, err := Marshal(&value)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if data[0]&0x08 != 0 {
+		t.Fatalf("this test needs a narrow root; got %#02x", data[0])
+	}
+
+	var back narrowStrings
+	if err := Unmarshal(data, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back != value {
+		t.Fatalf("unmarshal round trip differs: %+v", back)
+	}
+
+	schema, err := SchemaOf(&value)
+	if err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+	text, err := ToJSON(schema, data)
+	if err != nil {
+		t.Fatalf("to json: %v", err)
+	}
+	if got, want := string(text), `{"Name":"Tin Light","City":"Arequipa"}`; got != want {
+		t.Fatalf("to json\n have %s\n want %s", got, want)
+	}
+	if _, err := DecodeAny(schema, data); err != nil {
+		t.Fatalf("decode any: %v", err)
+	}
+}

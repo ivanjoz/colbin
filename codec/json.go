@@ -390,7 +390,16 @@ func (w *walker) narrowScalar(reader *wire.Reader, op fieldOp) {
 	case opFloat64:
 		w.floatValue(reader.F64(), 64)
 	case opString:
-		w.to.textBytes(reader.Bytes())
+		// PackedString rather than Bytes, for the reason the wide path says: the
+		// header's escape code carries the encoding, so this needs no setting
+		// and cannot be wrong about it.
+		//
+		// It used to be Bytes, and that was safe only because packed5 forced the
+		// wide key — a narrow string could never be packed. It no longer does,
+		// which made the case reachable and made this an error rather than a
+		// tidiness: Marshal wrote a message ToJSON refused. See
+		// TestPackedNarrowStringThroughEveryReader.
+		w.to.text(reader.PackedString())
 	case opBytes:
 		w.to.blob(reader.Bytes())
 	case opInt8s:

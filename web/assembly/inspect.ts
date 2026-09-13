@@ -307,7 +307,12 @@ class SpanWalker {
       reader.int()
     } else if (op == OP_FLOAT32 || op == OP_FLOAT64) {
       reader.uint()
-    } else if (op == OP_STRING || op == OP_BYTES) {
+    } else if (op == OP_STRING) {
+      // Not bytes(): a packed string names itself through an escape code the
+      // raw path refuses. Reading a string as though it were always raw is the
+      // bug this port found in Go's own schema walk.
+      reader.skipString()
+    } else if (op == OP_BYTES) {
       reader.bytes()
     } else if (op == OP_STRINGS) {
       reader.strings()
