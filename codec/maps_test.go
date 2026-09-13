@@ -6,13 +6,13 @@ import (
 )
 
 type withMaps struct {
-	Head   uint32             `cb:"0"`
-	Labels map[string]string  `cb:"1"`
-	Counts map[string]int64   `cb:"2"`
-	Ratios map[uint16]float64 `cb:"3"`
-	Flags  map[string]bool    `cb:"4"`
-	Empty  map[string]string  `cb:"5"`
-	Tail   string             `cb:"6"`
+	Head   uint32             `cb:"1"`
+	Labels map[string]string  `cb:"2"`
+	Counts map[string]int64   `cb:"3"`
+	Ratios map[uint16]float64 `cb:"4"`
+	Flags  map[string]bool    `cb:"5"`
+	Empty  map[string]string  `cb:"6"`
+	Tail   string             `cb:"7"`
 }
 
 func TestMapsRoundTrip(t *testing.T) {
@@ -45,16 +45,16 @@ func TestMapsRoundTrip(t *testing.T) {
 // know the field steps over it.
 // As with any composite, skipping an unknown map needs the wide width.
 type wideMaps struct {
-	Head   uint32            `cb:"0"`
-	Labels map[string]string `cb:"1"`
-	Counts map[string]int64  `cb:"2"`
-	Tail   string            `cb:"20"`
+	Head   uint32            `cb:"1"`
+	Labels map[string]string `cb:"2"`
+	Counts map[string]int64  `cb:"3"`
+	Tail   string            `cb:"21"`
 }
 
 func TestUnknownMapIsSkipped(t *testing.T) {
 	type narrower struct {
-		Head uint32 `cb:"0"`
-		Tail string `cb:"20"`
+		Head uint32 `cb:"1"`
+		Tail string `cb:"21"`
 	}
 	value := wideMaps{
 		Head:   7,
@@ -79,10 +79,10 @@ func TestUnknownMapIsSkipped(t *testing.T) {
 // named, rather than silently dropped.
 func TestUnsupportedMapsAreRefused(t *testing.T) {
 	type mapOfStructs struct {
-		M map[string]inner `cb:"0"`
+		M map[string]inner `cb:"1"`
 	}
 	type floatKeyed struct {
-		M map[float64]string `cb:"0"`
+		M map[float64]string `cb:"1"`
 	}
 	for _, value := range []any{mapOfStructs{}, floatKeyed{}} {
 		if _, err := Marshal(value); err == nil {

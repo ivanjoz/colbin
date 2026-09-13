@@ -293,8 +293,8 @@ func TestEveryMessageStartsInTheReservedRange(t *testing.T) {
 // wideKeyed exists only to reach the wide root byte: its second key is past the
 // fifteen a narrow key run can hold.
 type wideKeyed struct {
-	Name string `cb:"1"`
-	Code int32  `cb:"20"`
+	Name string `cb:"2"`
+	Code int32  `cb:"21"`
 }
 
 // TestNonColbinFirstBytesAreRejected is the other half: a byte an application

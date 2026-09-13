@@ -34,6 +34,11 @@ import "github.com/ivanjoz/colbin/codec"
 // A slice or map root is written as a one-field message holding it under key 0,
 // so the root is still a struct and the blob is still an ordinary message — see
 // codec/envelope.go for why that is worth two bytes.
+//
+// `any`, `[]any` and `map[string]any` are carried, and each such value says what
+// it is on the wire. A struct inside one has nowhere to be described here, so it
+// goes out as a map of its field names; MarshalSelfDescribing has a section to
+// name it in and writes it several times smaller. See codec/dynamic.go.
 func Marshal(v any) ([]byte, error) { return codec.Marshal(v) }
 
 // Append encodes v onto dst, which may be nil. It is Marshal without the
@@ -122,10 +127,15 @@ func MustCodec[T any]() *Codec[T] { return codec.MustCodec[T]() }
 // That is what MarshalSelfDescribing is for, and why it is not the default.
 type Schema = codec.Schema
 
-// SchemaFor describes T, which must be a struct the format accepts.
+// SchemaFor describes T, which must be a type the format accepts at the root: a
+// struct, or a slice or map it carries in an envelope.
+//
+// The envelope is framing and not content, so a schema for `[]Sale` describes a
+// document that is an array — ToJSON writes `[...]`, not `{"Value":[...]}`.
 func SchemaFor[T any]() (*Schema, error) { return codec.SchemaFor[T]() }
 
-// SchemaOf describes the type of v, which must be a struct or a pointer to one.
+// SchemaOf describes the type of v: a struct, a pointer to one, or a slice or
+// map at the root.
 func SchemaOf(v any) (*Schema, error) { return codec.SchemaOf(v) }
 
 // ParseSchema reads a section written by Schema.Bytes, or the one carried in
@@ -139,6 +149,11 @@ func ParseSchema(section []byte) (*Schema, error) { return codec.ParseSchema(sec
 //
 // It is the wrong default for a stream — see Schema — and the right one for a
 // single document that has nowhere to put a schema of its own.
+//
+// It is also the only delivery that carries a *struct inside an `any`* cheaply:
+// the section is the one place a record's fields can be described once instead
+// of per row, so `map[string]any{"rows": []Sale{...}}` written this way costs
+// what `[]Sale` costs, and written with Marshal costs several times more.
 func MarshalSelfDescribing(v any) ([]byte, error) { return codec.MarshalSelfDescribing(v) }
 
 // ToJSON renders a message as JSON using schema. Pass a nil schema for a message

@@ -76,11 +76,15 @@
 //! error, because anything the format could not express would have to be a value
 //! that does not fit in memory.
 
+use alloc::vec::Vec;
+
 mod bitmap;
+mod dynamic;
 mod narrow;
 mod wide;
 
 pub use bitmap::{BitmapReader, BitmapWriter, MAX_BITMAP_KEY};
+pub use dynamic::{Kind, kind_of};
 pub use narrow::{Reader, Writer};
 pub use wide::{Reader8, Writer8};
 

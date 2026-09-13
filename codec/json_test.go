@@ -147,22 +147,22 @@ func TestJSONNestedStructs(t *testing.T) {
 // basket puts its slice first so that a test can look straight at the field's
 // descriptor and see which layout the encoder chose.
 type basket struct {
-	Lines []line `cb:"1"`
-	ID    uint64 `cb:"2"`
+	Lines []line `cb:"2"`
+	ID    uint64 `cb:"3"`
 }
 
 type line struct {
-	ProductID uint32 `cb:"1"`
-	Quantity  uint32 `cb:"2"`
-	UnitCents int64  `cb:"3"`
-	Note      string `cb:"4"`
+	ProductID uint32 `cb:"2"`
+	Quantity  uint32 `cb:"3"`
+	UnitCents int64  `cb:"4"`
+	Note      string `cb:"5"`
 }
 
-// wideBasket is the same thing with an id past fifteen, which is what puts the
+// wideBasket is the same thing with an id past sixteen, which is what puts the
 // message on the eight-bit key path.
 type wideBasket struct {
-	Lines []line `cb:"1"`
-	ID    uint64 `cb:"20"`
+	Lines []line `cb:"2"`
+	ID    uint64 `cb:"21"`
 }
 
 func lines(count int) []line {
@@ -246,14 +246,14 @@ func TestJSONCannotTellAnEmptySliceFromANilOne(t *testing.T) {
 // not, so reading either as the other is silent nonsense rather than an error.
 // The table path is what this is really testing.
 type readings struct {
-	Rows []reading `cb:"1"`
-	Name string    `cb:"2"`
+	Rows []reading `cb:"2"`
+	Name string    `cb:"3"`
 }
 
 type reading struct {
-	Lat   float64 `cb:"1"`
-	Lon   float64 `cb:"2"`
-	Level float32 `cb:"3"`
+	Lat   float64 `cb:"2"`
+	Lon   float64 `cb:"3"`
+	Level float32 `cb:"4"`
 }
 
 func TestJSONFloatsThroughBothPaths(t *testing.T) {
@@ -375,8 +375,8 @@ func TestJSONMaps(t *testing.T) {
 // wire carries a 32-bit reversed pattern, and nothing but the section says so.
 func TestJSONFloat32MapValues(t *testing.T) {
 	type ratios struct {
-		Narrow map[string]float32 `cb:"1"`
-		Wide   map[string]float64 `cb:"2"`
+		Narrow map[string]float32 `cb:"2"`
+		Wide   map[string]float64 `cb:"3"`
 	}
 	matchesEncodingJSON(t, &ratios{
 		Narrow: map[string]float32{"a": 1.1},
@@ -516,13 +516,13 @@ func TestJSONRefusesAnUnknownNarrowKey(t *testing.T) {
 // width is for — the same evolution the Go decoder gets.
 func TestJSONSkipsAnUnknownWideKey(t *testing.T) {
 	type grown struct {
-		Head  uint32 `cb:"0"`
-		Extra string `cb:"1"`
-		Tail  string `cb:"20"`
+		Head  uint32 `cb:"1"`
+		Extra string `cb:"2"`
+		Tail  string `cb:"21"`
 	}
 	type older struct {
-		Head uint32 `cb:"0"`
-		Tail string `cb:"20"`
+		Head uint32 `cb:"1"`
+		Tail string `cb:"21"`
 	}
 	message := mustMarshal(t, &grown{Head: 7, Extra: "new", Tail: "tail"})
 	out, err := ToJSON(mustSchema(t, &older{}), message)
@@ -616,8 +616,8 @@ func TestJSONRecursiveTypes(t *testing.T) {
 // is arranged to prevent.
 func TestPackedNarrowStringThroughEveryReader(t *testing.T) {
 	type narrowStrings struct {
-		Name string `cb:"0"`
-		City string `cb:"1"`
+		Name string `cb:"1"`
+		City string `cb:"2"`
 	}
 
 	SetPacked5(true)

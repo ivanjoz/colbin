@@ -53,6 +53,26 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-bun-
 
+      # This module has no dependencies, and that is a promise to anyone who
+      # imports it rather than a happy accident. Benchmarks that need protobuf,
+      # CBOR or anything else live in github.com/ivanjoz/colbin-benchmarks.
+      #
+      # A test-only dependency would not be caught by "it still compiles": a
+      # consumer never downloads it, but it does become a version floor in their
+      # build and a line in their go.sum and their SBOM. So check the module
+      # graph itself, and then build with the proxy off to prove nothing is
+      # being fetched.
+      - name: zero dependencies
+        run: |
+          if [ -f go.sum ]; then
+            echo "go.sum exists, so something now has a dependency:"; cat go.sum; exit 1
+          fi
+          graph="$(go list -m all | tail -n +2)"
+          if [ -n "$graph" ]; then
+            echo "the module graph is no longer empty:"; echo "$graph"; exit 1
+          fi
+          GOFLAGS=-mod=readonly GOPROXY=off go build ./...
+
       # Cheapest signal first: none of it needs the browser toolchain.
       - run: go vet ./...
       - run: go test ./...

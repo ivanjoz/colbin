@@ -20,8 +20,8 @@ type bare struct {
 // assignKeys exists to get right: a declared id is reserved before any hash is
 // allowed to land on it.
 type mixed struct {
-	First  int32  `cb:"0"`
-	Second string `cb:"1"`
+	First  int32  `cb:"1"`
+	Second string `cb:"2"`
 	Third  uint32
 	Fourth bool
 }
@@ -111,13 +111,16 @@ func TestDeclaredIDsWinOverHashes(t *testing.T) {
 
 // TestAHashLandingOnATakenIDMovesOneDown is the collision rule itself, driven
 // through assignKeys because a struct tag cannot hold a computed number.
+//
+// assignKeys takes declared ids, which are one-based, and a hash produces a key,
+// which is not. So claiming the slot the hash wants means declaring it plus one.
 func TestAHashLandingOnATakenIDMovesOneDown(t *testing.T) {
-	claimed := fnv8("Second") // the slot the hash wants, claimed outright
+	claimed := fnv8("Second") // the *key* the hash wants, claimed outright
 	plan := &typePlan{fields: make([]planField, 2)}
 	err := plan.assignKeys(reflect.TypeOf(struct{}{}),
 		[]string{"Taken", "Second"},
 		[]string{"Taken", "Second"},
-		[]int{int(claimed), -1})
+		[]int{int(claimed) + 1, noFieldID})
 	if err != nil {
 		t.Fatal(err)
 	}

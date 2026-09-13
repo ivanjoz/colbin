@@ -59,6 +59,11 @@ const maxSchemaDepth = 128
 type sink interface {
 	beginObject()
 	key(name string)
+	// keyBytes is key for a name the walk is holding as a sub-slice of the
+	// message, which every entry of a dynamic map is. It is textBytes' reason:
+	// the JSON sink escapes straight out of the message and never makes the Go
+	// string at all.
+	keyBytes(name []byte)
 	endObject()
 	beginArray()
 	endArray()
@@ -82,8 +87,13 @@ type sink interface {
 
 // walker carries the sink, the first failure and the depth. One per message.
 type walker struct {
-	to    sink
-	err   error
+	to  sink
+	err error
+	// plans is the schema's struct table, which a dynamic value indexes into: a
+	// TYPED tag names a struct by number rather than carrying one. Empty when
+	// the walk came from a plan with no table behind it, which is only possible
+	// for a schema that cannot hold a dynamic value either.
+	plans []*typePlan
 	depth int
 }
 
@@ -128,13 +138,13 @@ func (set *fieldSet) has(index int) bool { return set[index>>6]&(1<<uint(index&6
 // value that was missing and one that was not a number. DecodeAny hands them
 // back as they are.
 func AppendJSON(dst []byte, schema *Schema, data []byte) ([]byte, error) {
-	plan, body, wide, err := resolveSchema(schema, data)
+	resolved, body, wide, err := resolveSchema(schema, data)
 	if err != nil {
 		return nil, err
 	}
 	out := jsonSink{buffer: dst}
-	walk := walker{to: &out}
-	walk.message(plan, body, wide)
+	walk := walker{to: &out, plans: resolved.plans}
+	walk.root(resolved.plan, body, wide)
 	if walk.err != nil {
 		return nil, walk.err
 	}
@@ -157,13 +167,13 @@ func ToJSON(schema *Schema, data []byte) ([]byte, error) {
 //
 // Unlike AppendJSON it is faithful to a non-finite float, which JSON cannot be.
 func DecodeAny(schema *Schema, data []byte) (any, error) {
-	plan, body, wide, err := resolveSchema(schema, data)
+	resolved, body, wide, err := resolveSchema(schema, data)
 	if err != nil {
 		return nil, err
 	}
 	out := anySink{}
-	walk := walker{to: &out}
-	walk.message(plan, body, wide)
+	walk := walker{to: &out, plans: resolved.plans}
+	walk.root(resolved.plan, body, wide)
 	if walk.err != nil {
 		return nil, walk.err
 	}
@@ -172,7 +182,7 @@ func DecodeAny(schema *Schema, data []byte) (any, error) {
 
 // resolveSchema finds the plan and the body: from the schema the caller handed
 // in, or from the message's own section when there is none.
-func resolveSchema(schema *Schema, data []byte) (plan *typePlan, body []byte, wide bool, err error) {
+func resolveSchema(schema *Schema, data []byte) (resolved *Schema, body []byte, wide bool, err error) {
 	if len(data) == 0 {
 		return nil, nil, false, errNoSection(data)
 	}
@@ -183,7 +193,7 @@ func resolveSchema(schema *Schema, data []byte) (plan *typePlan, body []byte, wi
 				"colbin: byte 0 is %#02x, which is not a root descriptor this version writes",
 				data[0])
 		}
-		return schema.plan, body, wide, nil
+		return schema, body, wide, nil
 	}
 	if data[0] != rootStructNarrowSchema && data[0] != rootStructWideSchema {
 		return nil, nil, false, errNoSection(data)
@@ -196,10 +206,61 @@ func resolveSchema(schema *Schema, data []byte) (plan *typePlan, body []byte, wi
 	if err != nil {
 		return nil, nil, false, err
 	}
-	return parsed.plan, body, data[0]&rootWide != 0, nil
+	return parsed, body, data[0]&rootWide != 0, nil
 }
 
-// message walks a whole record at whichever key width the root declared.
+// root walks the outermost run, which is the only place an envelope can be.
+//
+// A slice or a map at the root was wrapped in a one-field struct, because the
+// root of a colbin message is a struct and nothing else (envelope.go). The
+// section says so, so unwrapping is reading a fact rather than guessing at a
+// field name — and the wrapper is framing rather than content, so the document
+// is the array, not `{"rows":[...]}`.
+//
+// Only here, and never in `message`: a nested def carrying the flag is a section
+// from somewhere else being strange, and the flag says something about the root
+// of a document rather than about a struct.
+func (w *walker) root(plan *typePlan, body []byte, wide bool) {
+	if !plan.envelope || len(plan.fields) != 1 {
+		w.message(plan, body, wide)
+		return
+	}
+	w.envelopeRun(plan, body, wide)
+}
+
+// envelopeRun writes the wrapper's one field as the document itself: no object
+// around it and no key in front of it.
+//
+// A key that is not the one the section declares leaves the field's zero, rather
+// than failing. That is what an absent key means everywhere else in this walk,
+// and it is what the Rust and browser ports do — three readers disagreeing about
+// a malformed message would be worse than any of the three answers.
+func (w *walker) envelopeRun(plan *typePlan, body []byte, wide bool) {
+	if !w.enter() {
+		return
+	}
+	defer w.leave()
+	field := &plan.fields[0]
+	if wide {
+		reader := wire.NewReader8(body)
+		if reader.More() && reader.Key() == field.key {
+			w.wideValue(&reader, field)
+		} else {
+			w.zero(field)
+		}
+		w.fail(reader.Err())
+		return
+	}
+	reader := wire.NewReader(body)
+	if reader.More() && reader.Key() == field.key {
+		w.narrowValue(&reader, field)
+	} else {
+		w.zero(field)
+	}
+	w.fail(reader.Err())
+}
+
+// message walks a whole record at whichever key width the run declared.
 func (w *walker) message(plan *typePlan, body []byte, wide bool) {
 	if wide {
 		w.wideRun(plan, body)
@@ -369,6 +430,10 @@ func (w *walker) narrowValue(reader *wire.Reader, field *planField) {
 	case opPointer:
 		w.narrowScalar(reader, field.elemOp)
 	default:
+		// opAny and opAnys land here and are refused by errUnwalkableOp, which is
+		// right: a dynamic value names its own class and four descriptor bits
+		// have no room for one, so a narrow run cannot hold one. A plan with one
+		// goes wide, so this is only reachable from a section somewhere else.
 		w.narrowScalar(reader, field.op)
 	}
 }
@@ -446,6 +511,14 @@ func (w *walker) wideValue(reader *wire.Reader8, field *planField) {
 		w.wideMap(reader, field)
 	case opPointer:
 		w.wideScalar(reader, field.elemOp)
+	case opAny, opAnys:
+		// The key is a field's and everything behind it is a key-less value's,
+		// so the cursor steps once and the dynamic walk takes it from there.
+		if reader.Payload() {
+			w.dynamicValue(reader)
+		} else {
+			w.fail(reader.Err())
+		}
 	default:
 		w.wideScalar(reader, field.op)
 	}
@@ -569,7 +642,17 @@ func (w *walker) wideList(reader *wire.Reader8, field *planField) {
 		w.fail(reader.Err())
 		return
 	}
-	if field.sub == nil {
+	w.structList(count, &elements, field.sub)
+}
+
+// structList walks an opened list of struct elements.
+//
+// It is split from wideList because a dynamic value reaches the same run by a
+// different door — a TYPED tag names the plan, where a field's descriptor comes
+// with one — and the rows behind both doors are byte for byte the same. See
+// dynamic.go.
+func (w *walker) structList(count int, elements *wire.Reader8, plan *typePlan) {
+	if plan == nil {
 		w.fail(errNoSubSchema)
 		return
 	}
@@ -584,7 +667,7 @@ func (w *walker) wideList(reader *wire.Reader8, field *planField) {
 			w.fail(elements.Err())
 			return
 		}
-		w.body(field.sub, body, wideKeys)
+		w.body(plan, body, wideKeys)
 		if w.err != nil {
 			return
 		}
@@ -673,7 +756,12 @@ func (w *walker) wideTable(reader *wire.Reader8, field *planField) {
 		w.fail(reader.Err())
 		return
 	}
-	sub := field.sub
+	w.structTable(rows, &columns, field.sub)
+}
+
+// structTable is wideTable over an opened one, for the reason structList is
+// split out: a dynamic value reaches the same columns through a TYPED tag.
+func (w *walker) structTable(rows int, columns *wire.Reader8, sub *typePlan) {
 	if sub == nil {
 		w.fail(errNoSubSchema)
 		return
@@ -861,6 +949,10 @@ func (w *walker) wideMap(reader *wire.Reader8, field *planField) {
 			w.floatValue(float64FromReversed(entries.ElementUint()), 64)
 		case mapBool:
 			w.to.boolean(entries.ElementUint() == 1)
+		case mapAny:
+			// The entries of a `map[string]any`, which say what they are one at a
+			// time rather than once in the schema. See dynamic.go.
+			w.dynamicValue(&entries)
 		}
 		if entries.Err() != nil {
 			w.fail(entries.Err())

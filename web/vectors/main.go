@@ -61,84 +61,84 @@ import (
 // Scalars is every scalar the format carries, so that one message exercises
 // every integer width, both float widths, a string and a blob.
 type Scalars struct {
-	Flag   bool    `cb:"0"`
-	Tiny   int8    `cb:"1"`
-	Small  int16   `cb:"2"`
-	Medium int32   `cb:"3"`
-	Large  int64   `cb:"4"`
-	Byte   uint8   `cb:"5"`
-	Half   uint16  `cb:"6"`
-	Word   uint32  `cb:"7"`
-	Giant  uint64  `cb:"8"`
-	Single float32 `cb:"9"`
-	Double float64 `cb:"10"`
-	Text   string  `cb:"11"`
-	Blob   []byte  `cb:"12"`
+	Flag   bool    `cb:"1"`
+	Tiny   int8    `cb:"2"`
+	Small  int16   `cb:"3"`
+	Medium int32   `cb:"4"`
+	Large  int64   `cb:"5"`
+	Byte   uint8   `cb:"6"`
+	Half   uint16  `cb:"7"`
+	Word   uint32  `cb:"8"`
+	Giant  uint64  `cb:"9"`
+	Single float32 `cb:"10"`
+	Double float64 `cb:"11"`
+	Text   string  `cb:"12"`
+	Blob   []byte  `cb:"13"`
 }
 
 // Arrays is the VEC class at every element width, plus the string array, which
 // is a different shape again.
 type Arrays struct {
-	Tiny     []int8   `cb:"0"`
-	Small    []int16  `cb:"1"`
-	Medium   []int32  `cb:"2"`
-	Large    []int64  `cb:"3"`
-	Unsigned []uint32 `cb:"4"`
-	Texts    []string `cb:"5"`
+	Tiny     []int8   `cb:"1"`
+	Small    []int16  `cb:"2"`
+	Medium   []int32  `cb:"3"`
+	Large    []int64  `cb:"4"`
+	Unsigned []uint32 `cb:"5"`
+	Texts    []string `cb:"6"`
 }
 
 // Optionals is the one value in the format written solely to say it is there: a
 // nil pointer costs nothing, and a pointer to a zero writes an explicit zero.
 type Optionals struct {
-	Name  *string  `cb:"0"`
-	Count *int32   `cb:"1"`
-	Ratio *float64 `cb:"2"`
-	Flag  *bool    `cb:"3"`
+	Name  *string  `cb:"1"`
+	Count *int32   `cb:"2"`
+	Ratio *float64 `cb:"3"`
+	Flag  *bool    `cb:"4"`
 }
 
 // Line and Order are the two composite shapes a slice of structs takes: a LIST
 // while there are few of them, a TABLE once there are enough to amortise the
 // per-column framing.
 type Line struct {
-	SKU   string `cb:"0"`
-	Qty   uint16 `cb:"1"`
-	Cents int64  `cb:"2"`
+	SKU   string `cb:"1"`
+	Qty   uint16 `cb:"2"`
+	Cents int64  `cb:"3"`
 }
 
 type Order struct {
-	ID    uint32 `cb:"0"`
-	Note  string `cb:"1"`
-	Lines []Line `cb:"2"`
+	ID    uint32 `cb:"1"`
+	Note  string `cb:"2"`
+	Lines []Line `cb:"3"`
 }
 
 // Cell is Line with no string in it, which is what lets a slice of it be
 // transposed: one string field would disqualify the whole table.
 type Cell struct {
-	ProductID uint32 `cb:"0"`
-	Qty       uint32 `cb:"1"`
-	Cents     int64  `cb:"2"`
+	ProductID uint32 `cb:"1"`
+	Qty       uint32 `cb:"2"`
+	Cents     int64  `cb:"3"`
 }
 
 type Sheet struct {
-	ID    uint32 `cb:"0"`
-	Cells []Cell `cb:"1"`
+	ID    uint32 `cb:"1"`
+	Cells []Cell `cb:"2"`
 }
 
 // Maps holds one entry each, deliberately. A Go map has no iteration order, so
 // a map with two entries does not encode to stable bytes and cannot be a
 // vector — the module still has to read them, which the decode side covers.
 type Maps struct {
-	Labels map[string]string `cb:"0"`
-	Counts map[int32]int64   `cb:"1"`
+	Labels map[string]string `cb:"1"`
+	Counts map[int32]int64   `cb:"2"`
 }
 
 // Wide has an id past fifteen, which — now that packed5 is out of the module
 // (REFACTOR_PLAN.md §4.4) — is the only thing that puts a type on the eight-bit
 // key path.
 type Wide struct {
-	First uint32 `cb:"0"`
-	Text  string `cb:"1"`
-	Far   int64  `cb:"200"`
+	First uint32 `cb:"1"`
+	Text  string `cb:"2"`
+	Far   int64  `cb:"201"`
 }
 
 // Packed is what the opt-in string encoding is for: short strings of letters,
@@ -146,30 +146,30 @@ type Wide struct {
 // packed5 no longer forces the wide key, which is what makes the narrow blob
 // header's escape codes worth having.
 type Packed struct {
-	Name    string `cb:"0"`
-	SKU     string `cb:"1"`
-	City    string `cb:"2"`
-	Note    string `cb:"3"`
-	Mixed   string `cb:"4"`
-	Raw     string `cb:"5"`
-	Upper   string `cb:"6"`
-	Numbers string `cb:"7"`
+	Name    string `cb:"1"`
+	SKU     string `cb:"2"`
+	City    string `cb:"3"`
+	Note    string `cb:"4"`
+	Mixed   string `cb:"5"`
+	Raw     string `cb:"6"`
+	Upper   string `cb:"7"`
+	Numbers string `cb:"8"`
 }
 
 // PackedWide is Packed with an id past fifteen, so the same strings travel under
 // eight-bit keys and through the descriptor's enc field rather than the blob
 // header's escape codes.
 type PackedWide struct {
-	Name string `cb:"0"`
-	SKU  string `cb:"1"`
-	Far  string `cb:"200"`
+	Name string `cb:"1"`
+	SKU  string `cb:"2"`
+	Far  string `cb:"201"`
 }
 
 // Nested is a struct inside a struct, which stays a key run rather than
 // becoming anything columnar.
 type Nested struct {
-	ID    uint32 `cb:"0"`
-	Inner Line   `cb:"1"`
+	ID    uint32 `cb:"1"`
+	Inner Line   `cb:"2"`
 }
 
 // --- output ------------------------------------------------------------------

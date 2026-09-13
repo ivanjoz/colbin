@@ -23,10 +23,16 @@ package codec
 //
 // # What a key and a value may be
 //
-// Strings and integers as keys, and those plus floats and bools as values.
-// Anything else is refused at plan time with the field named, because a map of
-// structs is a shape this has no form for yet and silently dropping it would be
-// worse than saying so.
+// Strings and integers as keys, and those plus floats, bools and `any` as
+// values. Anything else is refused at plan time with the field named, because
+// silently dropping a shape is worse than saying so.
+//
+// `any` is the escape hatch and the expensive one: an entry of it carries its
+// own type on the wire (dynamic.go), which is what a `map[string]any` needs and
+// what a map with a known value type should not pay for. A dynamic value only
+// exists at eight key bits, so the two writers below are not symmetric — the
+// narrow one has no mapAny arm and cannot be reached with one, because a plan
+// holding a dynamic field goes wide.
 
 import (
 	"fmt"
@@ -55,6 +61,9 @@ const (
 	mapFloat64
 	mapBool
 	mapFloat32
+	// mapAny is a value with no declared type: every entry says what it is. It
+	// is what makes `map[string]any` carriable. See dynamic.go.
+	mapAny
 
 	// mapKindCount bounds the block, so a section naming a kind this version
 	// does not assign is refused.
@@ -85,6 +94,17 @@ func mapKindOf(t reflect.Type, what string) (mapKind, error) {
 			return 0, fmt.Errorf("a bool is not a map key this format carries")
 		}
 		return mapBool, nil
+	case reflect.Interface:
+		// A key has to be renderable as a name, and a dynamic one could be a list
+		// as easily as a string — so `map[any]T` is refused where `map[K]any` is
+		// carried.
+		if what == "key" {
+			return 0, fmt.Errorf("a map key has to have a type, and `any` does not")
+		}
+		if err := dynamicInterface(t); err != nil {
+			return 0, err
+		}
+		return mapAny, nil
 	}
 	return 0, fmt.Errorf("a map %s of %s is not carried", what, t)
 }
@@ -105,16 +125,41 @@ func mapOpFor(fieldType reflect.Type) (keyKind, valueKind mapKind, err error) {
 
 // appendMapField writes a map, and nothing at all when it is empty — an absent
 // key means an empty map, exactly as it means a zero scalar.
-func appendMapField(writer *wire.Writer8, field *planField, at unsafe.Pointer) {
+func appendMapField(writer *wire.Writer8, field *planField, at unsafe.Pointer, buf *scratch) {
 	value := reflect.NewAt(field.sliceType, at).Elem()
 	count := value.Len()
 	if count == 0 {
+		return
+	}
+	if field.valueKind == mapAny {
+		// A dynamic map is written in key order, which an ordinary one is not.
+		// See sortedKeys: without it the same value encodes differently every
+		// time, and no two implementations can be pinned against each other.
+		appendDynamicMapField(writer, field, value, buf)
 		return
 	}
 	mark := writer.OpenMap(field.key, count)
 	for entries := value.MapRange(); entries.Next(); {
 		writeMapValue(writer, field.keyKind, entries.Key())
 		writeMapValue(writer, field.valueKind, entries.Value())
+	}
+	writer.Close(mark)
+}
+
+// appendDynamicMapField writes a map whose values have no declared type.
+func appendDynamicMapField(
+	writer *wire.Writer8, field *planField, value reflect.Value, buf *scratch,
+) {
+	if !buf.enter() {
+		return
+	}
+	defer buf.leave()
+	keys := value.MapKeys()
+	sortMapKeys(keys)
+	mark := writer.OpenMap(field.key, len(keys))
+	for _, key := range keys {
+		writeMapValue(writer, field.keyKind, key)
+		appendAnyReflect(writer, value.MapIndex(key), buf)
 	}
 	writer.Close(mark)
 }
@@ -142,7 +187,7 @@ func writeMapValue(writer *wire.Writer8, kind mapKind, value reflect.Value) {
 
 // readMapField reads a map, allocating it at the entry count the message
 // declares.
-func readMapField(reader *wire.Reader8, field *planField, at unsafe.Pointer) {
+func readMapField(reader *wire.Reader8, field *planField, at unsafe.Pointer, buf *scratch) {
 	count, entries, ok := reader.Map()
 	if !ok {
 		return
@@ -153,7 +198,18 @@ func readMapField(reader *wire.Reader8, field *planField, at unsafe.Pointer) {
 	value := reflect.New(field.sliceType.Elem()).Elem()
 	for range count {
 		readMapValue(&entries, field.keyKind, key)
-		readMapValue(&entries, field.valueKind, value)
+		if field.valueKind == mapAny {
+			// A dynamic entry decodes to whatever the wire said it was, and the
+			// destination is an interface, so this is a Set rather than one of the
+			// typed stores readMapValue does.
+			if decoded := readAnyValue(&entries, buf); decoded != nil {
+				value.Set(reflect.ValueOf(decoded))
+			} else {
+				value.SetZero()
+			}
+		} else {
+			readMapValue(&entries, field.valueKind, value)
+		}
 		if entries.Err() != nil {
 			reader.Fail(entries.Err())
 			return

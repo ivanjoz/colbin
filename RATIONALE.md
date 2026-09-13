@@ -1,3 +1,86 @@
+## `map[string]any`, and the tag that keeps an array of records cheap
+
+**Context** — A service answering a browser holds
+`map[string]any{"rows": []Sale{...}, "total": 91}`, and the format refused it at
+plan time: a map value had to have a declared type. The values of that map do
+not. Everything in colbin's speed argument rests on the type being off the wire,
+and this is the one shape where it cannot be.
+
+The naive fix is worse than no fix. A dynamic value written as "a list of maps"
+spells every field *name* on every row — about thirty bytes a row of pure
+repetition on a six-field record — and loses the columnar transpose along with
+it, which would have made the wire *larger* than JSON at exactly the shape the
+whole feature is for.
+
+**Decision** — Three things, in `wire/dynamic.go` and `codec/dynamic.go`.
+
+A dynamic value says what it is in its own descriptor. Most classes already did
+— a K8 element is `[descriptor][payload]` and the LIST detail bit for unlike
+elements was written for this — so what was missing is four SPECIAL details:
+`3` float64, `4` float32, `5` an opaque blob, `7` a type tag. `null`, `true` and
+`false` were already declared and are now written.
+
+A slice of structs is written behind that type tag: an index into the section's
+struct table, and then the rows exactly as a typed field writes them, TABLE and
+column codec included. A thousand records inside an `any` measure 26 067 bytes
+against 26 024 for the same `[]User` as a typed root — forty-three bytes for the
+envelope, the map and the tag — where JSON is 78 196.
+
+A `[]any` holding one record type is promoted to the same form, and that is not
+a nicety: an answer assembled dynamically is where `[]any` comes from, and
+without the promotion it cost half as much again — 33.7 bytes a row against 22.4
+on a six-field record — because every element carried its own tag and nothing was
+transposed. The elements are boxed and therefore not contiguous, so the promotion
+copies them into one slice of the concrete type and hands that to the ordinary
+writer. That is an allocation and a memcpy of the rows, spent to save the tags
+and win the table; a sequence that is not uniform, or holds a nil, falls back to
+a list of self-describing values.
+
+Which means the section is built from the *value*, not the type:
+`MarshalSelfDescribing` writes the body first with the table open and serialises
+the section after, because `map[string]any` says nothing about `Sale` until it
+is walked. Plain `Marshal` has no table to add to, so a struct in a dynamic
+position falls back to a map of its field names — the same document, several
+times the bytes. The divergence is documented rather than hidden, because
+discovering it in production is the bad outcome.
+
+**Rationale** — The alternative to a type tag was to synthesise a per-message
+schema describing each map as a struct whose fields are its keys. It needs no
+wire change at all and every existing reader would take it, and it dies on three
+things: the 256-key ceiling, a `[]any` of unlike shapes needing a struct def per
+element, and making a schema a property of the value rather than the type, which
+breaks sending one section per connection.
+
+A dynamic value forces its scope to eight-bit keys, which is the sharpest
+statement of what the two widths are: K4 is the schema-driven form and K8 the
+self-describing one. A four-bit descriptor has no room for a class, so a narrow
+map's entries take their type from the schema and cannot carry one.
+
+A dynamic map is written in key order, where a typed map field is not. Go
+randomises map iteration, so without sorting the same value encodes to different
+bytes every time — which rules out a golden vector and any two ports being
+pinned against each other. A typed map field has a key set the schema declares
+and is usually small, so it keeps the iteration and the allocation this costs.
+
+The cost is stated in the file and belongs here too: a `map[string]any` writes
+its keys as strings, per entry, per message. That is the thing this format exists
+to avoid. It is the escape hatch for a subtree whose shape is genuinely unknown,
+not a way to avoid declaring a type.
+
+**The ports** — Rust reads all of it, which is what the browser case needs; it
+writes none of it, because `#[derive(Colbin)]` knows its own fields. Adding it
+meant giving the Rust walk maps at all, which it had refused with
+`Error::Unsupported` since it was written. `rust/tests/dynamic.rs` pins it
+against `rust/vectors/vectors.json`, and that corpus is Go's alone — no third
+implementation in the loop, which is what a feature whose bytes are new needs.
+Every case runs through both deliveries, since they are different bytes and one
+document.
+
+The AssemblyScript module is not ported, and refuses rather than guesses: its
+`OP_COUNT` and `MAP_KIND_COUNT` bounds make an unassigned op a named error, so a
+dynamic message fails loudly there instead of decoding as something else. That is
+the property those bounds were put in for.
+
 ## A slice or map at the root is wrapped, not given a root shape of its own
 
 **Context** — The byte-aligned format encodes a struct and nothing else, which is
@@ -9,7 +92,7 @@ made the format unusable for exactly the storage case it was written for.
 
 **Decision** — A non-struct root is encoded as a one-field message: key 0, the
 value, nothing else. `Marshal([]Grant{...})` writes byte for byte what marshalling
-a hand-written wrapper whose only field is tagged `cb:"0"` writes, and `Unmarshal`
+a hand-written wrapper whose only field is tagged `cb:"1"` writes, and `Unmarshal`
 into a `*[]Grant` reads it back. Slices, arrays and maps are wrapped; a bare
 scalar is still refused. `codec/envelope.go`.
 
@@ -22,6 +105,20 @@ says it means. It costs two bytes, the key and the descriptor. There is no copy
 and no allocation — a struct with one field at offset 0 has the address of that
 field, so the caller's pointer *is* the pointer the envelope plan reads through,
 and the synthetic type exists only to carry a cached plan.
+
+**Follow-up** — The envelope was `Marshal`-only: `MarshalSelfDescribing` and
+`SchemaOf` went straight to the struct plan and refused a slice or a map with
+"the format encodes a struct, got map", so the one delivery a browser uses could
+not carry the shape the envelope was added for. Both now resolve the root the
+same way `Marshal` does.
+
+That exposed the second half. The section describes what is on the wire, and what
+is on the wire is a one-field struct — so a reader working from it would render
+`{"rows":[...]}` where a Go caller sees the slice. The wrapper is framing, not
+content, so it is marked in the structDef's flags byte (`0x02`) and every walker
+unwraps it. The browser module had already claimed that bit for the same purpose
+from its side and written down that the claim was one-sided; it is now agreed,
+down to the field's name.
 
 ## Minimal mode is a third mode, not a variant of compact
 
@@ -711,9 +808,17 @@ Both together: 45 ns back to 26, which is under where it started.
 
 ## Against protocol buffers
 
-`bench/` is the comparison: the same fields with the same numbers on both sides,
-protobuf through its generated code — its fast path, not its reflective one —
-and colbin three ways.
+`bench/` in [colbin-benchmarks](https://github.com/ivanjoz/colbin-benchmarks) is
+the comparison: the same fields with the same numbers on both sides, protobuf
+through its generated code — its fast path, not its reflective one — and colbin
+three ways.
+
+It is a separate repository so that this one has no dependencies. protobuf was
+only ever imported by those benchmarks and by the tool that generated their
+input, and a consumer of colbin never downloaded it — Go fetches only modules
+whose packages are actually imported. But it still entered their module graph as
+a version floor, their `go.sum`, and their dependency audit, which is a real cost
+to charge someone for a comparison they are not running.
 
 | one flat record, six fields | protobuf | colbin | |
 |---|---:|---:|---|
@@ -1124,13 +1229,17 @@ It turned out not to be needed. protoc's only job in the pipeline is turning
 `.proto` text into a FileDescriptorProto — and a descriptor is an ordinary
 protobuf message, which can be built directly. `protoc-gen-go` is a plain
 program reading a CodeGeneratorRequest on stdin, and it ships inside the
-`google.golang.org/protobuf` module the repo already depends on.
+`google.golang.org/protobuf` module that repo already depends on.
 
-So `internal/protogen` builds the descriptor in Go, pipes it through the plugin
-out of the module cache, and writes `bench/corpus.pb.go`. No protoc, no network,
-no new dependency. The cost is that the Go program is the source of truth and
+So `protogen` builds the descriptor in Go, pipes it through the plugin out of
+the module cache, and writes `bench/corpus.pb.go`. No protoc, no network, no new
+dependency. The cost is that the Go program is the source of truth and
 `bench/corpus.proto` is written out as documentation rather than read back,
-because nothing here parses `.proto` text.
+because nothing there parses `.proto` text.
+
+Both now live in colbin-benchmarks, which is where the protobuf requirement went
+with them; the reasoning above is why the tool exists at all, not where its files
+sit today.
 
 **The comparison gives protobuf its best form, not the matching one.** Cents are
 `int64` rather than `sint64`: sint64 zigzags, which costs a bit, and every
@@ -1225,3 +1334,51 @@ cheapest form is a descriptor *and* a magnitude byte, and a two-argument append
 costs four units more than the one-argument append an unsigned nibble needs —
 84 against the budget's 80. Left alone rather than contorted: the four units
 would have to come out of the append itself, and there is nothing there to cut.
+
+## Field ids count from one, keys count from zero
+
+**Context** — A key is four bits or eight, and every value of it is spoken for:
+sixteen narrow keys, 0..15, and 256 wide ones. The `cb` tag used to be that
+number outright, so `cb:"0"` was the first field and `cb:"15"` the last one a
+nibble could hold. That is the honest spelling of the wire, and it reads wrong in
+source. Every neighbouring format a caller has used numbers its fields from one —
+protobuf reserves 0, thrift starts at 1 — so a struct migrated into colbin gets
+tagged 1..16 by habit, and the sixteenth field silently costs a byte per present
+field on the whole message by taking it wide.
+
+**Decision** — Ids are one-based, and the key is the id minus one. Narrow types
+number 1..16 and wide ones 1..256, so neither width lost a slot.
+
+The subtraction happens once per port, at the point a declared id is turned into
+a key: `assignKeys` in `codec/codec.go`, `parse_id` in `rust/derive/src/lib.rs`.
+Everything downstream of those two lines holds a key and never has to ask which
+of the two numbers it is carrying — the clash map, the plan, the generated code,
+the schema section, the whole of `wire`.
+
+**Rationale** — The alternative was to reserve key 0 and let the id be the key.
+It costs a field at both widths, 15 narrow and 255 wide, and the narrow one is
+the expensive half: sixteen is already the number that decides whether a record
+gets the fast path, and fifteen would push a common-sized struct off it for
+nothing. A nibble has no spare encoding to buy the symmetry with.
+
+So the two numbers differ, and the rule for which one a given place speaks is
+what it is describing. Tags and error messages are ids, because an id is what the
+author wrote. `FieldIDs` and the schema section are keys, because both describe a
+message that already exists — a decoder reading a section has bytes in front of
+it, not tags, and handing it a number one higher than the nibble it is about to
+match would be a trap in both ports and the AssemblyScript one. That is why
+`FieldIDs` reports 0 for a field tagged `cb:"1"`, which is the one surprise in
+the change and is documented where it can be met.
+
+**What it cost to make** — Nothing on the wire. The 323 tags in the Go tree and
+the 122 in the Rust one moved by one, the two subtractions went in, and
+`rust/vectors/vectors.json` and `web/vectors/vectors.json` both regenerated byte
+for byte identical. That was the check worth having: if the renumbering had
+leaked past those two lines, the vectors would have moved.
+
+`cb:"0"` is refused by name rather than read, since it is exactly what a type
+written against the old rule says, and the silent reading of it is bad — an
+unnumbered field derives its key from a hash, so the field would move *and* take
+the type wide. `TestRefusesIDsOutsideTheOneBasedRange` pins it. The Rust side
+refuses `#[cb(0)]` the same way, though with no `trybuild` in the tree there is
+nothing asserting the message.

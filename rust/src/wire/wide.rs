@@ -36,11 +36,14 @@
 
 use super::{
     ELEMENT_SIZE_ESCAPE, INLINE_COMPOSITE_LENGTH, INLINE_ELEMENT_SIZE, INT_POSITIVE_FLAG, Integer,
-    LENGTH_WIDTH, MAGNITUDE_WIDTH, Mark, append_array, append_count, append_elements,
-    append_magnitude, array_plan_of, count_bytes, le_uint, length_code_for, narrow::widen_length,
-    read_count, size_code_for,
+    MAGNITUDE_WIDTH, Mark, append_array, append_count, append_elements, append_magnitude,
+    array_plan_of, count_bytes, le_uint, length_code_for, narrow::widen_length, read_count,
+    size_code_for,
 };
 use crate::{Error, column, packed5};
+use alloc::borrow::ToOwned;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 // Descriptor classes, in bits 6..4 of an explicit descriptor.
 pub(crate) const CLASS_INT: u8 = 0;
@@ -54,7 +57,7 @@ pub(crate) const CLASS_SPECIAL: u8 = 7;
 
 /// The top bit: set means the descriptor names a class, clear means the
 /// remaining seven bits are the value itself.
-const DESC_EXPLICIT: u8 = 0x80;
+pub(super) const DESC_EXPLICIT: u8 = 0x80;
 /// The largest integer a descriptor can be.
 const MAX_INLINE_VALUE: u64 = 0x7F;
 
@@ -74,7 +77,7 @@ const MAX_INLINE_VALUE: u64 = 0x7F;
 /// against ten as a sign and a magnitude. **The writer emits whichever is
 /// shorter**, which makes this strictly a saving — 7% on small ids and on
 /// deltas, and no value anywhere that got larger.
-const SPECIAL_VARINT: u8 = 0b1000;
+pub(super) const SPECIAL_VARINT: u8 = 0b1000;
 
 /// How much of the value the descriptor's detail nibble carries.
 const VARINT_BITS: u32 = 3;
@@ -149,12 +152,20 @@ fn append_varint(buf: &mut Vec<u8>, key: u8, value: u64) {
 /// Reads the varint form back, returning the value and the byte length of the
 /// whole field.
 fn read_varint(field: &[u8], detail: u8) -> Option<(u64, usize)> {
+    let (value, length) = read_varint_at(field, 1, detail)?;
+    Some((value, length + 1)) // the key byte this form does not read
+}
+
+/// [`read_varint`] anchored on the descriptor rather than on the key, which is
+/// what a key-less element needs: `at` is where the descriptor sits and the
+/// continuation bytes follow it. The length counts from the descriptor.
+pub(super) fn read_varint_at(buf: &[u8], at: usize, detail: u8) -> Option<(u64, usize)> {
     let mut value = u64::from(detail & 0b111);
     let mut shift = VARINT_BITS;
-    for (index, byte) in field.iter().enumerate().skip(2) {
+    for (index, byte) in buf.iter().enumerate().skip(at + 1) {
         value |= u64::from(byte & 0x7F) << shift;
         if *byte < 0x80 {
-            return Some((value, index + 1));
+            return Some((value, index + 1 - at));
         }
         shift += 7;
         if shift > 63 + VARINT_BITS {
@@ -864,29 +875,13 @@ impl<'a> Reader8<'a> {
     /// offset just past it. It also checks the class, so a reader asking for a
     /// string and finding an array is told rather than handed nonsense.
     fn length_of(&mut self, want: u8) -> Option<(usize, usize)> {
-        let Some(desc) = self.buf.get(self.at + 1).copied() else {
-            self.fail(Error::Truncated);
-            return None;
-        };
-        if desc < DESC_EXPLICIT || (desc >> 4) & 0b111 != want {
-            self.fail(Error::BadDescriptor);
-            return None;
+        match super::dynamic::declared_length(self.buf, self.at + 1, want) {
+            Ok(found) => Some(found),
+            Err(err) => {
+                self.fail(err);
+                None
+            }
         }
-        let width = if want == CLASS_VEC {
-            if desc & 1 == 0 { 1 } else { 4 }
-        } else {
-            LENGTH_WIDTH[usize::from(desc & 0b11)]
-        };
-        let rest = &self.buf[self.at + 2..];
-        if rest.len() < width {
-            self.fail(Error::Truncated);
-            return None;
-        }
-        let Ok(value) = usize::try_from(le_uint(rest, width)) else {
-            self.fail(Error::SizeTooLarge);
-            return None;
-        };
-        Some((value, self.at + 2 + width))
     }
 
     /// Reads an integer array field.
@@ -997,46 +992,17 @@ impl<'a> Reader8<'a> {
 
     /// The whole of the skip: every class either carries a byte length or has
     /// one derivable from its descriptor.
+    ///
+    /// The key is one byte and the value is [`super::dynamic::value_size`]'s
+    /// business, so that a key-less element — a list's, a map's, a dynamic
+    /// value's — is sized by the same code rather than by a second copy of it
+    /// that could disagree.
     fn field_size(&mut self) -> Option<usize> {
-        let Some(desc) = self.buf.get(self.at + 1).copied() else {
-            self.fail(Error::Truncated);
-            return None;
-        };
-        if desc < DESC_EXPLICIT {
-            return Some(2); // the descriptor is the value
-        }
-        match (desc >> 4) & 0b111 {
-            CLASS_INT => {
-                let width = MAGNITUDE_WIDTH[usize::from(desc & 0b111)];
-                if self.buf.len() - (self.at + 2) < width {
-                    self.fail(Error::Truncated);
-                    return None;
-                }
-                Some(2 + width)
-            }
-            CLASS_SPECIAL => {
-                if desc & SPECIAL_VARINT == 0 {
-                    return Some(2);
-                }
-                // A varint is self-delimiting, so a reader that does not know the
-                // key can still step over it: walk the continuation bits to their
-                // end.
-                let Some((_, length)) = read_varint(&self.buf[self.at..], desc) else {
-                    self.fail(Error::Truncated);
-                    return None;
-                };
-                Some(length)
-            }
-            class => {
-                // Every remaining class declares a byte length covering the whole
-                // of its payload, which is the property that makes an unknown
-                // field skippable without its sub-schema.
-                let (length, start) = self.length_of(class)?;
-                if length > self.buf.len() - start {
-                    self.fail(Error::Truncated);
-                    return None;
-                }
-                Some(start + length - self.at)
+        match super::dynamic::value_size(self.buf, self.at + 1) {
+            Ok(size) => Some(1 + size),
+            Err(err) => {
+                self.fail(err);
+                None
             }
         }
     }

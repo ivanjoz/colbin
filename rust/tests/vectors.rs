@@ -18,143 +18,143 @@ const CORPUS: &str = include_str!("../vectors/vectors.json");
 
 #[derive(Colbin, Debug, PartialEq)]
 struct Charge {
-    #[cb(0)]
-    company_id: u32,
     #[cb(1)]
-    user_id: u32,
+    company_id: u32,
     #[cb(2)]
-    route_id: u32,
+    user_id: u32,
     #[cb(3)]
-    cpu: u8,
+    route_id: u32,
     #[cb(4)]
-    memory: u16,
+    cpu: u8,
     #[cb(5)]
-    duration: i64,
+    memory: u16,
     #[cb(6)]
-    access_1: u16,
+    duration: i64,
     #[cb(7)]
-    access_2: u16,
+    access_1: u16,
     #[cb(8)]
-    created: i64,
+    access_2: u16,
     #[cb(9)]
+    created: i64,
+    #[cb(10)]
     updated: i64,
 }
 
 #[derive(Colbin, Debug, PartialEq)]
 struct Scalars {
-    #[cb(0)]
-    flag: bool,
     #[cb(1)]
-    tiny: i8,
+    flag: bool,
     #[cb(2)]
-    small: i16,
+    tiny: i8,
     #[cb(3)]
-    medium: i32,
+    small: i16,
     #[cb(4)]
-    large: i64,
+    medium: i32,
     #[cb(5)]
-    byte: u8,
+    large: i64,
     #[cb(6)]
-    half: u16,
+    byte: u8,
     #[cb(7)]
-    word: u32,
+    half: u16,
     #[cb(8)]
-    giant: u64,
+    word: u32,
     #[cb(9)]
-    single: f32,
+    giant: u64,
     #[cb(10)]
-    double: f64,
+    single: f32,
     #[cb(11)]
+    double: f64,
+    #[cb(12)]
     text: String,
 }
 
 #[derive(Colbin, Debug, PartialEq)]
 struct Arrays {
-    #[cb(0)]
-    blob: Vec<u8>,
     #[cb(1)]
-    tiny: Vec<i8>,
+    blob: Vec<u8>,
     #[cb(2)]
-    small: Vec<i16>,
+    tiny: Vec<i8>,
     #[cb(3)]
-    medium: Vec<i32>,
+    small: Vec<i16>,
     #[cb(4)]
-    large: Vec<i64>,
+    medium: Vec<i32>,
     #[cb(5)]
-    halves: Vec<u16>,
+    large: Vec<i64>,
     #[cb(6)]
-    words: Vec<u32>,
+    halves: Vec<u16>,
     #[cb(7)]
-    giants: Vec<u64>,
+    words: Vec<u32>,
     #[cb(8)]
+    giants: Vec<u64>,
+    #[cb(9)]
     texts: Vec<String>,
 }
 
 #[derive(Colbin, Debug, PartialEq)]
 struct Optionals {
-    #[cb(0)]
-    maybe_int: Option<i32>,
     #[cb(1)]
-    maybe_uint: Option<u32>,
+    maybe_int: Option<i32>,
     #[cb(2)]
-    maybe_text: Option<String>,
+    maybe_uint: Option<u32>,
     #[cb(3)]
-    maybe_flag: Option<bool>,
+    maybe_text: Option<String>,
     #[cb(4)]
+    maybe_flag: Option<bool>,
+    #[cb(5)]
     maybe_float: Option<f64>,
 }
 
 #[derive(Colbin, Debug, PartialEq, Clone)]
 struct Line {
-    #[cb(0)]
-    sku: String,
     #[cb(1)]
-    quantity: i32,
+    sku: String,
     #[cb(2)]
+    quantity: i32,
+    #[cb(3)]
     price: f64,
 }
 
 #[derive(Colbin, Debug, PartialEq)]
 struct Order {
-    #[cb(0)]
-    id: u32,
     #[cb(1)]
-    customer: Line,
+    id: u32,
     #[cb(2)]
-    lines: Vec<Line>,
+    customer: Line,
     #[cb(3)]
+    lines: Vec<Line>,
+    #[cb(4)]
     note: String,
 }
 
 #[derive(Colbin, Debug, PartialEq)]
 struct Maps {
-    #[cb(0)]
-    labels: BTreeMap<String, String>,
     #[cb(1)]
-    counts: BTreeMap<i64, f64>,
+    labels: BTreeMap<String, String>,
     #[cb(2)]
-    flags: HashMap<String, bool>,
+    counts: BTreeMap<i64, f64>,
     #[cb(3)]
+    flags: HashMap<String, bool>,
+    #[cb(4)]
     sizes: BTreeMap<u32, f32>,
 }
 
 #[derive(Colbin, Debug, PartialEq)]
 struct WideEvolved {
-    #[cb(0)]
+    #[cb(1)]
     first: u32,
-    #[cb(200)]
-    last: String,
     #[cb(201)]
-    added: Vec<i32>,
+    last: String,
     #[cb(202)]
+    added: Vec<i32>,
+    #[cb(203)]
     also: f64,
 }
 
 #[derive(Colbin, Debug, PartialEq)]
 struct Wide {
-    #[cb(0)]
+    #[cb(1)]
     first: u32,
-    #[cb(200)]
+    #[cb(201)]
     last: String,
 }
 
@@ -163,15 +163,15 @@ struct Wide {
 /// only holds if it lands on the same boundary this port computes.
 #[derive(Colbin, Debug, PartialEq)]
 struct WideWidths {
-    #[cb(20)]
-    inline: u16,
     #[cb(21)]
-    one_byte: u16,
+    inline: u16,
     #[cb(22)]
-    varint: u16,
+    one_byte: u16,
     #[cb(23)]
-    tie: u16,
+    varint: u16,
     #[cb(24)]
+    tie: u16,
+    #[cb(25)]
     max: u16,
 }
 
@@ -181,7 +181,7 @@ struct Hashed {
     company_id: i32,
     #[cb(name = "User")]
     user: String,
-    #[cb(7)]
+    #[cb(8)]
     pinned: u32,
     #[cb(skip)]
     ignored: u64,
@@ -190,7 +190,7 @@ struct Hashed {
 #[derive(Colbin, Debug, PartialEq)]
 #[cb(packed5)]
 struct PackedText {
-    #[cb(0)]
+    #[cb(1)]
     text: String,
 }
 

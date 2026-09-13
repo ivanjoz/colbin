@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 
 	"github.com/ivanjoz/colbin"
@@ -36,90 +37,90 @@ import (
 // Charge is the ten-field benchmark record, all ids under sixteen so the root
 // picks four-bit keys.
 type Charge struct {
-	CompanyID uint32 `cb:"0"`
-	UserID    uint32 `cb:"1"`
-	RouteID   uint32 `cb:"2"`
-	CPU       uint8  `cb:"3"`
-	Memory    uint16 `cb:"4"`
-	Duration  int64  `cb:"5"`
-	Access1   uint16 `cb:"6"`
-	Access2   uint16 `cb:"7"`
-	Created   int64  `cb:"8"`
-	Updated   int64  `cb:"9"`
+	CompanyID uint32 `cb:"1"`
+	UserID    uint32 `cb:"2"`
+	RouteID   uint32 `cb:"3"`
+	CPU       uint8  `cb:"4"`
+	Memory    uint16 `cb:"5"`
+	Duration  int64  `cb:"6"`
+	Access1   uint16 `cb:"7"`
+	Access2   uint16 `cb:"8"`
+	Created   int64  `cb:"9"`
+	Updated   int64  `cb:"10"`
 }
 
 // Scalars covers every scalar the format carries, at its extremes.
 type Scalars struct {
-	Flag   bool    `cb:"0"`
-	Tiny   int8    `cb:"1"`
-	Small  int16   `cb:"2"`
-	Medium int32   `cb:"3"`
-	Large  int64   `cb:"4"`
-	Byte   uint8   `cb:"5"`
-	Half   uint16  `cb:"6"`
-	Word   uint32  `cb:"7"`
-	Giant  uint64  `cb:"8"`
-	Single float32 `cb:"9"`
-	Double float64 `cb:"10"`
-	Text   string  `cb:"11"`
+	Flag   bool    `cb:"1"`
+	Tiny   int8    `cb:"2"`
+	Small  int16   `cb:"3"`
+	Medium int32   `cb:"4"`
+	Large  int64   `cb:"5"`
+	Byte   uint8   `cb:"6"`
+	Half   uint16  `cb:"7"`
+	Word   uint32  `cb:"8"`
+	Giant  uint64  `cb:"9"`
+	Single float32 `cb:"10"`
+	Double float64 `cb:"11"`
+	Text   string  `cb:"12"`
 }
 
 // Arrays covers every slice kind, including the blob and the string list.
 type Arrays struct {
-	Blob   []byte   `cb:"0"`
-	Tiny   []int8   `cb:"1"`
-	Small  []int16  `cb:"2"`
-	Medium []int32  `cb:"3"`
-	Large  []int64  `cb:"4"`
-	Halves []uint16 `cb:"5"`
-	Words  []uint32 `cb:"6"`
-	Giants []uint64 `cb:"7"`
-	Texts  []string `cb:"8"`
+	Blob   []byte   `cb:"1"`
+	Tiny   []int8   `cb:"2"`
+	Small  []int16  `cb:"3"`
+	Medium []int32  `cb:"4"`
+	Large  []int64  `cb:"5"`
+	Halves []uint16 `cb:"6"`
+	Words  []uint32 `cb:"7"`
+	Giants []uint64 `cb:"8"`
+	Texts  []string `cb:"9"`
 }
 
 // Optionals is the pointer shape: an absent key means nil, so a pointer to a
 // zero has to write the zero out loud.
 type Optionals struct {
-	MaybeInt   *int32   `cb:"0"`
-	MaybeUint  *uint32  `cb:"1"`
-	MaybeText  *string  `cb:"2"`
-	MaybeFlag  *bool    `cb:"3"`
-	MaybeFloat *float64 `cb:"4"`
+	MaybeInt   *int32   `cb:"1"`
+	MaybeUint  *uint32  `cb:"2"`
+	MaybeText  *string  `cb:"3"`
+	MaybeFlag  *bool    `cb:"4"`
+	MaybeFloat *float64 `cb:"5"`
 }
 
 // Line is a row of Order, and is transposable: every field is a column the
 // column codec carries.
 type Line struct {
-	SKU      string  `cb:"0"`
-	Quantity int32   `cb:"1"`
-	Price    float64 `cb:"2"`
+	SKU      string  `cb:"1"`
+	Quantity int32   `cb:"2"`
+	Price    float64 `cb:"3"`
 }
 
 // Order holds a nested struct and a slice of them, which the writer encodes
 // row-wise or transposed depending on how many there are.
 type Order struct {
-	ID       uint32 `cb:"0"`
-	Customer Line   `cb:"1"`
-	Lines    []Line `cb:"2"`
-	Note     string `cb:"3"`
+	ID       uint32 `cb:"1"`
+	Customer Line   `cb:"2"`
+	Lines    []Line `cb:"3"`
+	Note     string `cb:"4"`
 }
 
 // Maps holds one entry each: Go's map iteration order is its own, so a corpus
 // entry with two would not be byte-stable from one run to the next.
 type Maps struct {
-	Labels map[string]string  `cb:"0"`
-	Counts map[int64]float64  `cb:"1"`
-	Flags  map[string]bool    `cb:"2"`
-	Sizes  map[uint32]float32 `cb:"3"`
+	Labels map[string]string  `cb:"1"`
+	Counts map[int64]float64  `cb:"2"`
+	Flags  map[string]bool    `cb:"3"`
+	Sizes  map[uint32]float32 `cb:"4"`
 }
 
 // WideEvolved carries an id past fifteen, which puts the whole run on the
 // eight-bit width — where a reader that does not know a key can step over it.
 type WideEvolved struct {
-	First uint32  `cb:"0"`
-	Last  string  `cb:"200"`
-	Added []int32 `cb:"201"`
-	Also  float64 `cb:"202"`
+	First uint32  `cb:"1"`
+	Last  string  `cb:"201"`
+	Added []int32 `cb:"202"`
+	Also  float64 `cb:"203"`
 }
 
 // WideWidths puts a uint16 in each shape the wide writer has for one, including
@@ -128,18 +129,18 @@ type WideEvolved struct {
 // see wire.varintWinsToU16 — so the boundary is worth pinning across the two
 // ports rather than only inside one.
 type WideWidths struct {
-	Inline  uint16 `cb:"20"` // the descriptor carries it
-	OneByte uint16 `cb:"21"` // a one-byte magnitude
-	Varint  uint16 `cb:"22"` // three bytes as a varint, four as a magnitude
-	Tie     uint16 `cb:"23"` // the first value where the two forms tie
-	Max     uint16 `cb:"24"` // the widest a uint16 gets
+	Inline  uint16 `cb:"21"` // the descriptor carries it
+	OneByte uint16 `cb:"22"` // a one-byte magnitude
+	Varint  uint16 `cb:"23"` // three bytes as a varint, four as a magnitude
+	Tie     uint16 `cb:"24"` // the first value where the two forms tie
+	Max     uint16 `cb:"25"` // the widest a uint16 gets
 }
 
 // Wide is WideEvolved as an older peer declares it, and is what the skip is
 // demonstrated against.
 type Wide struct {
-	First uint32 `cb:"0"`
-	Last  string `cb:"200"`
+	First uint32 `cb:"1"`
+	Last  string `cb:"201"`
 }
 
 // Hashed numbers nothing but one field, so the rest take the hash of their
@@ -147,14 +148,14 @@ type Wide struct {
 type Hashed struct {
 	CompanyID int32
 	User      string
-	Pinned    uint32 `cb:"7"`
+	Pinned    uint32 `cb:"8"`
 	Ignored   uint64 `cb:"-"`
 }
 
 // PackedText is the opt-in string encoding, which is a code in the field's own
 // descriptor rather than a mode.
 type PackedText struct {
-	Text string `cb:"0"`
+	Text string `cb:"1"`
 }
 
 // --- output ------------------------------------------------------------------
@@ -191,12 +192,38 @@ type columnCase struct {
 	Encoded   string `json:"encoded"`
 }
 
+// walkCase is one value read the way a client without the Go type reads it: a
+// section, a message, and the JSON Go renders from the two.
+//
+// It carries **both deliveries** because a dynamic value encodes differently
+// under each and has to render the same either way. A struct inside an `any` is
+// a name-keyed map in `message`, which has no section to describe it in, and a
+// type tag in `selfDescribing`, which does — so a port that got only one of them
+// right would pass half this corpus.
+type walkCase struct {
+	Name  string `json:"name"`
+	About string `json:"about"`
+	// Wide is the key width of the body, which the root byte states and a walk
+	// takes as a parameter.
+	Wide bool `json:"wide"`
+	// Section is what SchemaOf gives for the type, for the delivery that sends
+	// one per connection. Message is the body it describes.
+	Section string `json:"section"`
+	Message string `json:"message"`
+	// SelfDescribing is the whole standalone message: root byte, its own
+	// section, body.
+	SelfDescribing string `json:"selfDescribing"`
+	// JSON is what both of the above must render to.
+	JSON string `json:"json"`
+}
+
 type corpus struct {
 	// The ids every type resolved to, so that the two ports' hash-and-probe
 	// agree on a number rather than on a description of one.
 	FieldIDs []idCase     `json:"fieldIds"`
 	Columns  []columnCase `json:"columns"`
 	Cases    []caseOut    `json:"cases"`
+	Walks    []walkCase   `json:"walks"`
 }
 
 func main() {
@@ -218,7 +245,135 @@ func main() {
 }
 
 func build() corpus {
-	return corpus{FieldIDs: fieldIDs(), Columns: columns(), Cases: cases()}
+	return corpus{
+		FieldIDs: fieldIDs(),
+		Columns:  columns(),
+		Cases:    cases(),
+		Walks:    walks(),
+	}
+}
+
+// Doc is the shape a service answers a browser with: a `map[string]any` whose
+// values have no declared type, one of them an array of records.
+type Doc map[string]any
+
+// Row is what such an array is made of, and it transposes — every field is a
+// column the column codec carries — so past the threshold it becomes a table
+// inside a dynamic value.
+type Row struct {
+	ID     int32  `cb:"1"`
+	Name   string `cb:"2"`
+	Amount int64  `cb:"3"`
+}
+
+func rowsOf(count int) []Row {
+	out := make([]Row, count)
+	for index := range out {
+		out[index] = Row{
+			ID:     int32(index + 1),
+			Name:   fmt.Sprintf("row-%d", index),
+			Amount: int64(index) * 1000,
+		}
+	}
+	return out
+}
+
+// Holder covers the dynamic field shapes beside the map: a bare `any` and a
+// slice of them.
+type Holder struct {
+	Label string `cb:"1"`
+	One   any    `cb:"2"`
+	Many  []any  `cb:"3"`
+}
+
+func walks() []walkCase {
+	var out []walkCase
+	add := func(name, about string, value any) {
+		schema, err := colbin.SchemaOf(value)
+		if err != nil {
+			panic(fmt.Sprintf("%s: schema: %v", name, err))
+		}
+		message, err := colbin.Marshal(value)
+		if err != nil {
+			panic(fmt.Sprintf("%s: marshal: %v", name, err))
+		}
+		standalone, err := colbin.MarshalSelfDescribing(value)
+		if err != nil {
+			panic(fmt.Sprintf("%s: self-describing: %v", name, err))
+		}
+		text, err := colbin.ToJSON(schema, message)
+		if err != nil {
+			panic(fmt.Sprintf("%s: to json: %v", name, err))
+		}
+		// The two deliveries encode a dynamic struct differently and must still
+		// be the same document. Checking it here means the corpus cannot ship a
+		// pair that disagrees before Rust ever sees it.
+		inline, err := colbin.ToJSON(nil, standalone)
+		if err != nil {
+			panic(fmt.Sprintf("%s: to json, self-describing: %v", name, err))
+		}
+		if !sameDocument(inline, text) {
+			panic(fmt.Sprintf("%s: the two deliveries disagree:\n %s\n %s", name, inline, text))
+		}
+		out = append(out, walkCase{
+			Name:           name,
+			About:          about,
+			Wide:           message[0]&0x08 != 0,
+			Section:        hex.EncodeToString(schema.Bytes()),
+			Message:        hex.EncodeToString(message),
+			SelfDescribing: hex.EncodeToString(standalone),
+			JSON:           string(text),
+		})
+	}
+
+	add("dynamic.scalars", "every kind a dynamic value can be, one of each", Doc{
+		"nothing":  nil,
+		"yes":      true,
+		"no":       false,
+		"small":    7,
+		"negative": -1234567,
+		"huge":     uint64(18446744073709551615),
+		"double":   -0.25,
+		"single":   float32(1.5),
+		"text":     "el niño comió jamón",
+		"blob":     []byte{0x00, 0x7F, 0x80, 0xFF},
+	})
+	add("dynamic.nested", "a map and a list inside a map, which is the shape a document nests in", Doc{
+		"inner": map[string]any{"list": []any{1, "two", nil, true}},
+		"empty": map[string]any{},
+	})
+	add("dynamic.records.list", "an array of records under the table threshold, so a LIST behind a type tag", Doc{
+		"rows":  rowsOf(3),
+		"total": 3,
+	})
+	add("dynamic.records.table", "an array past the threshold, so a TABLE behind the same tag", Doc{
+		"rows":  rowsOf(64),
+		"total": 64,
+	})
+	add("dynamic.records.one", "a single record, which is a struct behind a type tag", Doc{
+		"row": rowsOf(1)[0],
+	})
+	add("dynamic.field.shapes", "a bare `any` and a `[]any` as fields rather than map values", &Holder{
+		Label: "holder",
+		One:   map[string]any{"a": 1},
+		Many:  []any{1, "two", nil, true, 4.5},
+	})
+	add("dynamic.field.absent", "the same type with both dynamic fields nil, which is null", &Holder{
+		Label: "bare",
+	})
+	add("dynamic.map.empty", "a dynamic map with no entries at all", Doc{})
+
+	return out
+}
+
+// sameDocument compares two renderings by value, because the fields a message
+// omitted are written last and the two deliveries omit different ones.
+func sameDocument(a, b []byte) bool {
+	var left, right any
+	if json.Unmarshal(a, &left) != nil || json.Unmarshal(b, &right) != nil {
+		return false
+	}
+	return reflect.DeepEqual(left, right)
 }
 
 // transformNames are the header's low two bits, for the report rather than for

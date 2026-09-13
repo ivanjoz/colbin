@@ -4,3 +4,6 @@
 [workspace]
 resolver = "3"
 members = ["rust", "rust/derive"]
+# rust/wasm is a workspace of its own — see the note in its Cargo.toml. It is
+# built explicitly for wasm32-unknown-unknown, not as part of a host build.
+exclude = ["rust/wasm"]

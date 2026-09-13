@@ -91,6 +91,10 @@ func (s *anySink) key(name string) {
 	}
 }
 
+// keyBytes copies, for the reason textBytes does: a Go map key has to own its
+// bytes and the message buffer is one the caller reuses.
+func (s *anySink) keyBytes(name []byte) { s.key(string(name)) }
+
 func (s *anySink) null()                 { s.place(nil) }
 func (s *anySink) boolean(value bool)    { s.place(value) }
 func (s *anySink) signed(value int64)    { s.place(value) }

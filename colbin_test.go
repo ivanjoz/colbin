@@ -13,13 +13,13 @@ import (
 // actually touches.
 
 type charge struct {
-	CompanyID    int32    `cb:"0"`
-	UserID       int32    `cb:"1"`
-	RouteID      uint16   `cb:"2"`
-	Name         string   `cb:"3"`
-	Grants       []uint16 `cb:"4"`
-	ExtraAllowed bool     `cb:"5"`
-	Ratio        float64  `cb:"6"`
+	CompanyID    int32    `cb:"1"`
+	UserID       int32    `cb:"2"`
+	RouteID      uint16   `cb:"3"`
+	Name         string   `cb:"4"`
+	Grants       []uint16 `cb:"5"`
+	ExtraAllowed bool     `cb:"6"`
+	Ratio        float64  `cb:"7"`
 }
 
 var sample = charge{

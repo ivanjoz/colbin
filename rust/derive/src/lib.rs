@@ -12,19 +12,27 @@
 //! ```ignore
 //! #[derive(Colbin)]
 //! struct Charge {
-//!     #[cb(0)] company_id: u32,
-//!     #[cb(1)] user_id: u32,
-//!     #[cb(2)] note: String,
+//!     #[cb(1)] company_id: u32,
+//!     #[cb(2)] user_id: u32,
+//!     #[cb(3)] note: String,
 //! }
 //! ```
 //!
 //! is an `impl Colbin for Charge` whose write is three `wire::Writer` calls with
 //! literal keys, and whose read is a `match` on a literal key per arm.
 //!
+//! # Ids count from one, keys count from zero
+//!
+//! `#[cb(1)]` is the first field, exactly as Go's `cb:"1"` is, and the key it
+//! writes is 0. The subtraction happens once, in `parse_id`, because a key is a
+//! bare nibble or byte with no value to spare for a reserved zero. So narrow
+//! types number 1..=16 and wide ones 1..=256, and `MAX_NARROW_KEY` below is a
+//! bound on the key rather than on the id.
+//!
 //! # Attributes
 //!
 //! ```ignore
-//! #[cb(5)]                    // explicit wire id, as Go's `cb:"5"`
+//! #[cb(5)]                    // explicit field id, as Go's `cb:"5"` (key 4)
 //! #[cb(name = "CompanyID")]   // the name colbin hashes, when Rust's differs
 //! #[cb(name = "qty", 5)]      // both, as Go's `cb:"qty,5"`
 //! #[cb(skip)]                 // not encoded, as Go's `cb:"-"`
@@ -41,7 +49,7 @@
 //! # The key width is decided here, exactly as Go decides it
 //!
 //! Four-bit keys are the default and the fast path. A type goes wide when it has
-//! to: an id above fifteen, which four key bits cannot carry, or any id derived
+//! to: an id above sixteen, whose key four bits cannot carry, or any key derived
 //! from a name, which lands anywhere in 0..=255. That is the same rule
 //! `codec/wide.go` applies, so the two sides agree without being told.
 
@@ -120,9 +128,9 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     }
     reject_duplicate_ids(&fields)?;
 
-    // The key width, by the rule `codec/wide.go` states: a derived id lands
-    // anywhere in 0..=255, and an explicit one above fifteen does not fit the
-    // nibble. Either way the run goes wide, and so do packed strings, whose
+    // The key width, by the rule `codec/wide.go` states: a derived key lands
+    // anywhere in 0..=255, and an id above sixteen has a key past the nibble.
+    // Either way the run goes wide, and so do packed strings, whose
     // encoding lives in a descriptor a narrow field does not have.
     let derived = fields.iter().any(|field| field.id.is_none());
     let past_narrow = fields
@@ -256,6 +264,10 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
 /// Refuses two fields asking for the same id, which is a record definition that
 /// cannot round-trip and is silent if it reaches the wire.
+///
+/// The comparison is on keys, since that is what a parsed id has already become,
+/// but the message counts back to the id so that it names the number the author
+/// actually wrote.
 fn reject_duplicate_ids(fields: &[DerivedField]) -> syn::Result<()> {
     for (index, field) in fields.iter().enumerate() {
         let Some(id) = field.id else { continue };
@@ -264,8 +276,10 @@ fn reject_duplicate_ids(fields: &[DerivedField]) -> syn::Result<()> {
                 return Err(syn::Error::new(
                     other.ident.span(),
                     format!(
-                        "colbin: field id {id} is on both `{}` and `{}`",
-                        field.ident, other.ident
+                        "colbin: field id {} is on both `{}` and `{}`",
+                        id + 1,
+                        field.ident,
+                        other.ident
                     ),
                 ));
             }
@@ -573,15 +587,27 @@ impl FieldAttrs {
 const OPTIONS: &str = "colbin: expected a field id, `name = \"GoFieldName\"` or `skip`, as in \
      #[cb(5)], #[cb(name = \"CompanyID\")] or #[cb(name = \"qty\", 5)]";
 
+/// Turns the id a field declares into the key it writes.
+///
+/// Ids are one-based and keys are not, so this is where the two meet — the same
+/// single subtraction `assignKeys` makes in `codec/codec.go`, made at the same
+/// point, so that everything downstream of it on either side is holding a key
+/// and never has to ask which number it has.
 fn parse_id(lit: &syn::LitInt) -> syn::Result<u16> {
     let value: u32 = lit.base10_parse()?;
-    if value >= MAX_FIELDS as u32 {
+    if value == 0 {
         return Err(syn::Error::new(
             lit.span(),
-            "colbin: a field id is one byte, so 0..=255",
+            "colbin: field ids are one-based, so 0 is not one: the first field is #[cb(1)]",
         ));
     }
-    Ok(value as u16)
+    if value > MAX_FIELDS as u32 {
+        return Err(syn::Error::new(
+            lit.span(),
+            "colbin: a field id is one byte counted from one, so 1..=256",
+        ));
+    }
+    Ok(value as u16 - 1)
 }
 
 /// The value forms the derive carries, and everything each one needs to

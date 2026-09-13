@@ -21,9 +21,9 @@ use colbin::Colbin;
 
 #[derive(Colbin, Debug, PartialEq)]
 struct Charge {
-    #[cb(0)] company_id: u32,
-    #[cb(1)] user_id: u32,
-    #[cb(2)] note: String,
+    #[cb(1)] company_id: u32,
+    #[cb(2)] user_id: u32,
+    #[cb(3)] note: String,
 }
 
 let charge = Charge { company_id: 7, user_id: 42, note: "ok".into() };
@@ -43,13 +43,18 @@ The ids are what the two sides have to agree on, so they are assigned by exactly
 the rule Go's `codec` uses:
 
 ```rust
-#[cb(5)]                    // explicit wire id, as Go's `cb:"5"`
+#[cb(5)]                    // explicit field id, as Go's `cb:"5"` (key 4)
 #[cb(name = "CompanyID")]   // the name colbin hashes, when Rust's differs
 #[cb(name = "qty", 5)]      // both, as Go's `cb:"qty,5"`
 #[cb(skip)]                 // not encoded, as Go's `cb:"-"`
 ```
 
-A field without a number takes `fnv8` of its name and then the next free id
+**Ids start at 1**, as Go's do: `#[cb(1)]` is the first field, a narrow type
+numbers 1..=16 and a wide one 1..=256. The key on the wire is the id minus one,
+because a key is a bare nibble or byte with no value to spare for a reserved
+zero, so `#[cb(1)]` writes key 0.
+
+A field without a number takes `fnv8` of its name and then the next free key
 upward, with explicit ids reserved first so a hash cannot squat on a number
 somebody asked for. The hash is over the *Go* name, so a `snake_case` Rust field
 mirroring a Go one needs `#[cb(name = "...")]` — or an explicit id, which
@@ -59,8 +64,8 @@ sidesteps the question.
 
 Four-bit keys are the default and the fast path. A type goes wide when it has to:
 
-- an id above fifteen, which four key bits cannot carry; or
-- any id derived from a name, which lands anywhere in 0..=255.
+- an id above sixteen, whose key four bits cannot carry; or
+- any key derived from a name, which lands anywhere in 0..=255.
 
 That is the same rule `codec/wide.go` applies, so the two sides agree without
 being told. `#[cb(wide)]` on the struct asks for it anyway, which is what a wire
@@ -173,8 +178,30 @@ covers the generated code, and both walk every truncation of a valid message and
 a large space of arbitrary bytes, requiring an error rather than a panic. The
 crate is `#![forbid(unsafe_code)]`.
 
+## Dynamic values
+
+Go carries `any`, `[]any` and `map[string]any`, and such a value says what it is
+in its own descriptor — the one place colbin puts a type on the wire. This crate
+**reads** all of it: `walk::to_json` renders a `map[string]any` as the object Go
+renders, including the type tag that names a record in the section so an array of
+them costs what a typed array costs rather than repeating its field names per
+row. `wire::Kind` is what a descriptor classifies to.
+
+It does not write one. `#[derive(Colbin)]` knows its own fields and has no
+dynamic value to encode, and the browser case this port exists for is one-way.
+
+`tests/dynamic.rs` pins the reader against `rust/vectors/vectors.json`, which Go
+writes. Every case is checked under both deliveries — the out-of-band section and
+the standalone message — because a record inside an `any` encodes differently
+under each and has to render the same either way.
+
+One gap, and it predates this: a map field in a *narrow* key run is refused with
+`Error::Unsupported`. A four-bit descriptor has no room for a class, so a narrow
+map's entries take their type from the schema and need a second element codec.
+A `map[string]any` is never narrow — a dynamic value forces its scope wide — so
+this is only reachable through a typed map in a small struct.
+
 ## Status
 
-Complete against the Go implementation for everything in the table above, and
-pinned to it by the corpus. What is not here is what is not there either:
-interfaces have no form on the wire yet.
+Complete against the Go implementation for everything in the tables above, and
+pinned to it by the corpus.

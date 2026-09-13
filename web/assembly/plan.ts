@@ -20,6 +20,8 @@
 // without anything looking wrong. New ops go on the end and none of these ever
 // moves. The generator emits the Go values and a test pins them against these.
 
+import { renderKeyRun } from './jsontext'
+
 export const OP_BOOL: u8 = 0
 export const OP_INT8: u8 = 1
 export const OP_INT16: u8 = 2
@@ -146,6 +148,17 @@ export class Plan {
   nameBytes: Array<Uint8Array> = new Array<Uint8Array>()
 
   /**
+   * The same names rendered as `"name":`, for the JSON walk.
+   *
+   * The decoding half of the lesson above. A walk writes every field name once
+   * per record, and doing that through `String.UTF8.encode` and the escaper put
+   * two allocations and a byte-at-a-time loop inside the row loop; a profile of
+   * a thousand-record decode put a third of the time in the allocator. Rendered
+   * here, a field costs one copy.
+   */
+  keyRuns: Array<Uint8Array> = new Array<Uint8Array>()
+
+  /**
    * Field positions by key, so a walk resolves a key in one load.
    *
    * -1 means the message holds a key this plan does not list, which under eight
@@ -197,10 +210,14 @@ export class Plan {
 
   private encodeNames(): void {
     const out = new Array<Uint8Array>(this.names.length)
+    const runs = new Array<Uint8Array>(this.names.length)
     for (let index = 0; index < this.names.length; index++) {
-      out[index] = Uint8Array.wrap(String.UTF8.encode(unchecked(this.names[index]), false))
+      const bytes = Uint8Array.wrap(String.UTF8.encode(unchecked(this.names[index]), false))
+      out[index] = bytes
+      runs[index] = renderKeyRun(bytes)
     }
     this.nameBytes = out
+    this.keyRuns = runs
   }
 
   indexKeys(): void {

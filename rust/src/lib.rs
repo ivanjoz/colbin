@@ -34,9 +34,9 @@
 //!
 //! #[derive(Colbin, Debug, Default, PartialEq)]
 //! struct Charge {
-//!     #[cb(0)] company_id: u32,
-//!     #[cb(1)] user_id: u32,
-//!     #[cb(2)] note: String,
+//!     #[cb(1)] company_id: u32,
+//!     #[cb(2)] user_id: u32,
+//!     #[cb(3)] note: String,
 //! }
 //!
 //! let charge = Charge { company_id: 7, user_id: 42, note: "ok".into() };
@@ -52,10 +52,20 @@
 //! [`wire::Reader`] directly, which is what the generated code does.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "std"), no_std)]
+// `alloc` rather than `std` throughout, so the wasm decoder in `rust/wasm` can
+// build this crate without the standard library and without its startup. The
+// only `std` left is the `Error` impl in `error.rs`, which is what the `std`
+// feature gates.
+extern crate alloc;
 
 pub mod codec;
 pub mod column;
+pub mod json;
 pub mod packed5;
+pub mod plan;
+pub mod section;
+pub mod walk;
 pub mod wire;
 
 mod error;

@@ -11,6 +11,12 @@ export const ERR_NONE: i32 = 0
 export const ERR_TRUNCATED: i32 = 1
 export const ERR_CORRUPT: i32 = 2
 
+/** The widest decimal a u64 has, and the scratch Writer.writeDecimalU64 fills
+ * from the back. One buffer for the module: nothing here is re-entrant, and the
+ * bytes are consumed before the next call can touch them. */
+const DECIMAL_DIGITS: i32 = 20
+const DECIMAL_SCRATCH = new StaticArray<u8>(DECIMAL_DIGITS)
+
 export class Writer {
   buf: Uint8Array
   len: i32
@@ -40,6 +46,62 @@ export class Writer {
     this.ensure(length)
     memory.copy(this.buf.dataStart + <usize>this.len, src.dataStart + <usize>offset, <usize>length)
     this.len += length
+  }
+
+  /**
+   * `value` in decimal, written straight into the buffer.
+   *
+   * The obvious spelling — `this.ascii(value.toString())` — allocates a UTF-16
+   * AssemblyScript string per number, walks it back out a `charCodeAt` at a
+   * time, and leaves it for the collector. On a table of a thousand records that
+   * is thousands of allocations inside the decode, and it measured as most of
+   * the decode's cost: the JSON writer ran 9.5x slower than V8's own
+   * `JSON.stringify` on the same records, which is not a gap a byte-at-a-time
+   * copy explains on its own.
+   *
+   * Digits come out least significant first, so they go into a fixed scratch
+   * from the back and reach the buffer in one `memory.copy`. Twenty bytes is the
+   * widest decimal a u64 has.
+   */
+  writeDecimalU64(value: u64): void {
+    let at = DECIMAL_DIGITS
+    // Most values in a real record fit in 32 bits, and 32-bit division is
+    // materially cheaper than 64-bit in WebAssembly, so the wide loop runs only
+    // until the value is small enough for the narrow one.
+    let wide = value
+    while (wide > 0xffffffff) {
+      const q = wide / 10
+      unchecked((DECIMAL_SCRATCH[--at] = <u8>(0x30 + <u32>(wide - q * 10))))
+      wide = q
+    }
+    let narrow = <u32>wide
+    do {
+      const q = narrow / 10
+      unchecked((DECIMAL_SCRATCH[--at] = <u8>(0x30 + (narrow - q * 10))))
+      narrow = q
+    } while (narrow != 0)
+
+    const length = DECIMAL_DIGITS - at
+    this.ensure(length)
+    memory.copy(
+      this.buf.dataStart + <usize>this.len,
+      changetype<usize>(DECIMAL_SCRATCH) + <usize>at,
+      <usize>length,
+    )
+    this.len += length
+  }
+
+  /** `value` in decimal, with a leading `-` when it is negative. */
+  writeDecimalI64(value: i64): void {
+    if (value < 0) {
+      this.writeByte(0x2d /* - */)
+      // Negating i64.MIN_VALUE overflows back to itself, and the u64 conversion
+      // of that is 2^63 — which is the magnitude wanted, so the general case
+      // covers the one value that would otherwise need its own branch.
+      this.writeDecimalU64(<u64>(0 - value))
+      return
+    }
+    this.writeDecimalU64(<u64>value)
   }
 
   /**

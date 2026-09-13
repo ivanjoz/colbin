@@ -31,6 +31,8 @@ go.work.sum
 # .idea/
 # .vscode/
 
-# Rust build output. A Cargo workspace puts it at the workspace root, which is
-# the repository root here, not under rust/.
-/target
+# Rust build output. The main workspace puts it at the workspace root, which is
+# the repository root here, not under rust/. `rust/wasm` is deliberately its own
+# workspace — Cargo only honours a `[profile]` at a workspace root — so it has a
+# second one, and the rule is not anchored.
+target/

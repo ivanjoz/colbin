@@ -8,6 +8,12 @@ data, err := colbin.Marshal(&charge)
 err = colbin.Unmarshal(data, &back)
 ```
 
+**No dependencies.** `go.mod` has no `require` block and there is no `go.sum`
+beside it, so importing colbin adds nothing to your module graph — not a
+download, not a version floor, not a line in your SBOM. The benchmarks that need
+protobuf live in their own repository, [colbin-benchmarks][bench-repo], so that
+this one can say that without an asterisk.
+
 Against protocol buffers on the same six-field record, protobuf driven through
 its generated code:
 
@@ -28,7 +34,8 @@ colbin through `Codec[T]`, protobuf through its generated code. Generating the
 colbin codec instead takes the flat record to **27 ns** encode and **55 ns**
 decode — 4.5× and 2.1×.
 
-`go test ./bench -bench .` on an i7-1355U, Go 1.27, best of eight in one run.
+Every number above is reproducible from [colbin-benchmarks][bench-repo] —
+`go test ./bench -bench .`, on an i7-1355U, Go 1.27, best of eight in one run,
 packed5 off. Run a benchmark alone and it lands 5–10% faster than it does in the
 sweep; both sides are measured the same way, so the ratios hold either way.
 
@@ -49,7 +56,7 @@ the class and the key width.
 ## Usage
 
 A struct with no tags at all works: each field takes `fnv8` of its name, linear
-probed past anything already used. That id lands anywhere in 0..255, so an
+probed past anything already used. That key lands anywhere in 0..255, so an
 untagged type uses **eight-bit keys** — which costs a byte per present field and
 buys `Skip` over an unknown one.
 
@@ -60,20 +67,33 @@ type Charge struct {
 }
 ```
 
-Numbering the fields is how a type asks for the four-bit key, and it is the
-number that goes on the wire, so it is what a reader in another language needs.
-`colbin.FieldIDs(v)` prints whatever a type resolved to.
+Numbering the fields is how a type asks for the four-bit key, and the number is
+what a reader in another language has to agree on.
+
+**Field ids start at 1.** Four key bits hold sixteen fields, so a narrow type
+numbers 1..16 and a wide one 1..256.
 
 ```go
 type Charge struct {
-    CompanyID int32  `cb:"0"`
-    UserID    int32  `cb:"1"`
-    RouteID   uint16 `cb:"2"`
-    Name      string `cb:"3"`
+    CompanyID int32  `cb:"1"`
+    UserID    int32  `cb:"2"`
+    RouteID   uint16 `cb:"3"`
+    Name      string `cb:"4"`
 }
 
 data, err := colbin.Marshal(&charge)
 ```
+
+The byte on the wire is the id minus one. It has to be: a key is a bare nibble
+or a bare byte with every value spoken for, so there is no spare encoding to
+reserve for a zero that means "absent". `cb:"1"` writes key 0 and `cb:"16"`
+writes key 15.
+
+That subtraction is the only place the two numbers differ, and it is worth
+knowing about in exactly one situation — reading bytes. `colbin.FieldIDs(v)` and
+the schema section both report the **key**, because both describe a message that
+already exists rather than the tags that produced it. So `CompanyID` above is
+`cb:"1"` in source and `0` everywhere you inspect the encoding.
 
 ### A hot path should hold a handle
 
@@ -202,8 +222,8 @@ the wide key path.
 
 | | |
 |---|---|
-| yes | `bool`, every sized `int`/`uint`, `float32/64`, `string`, `[]byte`, slices of integers and of strings, nested structs, `[]struct`, recursive types, `map` with string or integer keys, pointers to any scalar or string |
-| not yet | `interface{}`, arrays, pointers to composites, maps of structs |
+| yes | `bool`, every sized `int`/`uint`, `float32/64`, `string`, `[]byte`, slices of integers and of strings, nested structs, `[]struct`, recursive types, `map` with string or integer keys, pointers to any scalar or string, `any`, `[]any`, `map[string]any` |
+| not yet | arrays, pointers to composites, maps of structs, `map[any]T` |
 
 `int` and `uint` encode as their 64-bit forms, so a message written on one
 platform reads on another.
@@ -217,8 +237,8 @@ format written solely to say it is there.
 
 ```go
 type Patch struct {
-    Name  *string `cb:"0"` // nil: leave it alone. &"": clear it.
-    Limit *int32  `cb:"1"`
+    Name  *string `cb:"1"` // nil: leave it alone. &"": clear it.
+    Limit *int32  `cb:"2"`
 }
 ```
 
@@ -301,6 +321,55 @@ Going straight to text is also the faster direction, because the intermediate
 Writing colbin *from* JSON is not in this: it needs type inference, and it is a
 separate job.
 
+## `map[string]any`, for the part of the answer that has no type
+
+A service answering a browser often holds a shape like this, and the values have
+no declared type for the schema to describe:
+
+```go
+data, _ := colbin.MarshalSelfDescribing(map[string]any{
+    "rows":  sales,   // []Sale
+    "total": len(sales),
+    "page":  1,
+})
+```
+
+`any`, `[]any` and `map[string]any` are carried anywhere a field, a slice element
+or a map value can go. Such a value is the one thing in colbin that puts its type
+*on* the wire — one descriptor byte saying integer, float, string, blob, list,
+map, `null`, `true` or `false`.
+
+**An array of records does not pay for that per row.** A `[]Sale` inside an `any`
+is written behind a tag naming a struct the schema section describes, and the
+rows behind it are byte for byte what a typed `[]Sale` field writes — the table,
+the column codec, all of it. A `[]any` that happens to hold one record type is
+promoted to the same thing, so an answer assembled dynamically costs what a typed
+one costs; a mixed one falls back to a list of self-describing values. On a
+thousand five-field records:
+
+| | bytes |
+|---|---:|
+| `[]User` as the whole message | 26 024 |
+| the same inside `map[string]any{"rows": …}` | **26 067** |
+| `encoding/json` | 78 196 |
+
+Two caveats worth reading before you rely on it:
+
+- **A struct inside an `any` needs `MarshalSelfDescribing`.** The tag names a
+  struct *in the section*, and plain `Marshal` has no section — so there it falls
+  back to writing the record as an object with its field names spelled out, which
+  is the same document and several times the bytes. If you send an out-of-band
+  schema, the schema describes the map and not what the map turned out to hold,
+  so the same applies.
+- **The keys are on the wire, per message.** A dynamic map spells every key as a
+  string every time, which is exactly what a declared type saves you. Use it for
+  the subtree whose shape is genuinely unknown, not instead of a struct.
+
+It decodes back into Go as well, with the normalisation `DecodeAny` documents:
+records come back as `map[string]any`, integers as `int64` (or `uint64` past
+2^63), and both float widths as `float64`. Dynamic maps are written in key order,
+so the same value always encodes to the same bytes.
+
 ## Layout
 
 ```
@@ -310,8 +379,11 @@ column/   the column codec: blocks of 128 residuals at a chosen bit width
 codec/    the reflection façade and the source generator
 packed5/  the opt-in string packing
 corpus/   a reproducible, real-shaped dataset: users, products, sales
-bench/    the comparison against protocol buffers
 ```
+
+That is the whole module. The comparison against protocol buffers is not here —
+it lives in [colbin-benchmarks][bench-repo], for the reasons in
+[Benchmarks](#benchmarks) below.
 
 ### The corpus
 
@@ -330,7 +402,8 @@ reaches both layouts:
 
 #### Against protocol buffers, same rows both sides
 
-`bench/corpus.pb.go` is the protobuf twin, field for field. Cents are `int64`
+`bench/corpus.pb.go` in [colbin-benchmarks][bench-repo] is the protobuf twin,
+field for field. Cents are `int64`
 rather than `sint64` because every amount is non-negative and int64 is the
 shorter of the two — protobuf gets its best form, not the matching one.
 
@@ -361,7 +434,8 @@ in the nested table**, where a slice of integer-only structs is transposed into
 columns and protobuf has no equivalent.
 
 `go test ./corpus -run Report -v` prints bytes per row for every table;
-`go test ./bench -run CorpusSizes -v` prints the comparison above.
+`go test ./bench -run CorpusSizes -v`, in [colbin-benchmarks][bench-repo],
+prints the comparison above.
 
 `wire` and `column` have no reflection and no type registry — they are driven by
 a caller that already knows the Go type, which is what `codec.Generate` emits.
@@ -382,6 +456,54 @@ ends and no state crosses a boundary.
 
 1.3 ns per element to decode, 3.5 to encode.
 
+## Benchmarks
+
+Every comparative number in this README — the tables at the top, the corpus
+sizes above — is produced by a **separate repository**:
+
+**→ [github.com/ivanjoz/colbin-benchmarks][bench-repo]**
+
+```sh
+git clone https://github.com/ivanjoz/colbin-benchmarks
+cd colbin-benchmarks
+go test ./bench -bench . -benchmem       # the timing tables
+go test ./bench -run CorpusSizes -v      # the size comparison
+```
+
+### Why it is a separate repository
+
+Because a dependency you do not use still costs you something. protobuf was only
+ever imported by those benchmarks and by the tool that generates their input —
+never by a line of colbin itself. A consumer never downloaded it either; Go
+fetches only modules whose packages are actually imported.
+
+But `require google.golang.org/protobuf` in this `go.mod` still reached them:
+it became a minimum-version constraint in their build, a line in their `go.sum`,
+an entry in `go mod graph`, and a row in whatever dependency audit their
+employer runs. That is a real cost to charge someone for a comparison they are
+not running, and "zero dependencies" is not a claim you can make with an asterisk
+attached.
+
+So it moved, and CI here fails if it ever comes back — the check inspects the
+module graph rather than just building, because a test-only dependency compiles
+fine and still shows up downstream.
+
+### The corpus is pinned, not just generated
+
+`corpus.Generate` is deterministic, but the benchmarks repository does not rely
+on that alone. It materialises the corpus as canonical JSON and pins all three
+scales with SHA-256, so a reported measurement names the exact dataset that
+produced it — verifiable with `sha256sum`, no Go required.
+
+Two things make that worth the trouble. Go's compatibility promise does not
+cover the `math/rand` bit stream in writing; it is stable because changing it
+would break too much, which is why `math/rand/v2` shipped as a new package
+rather than a fix to the old one. And `corpus.Event` carries a
+`map[string]string` — Go randomises map iteration order, so the *colbin* bytes
+for the Events table are not stable run to run, while `encoding/json` sorts map
+keys and the JSON is. The checksum only means something because of that second
+fact, and there is a test in that repository asserting it.
+
 ## Documents
 
 - `BYTE_ALIGNED_PLAN.md` — the design, its measurements, and what is still open
@@ -389,6 +511,8 @@ ends and no state crosses a boundary.
   and the optimisations that did not pay
 - `wire/README.md`, `column/README.md` — the layouts
 - `rust/README.md` — the Rust port
+- [colbin-benchmarks][bench-repo] — the comparison against protocol buffers, and
+  the corpus materialised and pinned by checksum
 
 ## Rust
 
@@ -399,8 +523,8 @@ encode and decode rather than a reflective walk.
 ```rust
 #[derive(Colbin)]
 struct Charge {
-    #[cb(0)] company_id: u32,
-    #[cb(1)] note: String,
+    #[cb(1)] company_id: u32,
+    #[cb(2)] note: String,
 }
 ```
 
@@ -423,3 +547,5 @@ wire yet.
 The schema section is Go-only so far: it changes nothing about the bytes an
 ordinary message carries, so the Rust port reads and writes those unaffected,
 but it cannot yet produce or consume a section of its own.
+
+[bench-repo]: https://github.com/ivanjoz/colbin-benchmarks
