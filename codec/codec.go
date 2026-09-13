@@ -382,7 +382,7 @@ func addressable(v any) (reflect.Value, *typePlan, error) {
 		}
 		value = value.Elem()
 	}
-	plan, err := planFor(value.Type())
+	plan, err := planForRoot(value.Type())
 	if err != nil {
 		return reflect.Value{}, nil, err
 	}
@@ -539,7 +539,7 @@ func Unmarshal(data []byte, dst any) error {
 		return fmt.Errorf("colbin: Unmarshal needs a non-nil pointer, got %T", dst)
 	}
 	value := pointer.Elem()
-	plan, err := planFor(value.Type())
+	plan, err := planForRoot(value.Type())
 	if err != nil {
 		return err
 	}

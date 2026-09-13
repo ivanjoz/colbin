@@ -24,18 +24,24 @@ package colbin
 
 import "github.com/ivanjoz/colbin/codec"
 
-// Marshal encodes v, which must be a struct or a pointer to one.
+// Marshal encodes v: a struct, a pointer to one, or a slice or map to be carried
+// at the root.
 //
-// Every field needs an explicit id in its `cb` tag, and the ids decide the key
-// width: sixteen or fewer, all under sixteen, and the message uses four-bit
-// keys; otherwise eight-bit ones.
+// A field id comes from its `cb` tag, or from the hash of its name when the tag
+// gives no number, and the ids decide the key width: sixteen or fewer, all under
+// sixteen, and the message uses four-bit keys; otherwise eight-bit ones.
+//
+// A slice or map root is written as a one-field message holding it under key 0,
+// so the root is still a struct and the blob is still an ordinary message — see
+// codec/envelope.go for why that is worth two bytes.
 func Marshal(v any) ([]byte, error) { return codec.Marshal(v) }
 
 // Append encodes v onto dst, which may be nil. It is Marshal without the
 // allocation, for a caller with a buffer to reuse.
 func Append(dst []byte, v any) ([]byte, error) { return codec.Append(dst, v) }
 
-// Unmarshal decodes a message into dst, a non-nil pointer to a struct.
+// Unmarshal decodes a message into dst, a non-nil pointer to a struct — or to
+// the slice or map Marshal carried at the root.
 //
 // Every field of dst is set, including the ones the message omitted: an omitted
 // key means the value was zero, so the destination is cleared first rather than
