@@ -83,7 +83,7 @@ func (w *Writer) OpenTable(key uint8, rows int) Mark {
 }
 
 // OpenElement begins one element of a narrow list: a length and a body, with no
-// descriptor between them.
+// descriptor between them. Close it with CloseElement, not with Close.
 func (w *Writer) OpenElement() Mark {
 	w.Buffer = append(w.Buffer, 0)
 	return Mark{at: len(w.Buffer) - 1}
@@ -92,6 +92,10 @@ func (w *Writer) OpenElement() Mark {
 // Close patches a composite's length, widening the placeholder when the body
 // outgrew it. It is the same backpatch the wide writer does, and the same
 // reason: sizing the value first would cost a pass over every nested one.
+//
+// It is for a *keyed* composite only. A list element has no descriptor in front
+// of it, so there is nothing to put a wider length code in and CloseElement is
+// the one to call — see the comment there.
 func (w *Writer) Close(mark Mark) {
 	body := len(w.Buffer) - (mark.at + 1)
 	if body < inlineCompositeLength {
@@ -99,6 +103,35 @@ func (w *Writer) Close(mark Mark) {
 		return
 	}
 	w.widenLength(mark, body)
+}
+
+// CloseElement patches a narrow list element's length.
+//
+// It is not Close, and the difference is the whole reason it exists. Close
+// widens by setting the `lw` bits of the descriptor *before* the placeholder —
+// and a list element has no descriptor before it, which is exactly what makes a
+// narrow list of small structs cheaper than a wide one. Calling Close on an
+// element therefore OR-ed 2 into whatever byte happened to precede it, which is
+// the element count for the first element and the tail of the previous
+// element's body for every one after it, and then wrote a bare four-byte length
+// where Element expects the 0xFF escape.
+//
+// The result was a message Marshal produced and Unmarshal refused, for any
+// narrow list whose element body reached 255 bytes — a `[]struct` under the
+// table threshold holding a string of a couple of hundred characters, which is
+// an ordinary record rather than a corner. TestNarrowListElementWidths pins it.
+func (w *Writer) CloseElement(mark Mark) {
+	body := len(w.Buffer) - (mark.at + 1)
+	if body <= inlineElementSize {
+		w.Buffer[mark.at] = uint8(body)
+		return
+	}
+	// The escape Element reads: 0xFF and then four bytes, so the body shifts up
+	// by the four the placeholder does not already hold.
+	w.Buffer = append(w.Buffer, 0, 0, 0, 0)
+	copy(w.Buffer[mark.at+5:], w.Buffer[mark.at+1:len(w.Buffer)-4])
+	w.Buffer[mark.at] = elementSizeEscape
+	binary.LittleEndian.PutUint32(w.Buffer[mark.at+1:], uint32(body))
 }
 
 func (w *Writer) widenLength(mark Mark, body int) {

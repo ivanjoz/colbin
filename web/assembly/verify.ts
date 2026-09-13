@@ -1,180 +1,273 @@
 // The encode self-check (PLAN.md §4.5).
 //
-// The structural rules in infer.ts and encode.ts are an argument that a message
+// The structural rules in infer.ts and build.ts are an argument that a message
 // says what its input said. This is the proof: the encoder decodes what it just
-// wrote and walks it against the parsed input. Cost is roughly one decode, which
-// is why it can be turned off — and why it is on by default, since §4.3
-// established that a well-formed-but-wrong message is the failure that does not
-// announce itself.
+// wrote and walks it against the parsed input, so the caller hears about a
+// disagreement as an error rather than as data.
 //
-// It compares values, not bytes. "It decoded without error" is far too weak a
-// check: over half of the corrupt messages in §4.3 decoded without error.
+// It is on by default and costs roughly one decode. §4.3 established why that is
+// worth paying, and the corruption sweep in tests/fuzz.test.mjs puts a number on
+// it: five sixths of all single-byte corruptions of a colbin message decode to
+// well-formed, wrong JSON. A decoder cannot tell. An encoder can, because it
+// still has the input.
+//
+// # It compares values, not bytes
+//
+// "It decoded without error" is far too weak a check, for exactly that reason.
+// And comparing the two *texts* would be too strong: the decoder writes every
+// field of the schema, in the order the message carried them, where the input
+// wrote only what it had in the order the author typed it.
 //
 // Three differences are expected rather than failures, and every one of them is
-// a documented property of a dense columnar layout (§6):
+// a documented property of a dense columnar layout (PLAN.md §6):
 //
-//   - a key absent from a record comes back as null
-//   - an empty array comes back as null
-//   - an integer in a column one float promoted comes back as that float
+//   - a key absent from a record comes back as its zero;
+//   - an empty array comes back as null;
+//   - an integer in a column one float promoted comes back as that float.
 //
-// Anything else is a bug in the encoder, and the point of this file is that the
-// caller hears about it as an error rather than as data.
+// Anything else is a bug in the encoder, and the point of this file is that it
+// is caught here rather than by whoever reads the message next.
 
-import { Diag, D_CORRUPT } from './diag'
-import { Decoded, V_ARRAY, V_BOOL, V_FLOAT, V_INT, V_NULL, V_OBJECT, V_STRING, V_UINT, Val } from './decode'
-import { Doc, K_ARRAY, K_BOOL, K_FLOAT, K_INT, K_NULL, K_OBJECT, K_STRING, K_UINT } from './json'
+import { D_CORRUPT, Diag } from './diag'
+import {
+  Doc,
+  K_ARRAY,
+  K_BOOL,
+  K_FLOAT,
+  K_INT,
+  K_NULL,
+  K_OBJECT,
+  K_STRING,
+  K_UINT,
+  parseJSON,
+} from './json'
 
-export class Verifier {
-  doc: Doc
+/**
+ * Compares the JSON the decoder produced against the document the encoder was
+ * given. Returns true when they agree.
+ */
+export function verify(input: Doc, inputRoot: i32, decoded: Uint8Array, diag: Diag): bool {
+  const quiet = new Diag()
+  const back = parseJSON(decoded, quiet)
+  if (back == null) {
+    diag.fail(
+      D_CORRUPT,
+      -1,
+      '',
+      'the encoder wrote a message whose decoding is not valid JSON: ' + quiet.message,
+    )
+    return false
+  }
+  const checker = new Checker(input, back, diag)
+  checker.compare(inputRoot, back.root)
+  return diag.ok
+}
+
+class Checker {
+  input: Doc
+  back: Doc
   diag: Diag
+  path: Array<string> = []
 
-  constructor(doc: Doc, diag: Diag) {
-    this.doc = doc
+  constructor(input: Doc, back: Doc, diag: Diag) {
+    this.input = input
+    this.back = back
     this.diag = diag
   }
 
-  fail(path: string, message: string): bool {
-    this.diag.fail(D_CORRUPT, -1, path,
-      'the encoder produced a message that does not read back as its input (' + message +
-        '). This is a bug in colbin, not in your JSON.')
-    return false
+  private pathString(): string {
+    let out = ''
+    for (let index = 0; index < this.path.length; index++) out += unchecked(this.path[index])
+    return out.length == 0 ? '(root)' : out
   }
 
-  /** Every record, against the values the message gave back. */
-  check(records: Array<i32>, decoded: Decoded): bool {
-    if (decoded.rows.length != records.length) {
-      return this.fail('', 'record count ' + decoded.rows.length.toString() + ' instead of ' +
-        records.length.toString())
-    }
-    for (let i = 0; i < records.length; i++) {
-      if (!this.value(unchecked(records[i]), unchecked(decoded.rows[i]), '[' + i.toString() + ']')) {
-        return false
+  private differs(what: string): void {
+    this.diag.fail(
+      D_CORRUPT,
+      -1,
+      this.pathString(),
+      'the encoder wrote a message that does not read back as its input: ' + what,
+    )
+  }
+
+  /**
+   * One value against another. `mine` may be -1, which is a key the input did
+   * not carry — the decoder will still have written it, and its zero is what it
+   * must have written.
+   */
+  compare(mine: i32, theirs: i32): void {
+    if (!this.diag.ok) return
+    const back = this.back
+    if (mine < 0) {
+      // An absent key comes back as its zero. That is the encoding of a zero
+      // value, not a lost field.
+      if (!this.isZeroish(theirs)) {
+        this.differs('a key the input did not carry came back as something other than a zero')
       }
+      return
     }
-    return true
-  }
 
-  value(node: i32, val: Val, path: string): bool {
-    const doc = this.doc
-    const kind = doc.kindOf(node)
+    const input = this.input
+    const kind = input.kindOf(mine)
 
     if (kind == K_NULL) {
-      return val.tag == V_NULL ? true : this.fail(path, 'null came back as something else')
+      // A null is omitted, so it comes back as null where the format has a
+      // pointer for it and as the zero where it does not.
+      if (!this.isZeroish(theirs)) this.differs('a null came back as a value')
+      return
     }
-
     if (kind == K_BOOL) {
-      if (val.tag != V_BOOL) return this.fail(path, 'a bool came back as another type')
-      const want = unchecked(doc.num[node])
-      return val.num == want ? true : this.fail(path, 'a bool changed value')
-    }
-
-    if (kind == K_INT || kind == K_UINT) {
-      const raw = unchecked(doc.num[node])
-      if (val.tag == V_INT || val.tag == V_UINT) {
-        // Both carry the 64-bit pattern, so signedness does not enter the test.
-        return val.num == raw ? true : this.fail(path, 'an integer changed value')
+      if (back.kindOf(theirs) != K_BOOL ||
+          (unchecked(back.num[theirs]) != 0) != (unchecked(input.num[mine]) != 0)) {
+        this.differs('a boolean came back differently')
       }
-      if (val.tag == V_FLOAT) {
-        // One float promoted the column, so this integer is stored as a float.
-        const want: f64 = kind == K_UINT ? <f64>(<u64>raw) : <f64>raw
-        const got = reinterpret<f64>(val.num)
-        return got == want
-          ? true
-          : this.fail(path, 'an integer in a float column changed value')
-      }
-      return this.fail(path, 'an integer came back as another type')
+      return
     }
-
-    if (kind == K_FLOAT) {
-      if (val.tag != V_FLOAT) return this.fail(path, 'a float came back as another type')
-      return val.num == unchecked(doc.num[node])
-        ? true
-        : this.fail(path, 'a float changed value')
+    if (kind == K_INT || kind == K_UINT || kind == K_FLOAT) {
+      this.compareNumber(mine, theirs)
+      return
     }
-
     if (kind == K_STRING) {
-      if (val.tag != V_STRING) return this.fail(path, 'a string came back as another type')
-      const want = doc.strOf(node)
-      const got = val.bytes!
-      if (want.length != got.length) return this.fail(path, 'a string changed length')
-      if (want.length == 0) return true
-      return memory.compare(want.dataStart, got.dataStart, <usize>want.length) == 0
-        ? true
-        : this.fail(path, 'a string changed content')
-    }
-
-    if (kind == K_ARRAY) {
-      const count = doc.count(node)
-      // An empty array and null are the same on the wire, so an empty array
-      // coming back as null is the format working, not the encoder failing.
-      if (count == 0) {
-        return val.tag == V_NULL || (val.tag == V_ARRAY && val.items!.length == 0)
-          ? true
-          : this.fail(path, 'an empty array came back as something else')
+      if (back.kindOf(theirs) != K_STRING || !sameBytes(input.strOf(mine), back.strOf(theirs))) {
+        this.differs('a string came back differently')
       }
-      if (val.tag != V_ARRAY) return this.fail(path, 'an array came back as another type')
-      const items = val.items!
-      if (items.length != count) return this.fail(path, 'an array changed length')
-      for (let i = 0; i < count; i++) {
-        if (!this.value(doc.childAt(node, i), unchecked(items[i]), path + '[' + i.toString() + ']')) {
-          return false
-        }
+      return
+    }
+    if (kind == K_ARRAY) {
+      this.compareArray(mine, theirs)
+      return
+    }
+    this.compareObject(mine, theirs)
+  }
+
+  private compareNumber(mine: i32, theirs: i32): void {
+    const input = this.input
+    const back = this.back
+    const theirKind = back.kindOf(theirs)
+    if (theirKind != K_INT && theirKind != K_UINT && theirKind != K_FLOAT) {
+      this.differs('a number came back as something else')
+      return
+    }
+    const myKind = input.kindOf(mine)
+    if (myKind == K_FLOAT || theirKind == K_FLOAT) {
+      // One float anywhere in a column promotes the whole column, so an integer
+      // legitimately comes back as that float. Comparing as f64 is what makes
+      // that a tolerance rather than a hole: a value that does not survive the
+      // promotion still differs.
+      if (numberAsFloat(input, mine) != numberAsFloat(back, theirs)) {
+        this.differs('a number came back with a different value')
+      }
+      return
+    }
+    // Both integers: compare the bits *and* the signedness, so an int64 and a
+    // uint64 holding the same bit pattern are not mistaken for each other.
+    if (unchecked(input.num[mine]) != unchecked(back.num[theirs]) || myKind != theirKind) {
+      this.differs('an integer came back with a different value')
+    }
+  }
+
+  private compareArray(mine: i32, theirs: i32): void {
+    const input = this.input
+    const back = this.back
+    const count = input.count(mine)
+    if (back.kindOf(theirs) == K_NULL) {
+      // An empty array and a nil one are the same on the wire.
+      if (count != 0) this.differs('an array came back as null')
+      return
+    }
+    if (back.kindOf(theirs) != K_ARRAY) {
+      this.differs('an array came back as something else')
+      return
+    }
+    if (back.count(theirs) != count) {
+      this.differs(
+        'an array of ' + count.toString() + ' came back with ' + back.count(theirs).toString(),
+      )
+      return
+    }
+    for (let index = 0; index < count && this.diag.ok; index++) {
+      this.path.push('[' + index.toString() + ']')
+      this.compare(input.childAt(mine, index), back.childAt(theirs, index))
+      this.path.pop()
+    }
+  }
+
+  private compareObject(mine: i32, theirs: i32): void {
+    const input = this.input
+    const back = this.back
+    if (back.kindOf(theirs) != K_OBJECT) {
+      this.differs('an object came back as something else')
+      return
+    }
+    // Walk the *decoder's* keys, because it writes every field of the schema
+    // and the input may have written only some. A key the input did not carry
+    // is compared against -1, which is the absent case above.
+    const count = back.count(theirs)
+    for (let index = 0; index < count && this.diag.ok; index++) {
+      const key = back.keyOf(theirs, index)
+      this.path.push('.' + String.UTF8.decodeUnsafe(key.dataStart, <usize>key.length, false))
+      this.compare(findKey(input, mine, key), back.childAt(theirs, index))
+      this.path.pop()
+    }
+    // And the other way: a key the input carried that the decoder did not write
+    // is a field the schema lost, which is the failure this whole file exists
+    // to catch.
+    const written = input.count(mine)
+    for (let index = 0; index < written && this.diag.ok; index++) {
+      const key = input.keyOf(mine, index)
+      if (findKey(back, theirs, key) < 0) {
+        this.path.push('.' + String.UTF8.decodeUnsafe(key.dataStart, <usize>key.length, false))
+        this.differs('the input carried a key the message does not')
+        this.path.pop()
+      }
+    }
+  }
+
+  /** Whether a decoded value is the zero an omitted field comes back as. */
+  private isZeroish(node: i32): bool {
+    const back = this.back
+    const kind = back.kindOf(node)
+    if (kind == K_NULL) return true
+    if (kind == K_BOOL) return unchecked(back.num[node]) == 0
+    if (kind == K_INT || kind == K_UINT) return unchecked(back.num[node]) == 0
+    if (kind == K_FLOAT) return back.floatOf(node) == 0
+    if (kind == K_STRING) return back.strOf(node).length == 0
+    if (kind == K_ARRAY) return back.count(node) == 0
+    if (kind == K_OBJECT) {
+      // A nested struct is always written, so an omitted one comes back as an
+      // object whose every field is itself a zero.
+      const count = back.count(node)
+      for (let index = 0; index < count; index++) {
+        if (!this.isZeroish(back.childAt(node, index))) return false
       }
       return true
     }
-
-    // K_OBJECT
-    if (val.tag != V_OBJECT) return this.fail(path, 'an object came back as another type')
-    const keys = val.keys!
-    const items = val.items!
-    for (let i = 0; i < keys.length; i++) {
-      const key = unchecked(keys[i])
-      const child = this.lookup(node, key)
-      const sub = path + '.' + String.UTF8.decodeUnsafe(key.dataStart, <usize>key.length, false)
-      if (child < 0) {
-        // The key was absent from this record, which is indistinguishable from
-        // an explicit null once the column is dense.
-        if (unchecked(items[i]).tag != V_NULL) {
-          return this.fail(sub, 'a key this record did not have came back with a value')
-        }
-        continue
-      }
-      if (!this.value(child, unchecked(items[i]), sub)) return false
-    }
-
-    // Every key the input had must be one the message carries back.
-    const inputKeys = doc.count(node)
-    for (let i = 0; i < inputKeys; i++) {
-      const key = doc.keyOf(node, i)
-      let found = false
-      for (let k = 0; k < keys.length; k++) {
-        const other = unchecked(keys[k])
-        if (other.length == key.length &&
-            memory.compare(other.dataStart, key.dataStart, <usize>key.length) == 0) {
-          found = true
-          break
-        }
-      }
-      if (!found) {
-        return this.fail(path + '.' + String.UTF8.decodeUnsafe(key.dataStart, <usize>key.length, false),
-          'a key of the input is missing from the message')
-      }
-    }
-    return true
+    return false
   }
+}
 
-  /** The value of a key in an object node, or -1. The scanner has already
-   *  resolved duplicates, so at most one entry can match. */
-  lookup(node: i32, key: Uint8Array): i32 {
-    const doc = this.doc
-    const count = doc.count(node)
-    for (let i = 0; i < count; i++) {
-      const candidate = doc.keyOf(node, i)
-      if (candidate.length == key.length &&
-          memory.compare(candidate.dataStart, key.dataStart, <usize>key.length) == 0) {
-        return doc.childAt(node, i)
-      }
-    }
-    return -1
+/** The last child under `key`, or -1. Last rather than first, because a
+ * duplicate key overwrites — which is what JSON.parse does and what build.ts
+ * writes. */
+function findKey(doc: Doc, node: i32, key: Uint8Array): i32 {
+  if (node < 0 || doc.kindOf(node) != K_OBJECT) return -1
+  const count = doc.count(node)
+  let found = -1
+  for (let index = 0; index < count; index++) {
+    if (sameBytes(doc.keyOf(node, index), key)) found = doc.childAt(node, index)
   }
+  return found
+}
+
+function numberAsFloat(doc: Doc, node: i32): f64 {
+  const kind = doc.kindOf(node)
+  if (kind == K_FLOAT) return doc.floatOf(node)
+  if (kind == K_UINT) return <f64><u64>unchecked(doc.num[node])
+  return <f64>unchecked(doc.num[node])
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): bool {
+  if (a.length != b.length) return false
+  if (a.length == 0) return true
+  return memory.compare(a.dataStart, b.dataStart, <usize>a.length) == 0
 }

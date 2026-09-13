@@ -1,4 +1,4 @@
-// The public ABI (PLAN.md §2.1).
+// The public ABI (PLAN.md §2.1, REFACTOR_PLAN.md §6).
 //
 // UTF-8 bytes in, UTF-8 bytes out, and no other shape crosses the boundary: the
 // host never hands over a JavaScript object graph, because JSON.parse would have
@@ -6,22 +6,38 @@
 //
 // Nothing here traps. An AssemblyScript abort reaches the host as a RuntimeError
 // carrying no path and no offset, which is exactly what a caller cannot act on,
-// so every failure returns a negative length and leaves a JSON diagnostic for
+// so every failure returns a negative length and leaves a diagnostic for
 // lastError() to hand back.
+//
+// # Where the schema travels
+//
+// Out of band by default, which is the delivery the format's own README advises:
+// send the section once per connection and then send ordinary messages, which
+// costs nothing per message. `section()` hands back the one the last encode
+// resolved; `setSchema` holds one for the decodes that follow. SELF_DESCRIBING
+// puts it in front of the body instead, for a document that has to stand alone.
 
-import { Diag, lineOf } from './diag'
-import { decodeMessage, decodeValues, inspectMessage } from './decode'
-import { encodeMessage } from './encode'
-import { inferSchema } from './infer'
+import { Builder } from './build'
+import { D_CORRUPT, Diag, lineOf } from './diag'
+import { inferPlan } from './infer'
+import { inspect } from './inspect'
 import { parseJSON } from './json'
-import { Verifier } from './verify'
-import { Writer } from './bytes'
+import { toJSON } from './message'
+import { Plan } from './plan'
+import { buildSection, parseSection } from './section'
+import { verify } from './verify'
 
-/** Held in a global so the collector cannot reclaim it between calls. */
+/** Encode flags. */
+export const SELF_DESCRIBING: i32 = 1
+export const VERIFY: i32 = 2
+
+/** Held in globals so the collector cannot reclaim them between calls. */
 let input: Uint8Array = new Uint8Array(0)
 let result: Uint8Array = new Uint8Array(0)
-const diag = new Diag()
+let schema: Plan | null = null
+let lastSection: Uint8Array = new Uint8Array(0)
 let source: Uint8Array = new Uint8Array(0)
+const diag = new Diag()
 
 /** Reserves n bytes for the caller to write the input into. */
 export function alloc(n: i32): usize {
@@ -35,117 +51,123 @@ export function resultPtr(): usize {
 }
 
 /**
- * JSON to a colbin JSON-mode message.
- * Returns the message length, or -1 with a diagnostic in lastError().
+ * JSON to a colbin message.
  *
- * verify != 0 makes the encoder read its own output back and compare it against
- * the input before returning, which is what turns "a decodable message or an
- * error, never anything else" from an argument into a check (PLAN.md §4.5). It
- * costs about one decode. Pass 0 only after measuring and deciding.
+ * Returns the message length, or -1 with a diagnostic in lastError(). The
+ * section for it is at `section()`; with SELF_DESCRIBING it is in front of the
+ * body as well, and the root byte says so.
+ *
+ * VERIFY makes the encoder read its own output back and compare it against the
+ * input before returning, which is what turns "a decodable message or an error,
+ * never anything else" from an argument into a check (PLAN.md §4.5). It costs
+ * about one decode. Leave it on unless you have measured and decided.
  */
-export function encode(len: i32, verify: i32): i32 {
+export function encode(len: i32, flags: i32): i32 {
   diag.reset()
-  const src = input.subarray(0, len)
-  source = src
+  source = input.subarray(0, len)
+  lastSection = new Uint8Array(0)
 
-  const doc = parseJSON(src, diag)
-  if (doc == null) return -1
-  const schema = inferSchema(doc, diag)
-  if (schema == null) return -1
-  const message = encodeMessage(doc, schema, diag)
-  if (message == null) return -1
+  const doc = parseJSON(source, diag)
+  if (doc == null) return fail()
+  const inferred = inferPlan(doc, diag)
+  if (inferred == null) return fail()
 
-  if (verify != 0) {
-    const decoded = decodeValues(message, diag)
-    if (decoded == null) return -1
-    if (!new Verifier(doc, diag).check(schema.records, decoded)) return -1
+  const plan = inferred.plan
+  const section = buildSection(plan)
+
+  const builder = new Builder(doc, diag)
+  const selfDescribing = (flags & SELF_DESCRIBING) != 0
+  if (selfDescribing) {
+    // [root with the schema bit] [section] [body]. The body is byte for byte
+    // what the out-of-band form writes; only the first byte and the section in
+    // front of it differ.
+    builder.out.writeByte(plan.isWide ? 0xdc : 0xd4)
+    builder.out.writeBytes(section, 0, section.length)
+    builder.run(plan, inferred.root)
+  } else {
+    builder.build(plan, inferred.root, false)
+  }
+  if (!diag.ok) return fail()
+  const message = builder.out.take()
+
+  if ((flags & VERIFY) != 0) {
+    const decoded = toJSON(message, selfDescribing ? null : plan)
+    if (!decoded.ok) {
+      diag.fail(D_CORRUPT, -1, '', 'the encoder wrote a message it cannot read back: ' + decoded.error)
+      return fail()
+    }
+    if (!verify(doc, inferred.root, decoded.json, diag)) return fail()
   }
 
+  lastSection = section
   result = message
-  return message.length
-}
-
-/**
- * A colbin JSON-mode message back to JSON text.
- * Returns its length, or -1 with a diagnostic in lastError().
- */
-export function decode(len: i32): i32 {
-  diag.reset()
-  source = new Uint8Array(0) // offsets refer to the message, not to any source
-  const text = decodeMessage(input.subarray(0, len), diag)
-  if (text == null) return -1
-  result = text
-  return text.length
-}
-
-/**
- * The column tree of a message as JSON, with each column's byte span.
- * Returns its length, or -1 with a diagnostic in lastError().
- */
-export function inspect(len: i32): i32 {
-  diag.reset()
-  source = new Uint8Array(0)
-  const text = inspectMessage(input.subarray(0, len), diag)
-  if (text == null) return -1
-  result = text
-  return text.length
-}
-
-/**
- * The last failure as JSON: code, path, offset, line, message, warnings.
- * Returns its length, with the bytes at resultPtr().
- */
-export function lastError(): i32 {
-  const w = new Writer(256)
-  writeString(w, '{"code":')
-  writeString(w, diag.code.toString())
-  writeString(w, ',"offset":')
-  writeString(w, diag.offset.toString())
-  writeString(w, ',"line":')
-  writeString(w, (diag.offset < 0 ? -1 : lineOf(source, diag.offset)).toString())
-  writeString(w, ',"path":')
-  writeJSONString(w, diag.path)
-  writeString(w, ',"message":')
-  writeJSONString(w, diag.message)
-  writeString(w, ',"warnings":[')
-  for (let i = 0; i < diag.warnings.length; i++) {
-    if (i > 0) w.writeByte(0x2c)
-    writeJSONString(w, unchecked(diag.warnings[i]))
-  }
-  writeString(w, ']}')
-
-  result = w.take()
   return result.length
 }
 
-function writeString(w: Writer, s: string): void {
-  const bytes = Uint8Array.wrap(String.UTF8.encode(s, false))
-  w.writeBytes(bytes, 0, bytes.length)
+/** The schema section for the last encode, to send once per connection. */
+export function section(): i32 {
+  result = lastSection
+  return result.length
 }
 
-/** A JSON string literal. Diagnostics are the only strings this writes. */
-function writeJSONString(w: Writer, s: string): void {
-  const bytes = Uint8Array.wrap(String.UTF8.encode(s, false))
-  w.writeByte(0x22)
-  for (let i = 0; i < bytes.length; i++) {
-    const c = unchecked(bytes[i])
-    if (c == 0x22 || c == 0x5c) {
-      w.writeByte(0x5c)
-      w.writeByte(c)
-    } else if (c == 0x0a) {
-      w.writeByte(0x5c)
-      w.writeByte(0x6e)
-    } else if (c < 0x20) {
-      writeString(w, '\\u00')
-      w.writeByte(hexDigit(c >> 4))
-      w.writeByte(hexDigit(c & 0x0f))
-    } else {
-      w.writeByte(c)
-    }
+/**
+ * Parses a schema section from the input buffer and holds it for the decodes
+ * that follow. A length of zero clears it.
+ */
+export function setSchema(len: i32): i32 {
+  diag.reset()
+  if (len == 0) {
+    schema = null
+    return 0
   }
-  w.writeByte(0x22)
+  const parsed = parseSection(input.subarray(0, len))
+  if (!parsed.ok) {
+    diag.fail(D_CORRUPT, -1, '', 'colbin: ' + parsed.error)
+    return -1
+  }
+  schema = parsed.plan
+  return 0
 }
 
-@inline function hexDigit(v: u8): u8 {
-  return v < 10 ? 0x30 + v : 0x61 + (v - 10)
+/**
+ * A colbin message to JSON text, using the held schema or — when byte 0 says so
+ * — the message's own.
+ */
+export function decode(len: i32): i32 {
+  diag.reset()
+  const decoded = toJSON(input.subarray(0, len), schema)
+  if (!decoded.ok) {
+    diag.fail(D_CORRUPT, -1, '', decoded.error)
+    return -1
+  }
+  result = decoded.json
+  return result.length
+}
+
+/**
+ * The field tree of a message, with a byte span on every node.
+ *
+ * The spans are absolute offsets into the message handed in, so a caller can
+ * highlight them without knowing where the body starts behind the section.
+ */
+export function inspectMessage(len: i32): i32 {
+  diag.reset()
+  const tree = inspect(input.subarray(0, len), schema)
+  if (!tree.ok) {
+    diag.fail(D_CORRUPT, -1, '', tree.error)
+    return -1
+  }
+  result = tree.json
+  return result.length
+}
+
+/** The last diagnostic as JSON, at resultPtr. */
+export function lastError(): i32 {
+  diag.line = diag.offset < 0 ? -1 : lineOf(source, diag.offset)
+  result = diag.encode()
+  return result.length
+}
+
+function fail(): i32 {
+  return -1
 }

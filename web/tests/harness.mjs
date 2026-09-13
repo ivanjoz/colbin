@@ -28,16 +28,22 @@ export async function load() {
   }
 }
 
-export async function vectors(name) {
-  return JSON.parse(await readFile(join(root, 'tests/vectors', name), 'utf8'))
+/**
+ * One tier of the corpus, by the name the generator gave it.
+ *
+ * The file is committed rather than generated into a gitignored directory, and
+ * regenerated in CI with a diff check -- the discipline rust/vectors keeps. So
+ * a Go-side format change shows up as a reviewable diff of the bytes, and a
+ * stale corpus fails `go test ./web/vectors` on the Go side's own push rather
+ * than quietly passing here.
+ */
+export async function vectors(tier) {
+  const held = JSON.parse(await readFile(join(root, 'vectors/vectors.json'), 'utf8'))
+  if (!(tier in held)) {
+    throw new Error(`no tier ${tier}: run \`go run ./web/vectors\``)
+  }
+  return held[tier]
 }
-
-// The tiers this port's ENCODER can reproduce byte for byte. Decoding is not
-// gated: every vector, of every tier, must read back correctly. omitempty is
-// missing here because the module writes dense columns -- Go's SetOmitEmpty has
-// no counterpart in the encoder yet -- and a tier that is off is skipped loudly
-// rather than passing.
-export const ENCODES = new Set(['scalar', 'float', 'nested', 'array', 'nullable', 'value'])
 
 export const hex = (bytes) => Buffer.from(bytes).toString('hex')
 export const unhex = (s) => Uint8Array.from(Buffer.from(s, 'hex'))

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Column } from './codec'
+  import type { Field } from './codec'
   import { bytes } from './format'
   // Self-import rather than <svelte:self>, which Svelte 5 deprecates.
   import ColumnTree from './ColumnTree.svelte'
@@ -10,19 +10,19 @@
     depth = 0,
     hovered = $bindable(),
   }: {
-    columns: Column[]
+    columns: Field[]
     total: number
     depth?: number
-    hovered: Column | undefined
+    hovered: Field | undefined
   } = $props()
 
-  const share = (column: Column) => (total > 0 ? (column.bytes / total) * 100 : 0)
+  const share = (column: Field) => (total > 0 ? (column.bytes / total) * 100 : 0)
 
   // The type and the exact share moved into the title: a row is read as "which
   // field is the message", and a column of int64/string/bool repeated down the
   // side answers a question nobody asked first.
-  const detail = (column: Column) =>
-    `${column.type}${column.nullable ? ' · nullable' : ''} · ${share(column).toFixed(1)}% of the message`
+  const detail = (column: Field) =>
+    `${column.type}${column.optional ? ' · optional' : ''} · ${share(column).toFixed(1)}% of the message`
 </script>
 
 <ul class="tree" style="margin-left: {depth > 0 ? 12 : 0}px">
@@ -47,7 +47,7 @@
       >
         <span class="fill" style="width: {share(column)}%"></span>
         <span class="name"
-          >{column.name}{#if column.nullable}<span class="nullable">?</span>{/if}</span
+          >{column.name}{#if column.optional}<span class="optional">?</span>{/if}</span
         >
         <span class="bytes">{bytes(column.bytes)}</span>
       </button>
@@ -130,7 +130,7 @@
     white-space: nowrap;
   }
 
-  .nullable {
+  .optional {
     color: var(--warn);
   }
 

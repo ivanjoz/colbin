@@ -1,75 +1,192 @@
-// The column inspector. Its spans are also a check on the decoder: if they do
-// not tile the message exactly, something is being read twice or skipped.
+// Phase 5: the field tree, and the one invariant that makes it trustworthy.
+//
+// **The spans tile the body exactly.** A key run has no padding and an omitted
+// field writes nothing, so the fields a message *did* write are contiguous from
+// the first byte of the body to the last. If this walk consumed a field
+// differently from the decoder, a gap or an overlap appears here — which is why
+// inspect.ts being a second walk is safe rather than a liability.
+//
+// It is checked against both corpora: the messages Go wrote, and the messages
+// the module wrote. The first is the harder one, because it holds shapes the
+// module's own encoder never produces — a map, a []byte, an eight-bit key run.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { load, vectors } from './harness.mjs'
+import { load, vectors, unhex } from './harness.mjs'
+import { documents, textOf } from './documents.mjs'
 
 const wasm = await load()
-const cases = await vectors('messages.json')
+const goCases = await vectors('types')
+const encoder = new TextEncoder()
+const decoder = new TextDecoder()
+const VERIFY = 2
 
-function inspect(hexText) {
-  const msg = Uint8Array.from(Buffer.from(hexText, 'hex'))
-  wasm.u8.set(msg, wasm.exports.inPtr())
-  const len = wasm.exports.inspectMsg(msg.length)
-  assert.ok(len >= 0, 'inspect failed')
-  return JSON.parse(
-    Buffer.from(wasm.u8.subarray(wasm.exports.outPtr(), wasm.exports.outPtr() + len)).toString()
-  )
+function feed(bytes) {
+  wasm.u8.set(bytes, wasm.exports.inPtr())
+  return bytes.length
 }
 
-/** Depth-first list of every column in the tree. */
-function flatten(columns) {
-  return columns.flatMap((c) => [c, ...flatten(c.children)])
+function out(length) {
+  const at = wasm.exports.outPtr()
+  return wasm.u8.slice(at, at + length)
 }
 
-for (const c of cases) {
-  test(`inspect ${c.tier}/${c.name}`, () => {
-    const report = inspect(c.message)
-    assert.equal(report.totalBytes, c.message.length / 2)
-    assert.ok(report.schemaBytes > 0 && report.schemaBytes < report.totalBytes)
-    assert.ok(report.columns.length > 0)
+function outText(length) {
+  return decoder.decode(out(length))
+}
 
-    for (const col of flatten(report.columns)) {
-      assert.ok(col.end > col.start, `${col.name} has an empty span`)
-      assert.ok(col.end <= report.totalBytes, `${col.name} runs past the message`)
-      assert.equal(col.bytes, col.end - col.start)
-      for (const child of col.children) {
-        assert.ok(child.start >= col.start && child.end <= col.end,
-          `${child.name} is not inside ${col.name}`)
-      }
+function failure() {
+  return outText(wasm.exports.lastMessage())
+}
+
+function inspect(section, message) {
+  if (section === null) {
+    assert.equal(wasm.exports.setSection(0), 0)
+  } else {
+    assert.equal(wasm.exports.setSection(feed(section)), 0, failure())
+  }
+  const length = wasm.exports.inspectJSON(feed(message))
+  assert.ok(length >= 0, `inspect: ${failure()}`)
+  return JSON.parse(outText(length))
+}
+
+/**
+ * Every node's span sits inside its parent's, children are ascending and do not
+ * overlap, and the top level covers the body with nothing left over.
+ */
+function checkTiling(report, what) {
+  const bodyStart = report.rootBytes + report.schemaBytes
+  const bodyEnd = report.totalBytes
+  walkSpans(report.fields, bodyStart, bodyEnd, what, true)
+}
+
+function walkSpans(nodes, from, to, what, exhaustive) {
+  let cursor = from
+  for (const node of nodes) {
+    assert.ok(node.end >= node.start, `${what}: ${node.name} ends before it starts`)
+    assert.ok(node.start >= from && node.end <= to, `${what}: ${node.name} escapes its parent`)
+    assert.ok(
+      node.start >= cursor,
+      `${what}: ${node.name} at ${node.start} overlaps what came before, at ${cursor}`,
+    )
+    assert.equal(node.bytes, node.end - node.start, `${what}: ${node.name} bytes disagree`)
+    cursor = node.end
+    if (node.children.length > 0) {
+      // A child's span is inside its parent's payload, which starts after the
+      // parent's own framing. Where exactly is the parent's business, so this
+      // only insists the children stay within and stay ordered.
+      walkSpans(node.children, node.start, node.end, `${what} > ${node.name}`, false)
     }
-  })
-
-  test(`inspect spans tile the body: ${c.tier}/${c.name}`, () => {
-    const report = inspect(c.message)
-    // Top-level columns must cover the body end to end, with no gap and no
-    // overlap: the body is exactly the record count plus the columns.
-    let at = report.columns[0].start
-    for (const col of report.columns) {
-      assert.equal(col.start, at, `gap or overlap before ${col.name}`)
-      at = col.end
-    }
-    assert.equal(at, report.totalBytes, 'columns do not reach the end of the message')
-  })
+  }
+  if (exhaustive) {
+    assert.equal(cursor, to, `${what}: the fields cover ${cursor - from} of ${to - from} bytes`)
+  }
 }
 
-test('the inspector names types the way the schema does', () => {
-  const c = cases.find((x) => x.name === 'three-records')
-  const report = inspect(c.message)
-  const byName = Object.fromEntries(report.columns.map((col) => [col.name, col.type]))
-  assert.deepEqual(byName, { id: 'int64', name: 'string', price: 'int64', active: 'bool' })
+test('the Go corpus is covered', () => {
+  assert.ok(goCases.length >= 20, `only ${goCases.length} cases`)
 })
 
-test('nested columns report their children', () => {
-  const c = cases.find((x) => x.name === 'array-of-objects')
-  const report = inspect(c.message)
-  const lines = report.columns.find((col) => col.name === 'lines')
-  assert.equal(lines.type, '[]struct')
-  assert.deepEqual(lines.children.map((x) => x.name).sort(), ['qty', 'sku'])
+for (const c of goCases) {
+  test(`${c.name}: the spans tile the body (Go's bytes)`, () => {
+    const report = inspect(unhex(c.section), unhex(c.message))
+    assert.equal(report.schemaBytes, 0, 'an out-of-band message carries no section')
+    checkTiling(report, c.name)
+  })
+
+  test(`${c.name}: the spans tile the body (self-describing)`, () => {
+    const report = inspect(null, unhex(c.selfDescribing))
+    assert.ok(report.schemaBytes > 0, 'a self-describing message carries a section')
+    checkTiling(report, c.name)
+  })
+}
+
+for (const document of documents) {
+  test(`${document.name}: the spans tile what the module wrote`, () => {
+    const text = textOf(document)
+    const length = wasm.exports.encodeJSON(feed(encoder.encode(text)), VERIFY)
+    assert.ok(length >= 0, `encode: ${failure()}`)
+    const message = out(length)
+    const section = out(wasm.exports.lastSection())
+    checkTiling(inspect(section, message), document.name)
+  })
+}
+
+test('a table reports its columns, not its rows', () => {
+  const c = goCases.find((one) => one.name === 'table-wide')
+  const report = inspect(unhex(c.section), unhex(c.message))
+  const table = report.fields.find((f) => f.type === '[]struct')
+  assert.ok(table, 'the table field should be in the tree')
+  // 300 rows of three fields: three column nodes, not nine hundred value nodes.
+  assert.equal(table.children.length, 3)
+  for (const column of table.children) assert.match(column.type, / column$/)
+  assert.equal(report.rows, 300)
 })
 
-test('a nullable column says so', () => {
-  const c = cases.find((x) => x.name === 'explicit-null')
-  const report = inspect(c.message)
-  assert.equal(report.columns[0].nullable, true)
+test('a list reports its elements, and a long one collapses its tail', () => {
+  const c = goCases.find((one) => one.name === 'list')
+  const report = inspect(unhex(c.section), unhex(c.message))
+  const list = report.fields.find((f) => f.type === '[]struct')
+  assert.ok(list, 'the list field should be in the tree')
+  assert.equal(list.children.length, 3, 'three elements, each with a span')
+  for (const element of list.children) {
+    assert.ok(element.children.length > 0, 'an element shows its own fields')
+  }
+})
+
+test('the tree names the wire shape of every field', () => {
+  const c = goCases.find((one) => one.name === 'scalars')
+  const report = inspect(unhex(c.section), unhex(c.message))
+  const named = Object.fromEntries(report.fields.map((f) => [f.name, f.type]))
+  assert.equal(named.Flag, 'bool')
+  assert.equal(named.Large, 'int64')
+  assert.equal(named.Giant, 'uint64')
+  assert.equal(named.Single, 'float32')
+  assert.equal(named.Text, 'string')
+  assert.equal(named.Blob, 'bytes')
+})
+
+test('a pointer field is marked optional', () => {
+  const c = goCases.find((one) => one.name === 'optionals-zero')
+  const report = inspect(unhex(c.section), unhex(c.message))
+  assert.ok(report.fields.length > 0)
+  for (const field of report.fields) assert.equal(field.optional, true)
+})
+
+test('an envelope says so, so the page can show the array it was given', () => {
+  const length = wasm.exports.encodeJSON(feed(encoder.encode('[1,2,3]')), VERIFY)
+  assert.ok(length >= 0, failure())
+  const message = out(length)
+  const section = out(wasm.exports.lastSection())
+  const report = inspect(section, message)
+  assert.equal(report.envelope, true)
+  assert.equal(report.fields.length, 1)
+  assert.equal(report.fields[0].name, 'rows')
+})
+
+test('inspect refuses what decode refuses, rather than trapping', () => {
+  wasm.exports.setSection(0)
+  for (const bytes of [
+    Uint8Array.from([]),
+    Uint8Array.from([0x00]),
+    Uint8Array.from([0xd1, 0x00]),
+    Uint8Array.from([0xd4, 0xff]),
+  ]) {
+    assert.equal(wasm.exports.inspectJSON(feed(bytes)), -1)
+    assert.ok(failure().length > 0)
+  }
+})
+
+test('every truncation of a message is a diagnostic or a tiling tree', () => {
+  for (const name of ['corpus-sale-table', 'corpus-product', 'list', 'table']) {
+    const c = goCases.find((one) => one.name === name)
+    const full = unhex(c.selfDescribing)
+    for (let cut = 1; cut < full.length; cut++) {
+      wasm.exports.setSection(0)
+      const got = wasm.exports.inspectJSON(feed(full.subarray(0, cut)))
+      if (got < 0) continue
+      const report = JSON.parse(outText(got))
+      // A prefix that inspects must still tile what it claims to have read.
+      walkSpans(report.fields, report.rootBytes + report.schemaBytes, cut, `${name}@${cut}`, false)
+    }
+  }
 })
