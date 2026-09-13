@@ -30,6 +30,14 @@ import { verify } from './verify'
 /** Encode flags. */
 export const SELF_DESCRIBING: i32 = 1
 export const VERIFY: i32 = 2
+/**
+ * Offer every string to the packed encoding, keeping it where it is smaller.
+ *
+ * Off by default, as Go's SetPacked5 is. It cannot make a message larger — the
+ * choice is per string and the raw form wins ties — but it costs a pass over
+ * every character on both sides, so it is for a wire that is size-bound.
+ */
+export const PACK_STRINGS: i32 = 4
 
 /** Held in globals so the collector cannot reclaim them between calls. */
 let input: Uint8Array = new Uint8Array(0)
@@ -76,6 +84,7 @@ export function encode(len: i32, flags: i32): i32 {
   const section = buildSection(plan)
 
   const builder = new Builder(doc, diag)
+  builder.packStrings = (flags & PACK_STRINGS) != 0
   const selfDescribing = (flags & SELF_DESCRIBING) != 0
   if (selfDescribing) {
     // [root with the schema bit] [section] [body]. The body is byte for byte

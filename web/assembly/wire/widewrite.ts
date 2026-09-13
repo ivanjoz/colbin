@@ -8,6 +8,7 @@
 
 import { Writer } from '../bytes'
 import { appendArray } from '../column'
+import { appendPayload, packedSize, packedUpper } from '../packed5'
 import {
   CLASS_BLOB,
   CLASS_COL,
@@ -19,6 +20,8 @@ import {
   CLASS_VEC,
   DESC_EXPLICIT,
   ELEMENT_SIZE_ESCAPE,
+  ENC_PACKED5,
+  ENC_PACKED5_UP,
   INLINE_ELEMENT_SIZE,
   INT_POSITIVE_FLAG,
   LENGTH_WIDTH,
@@ -173,6 +176,41 @@ export class WideWriter {
     this.byte(descriptor(CLASS_BLOB, <u8>code))
     this.out.writeLE(<u64>value.length, unchecked(LENGTH_WIDTH[code]))
     this.out.writeBytes(value, 0, value.length)
+  }
+
+  /**
+   * A string in the packed encoding when that is smaller than the raw bytes.
+   *
+   * Here the descriptor's spare `enc` code carries the one bit that is genuinely
+   * new — the case mode the unit stream opens in — because the encoding and the
+   * size it would otherwise have had to state are already in the descriptor. So
+   * the payload is the bare unit stream and the frame header is gone.
+   */
+  packedString(key: u8, value: Uint8Array): void {
+    if (value.length == 0) return
+    // The payload's length is not known until it is written, so the header is
+    // reserved and filled in after. One byte covers every size up to 255, which
+    // is every string this encoding is for.
+    const start = this.out.len
+    this.byte(key)
+    this.byte(0)
+    this.byte(0)
+    if (!appendPayload(this.out, value, 0, value.length)) {
+      this.out.len = start
+      this.blob(key, value)
+      return
+    }
+    const size = packedSize
+    const enc: u8 = packedUpper ? ENC_PACKED5_UP : ENC_PACKED5
+    const code = lengthCodeFor(<u64>size)
+    this.out.setByte(start + 1, descriptor(CLASS_BLOB, (enc << 2) | <u8>code))
+    const width = unchecked(LENGTH_WIDTH[code])
+    if (width == 1) {
+      this.out.setByte(start + 2, <u8>size)
+      return
+    }
+    this.out.insert(start + 3, width - 1)
+    this.out.setLE(start + 2, <u64>size, width)
   }
 
   // ---- arrays ---------------------------------------------------------------

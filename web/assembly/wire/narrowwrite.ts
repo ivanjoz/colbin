@@ -11,12 +11,17 @@
 
 import { Writer } from '../bytes'
 import { appendArray } from '../column'
+import { appendPayload, packedSize, packedUpper } from '../packed5'
 import {
   ARRAY_POSITIVE_FLAG,
   ELEMENT_SIZE_ESCAPE,
   ESCAPE_2_BYTES,
   ESCAPE_4_BYTES,
   ESCAPE_8_BYTES,
+  ESCAPE_PACKED_1_LO,
+  ESCAPE_PACKED_1_UP,
+  ESCAPE_PACKED_4_LO,
+  ESCAPE_PACKED_4_UP,
   INLINE_ELEMENT_SIZE,
   INT_POSITIVE_FLAG,
   MORE_ARRAY_LEN_FLAG,
@@ -157,6 +162,47 @@ export class NarrowWriter {
       this.byte((key << 4) | MORE_SIZE_FLAG | ESCAPE_4_BYTES)
       this.out.writeLE(<u64>size, 4)
     }
+  }
+
+  /**
+   * A string in the packed encoding when that is smaller than the raw bytes, and
+   * raw when it is not. Nothing is written for an empty string.
+   *
+   * The narrow header has no `enc` field, so the encoding rides in the blob
+   * header's escape code. That keeps a packed string's header at two bytes, the
+   * same as a raw one's, and is what lets the encoding run under four-bit keys
+   * at all: before it, packed5 forced a message to eight-bit keys and cost a
+   * byte on every field rather than on the strings.
+   *
+   * Choosing per string rather than per message is what keeps the encoding from
+   * ever costing anything: a token that does not pack is written raw and the
+   * header says so.
+   */
+  packedString(key: u8, value: Uint8Array): void {
+    if (value.length == 0) return
+    // The payload's length is not known until it is written, so two header bytes
+    // are reserved and filled in after. A payload past 255 bytes needs three
+    // more, which shifts it up — a memmove on a value already large enough to
+    // have earned one.
+    const start = this.out.len
+    this.byte((key << 4) | MORE_SIZE_FLAG)
+    this.byte(0)
+    if (!appendPayload(this.out, value, 0, value.length)) {
+      this.out.len = start
+      this.blob(key, value)
+      return
+    }
+    const size = packedSize
+    if (size <= 0xff) {
+      const code = packedUpper ? ESCAPE_PACKED_1_UP : ESCAPE_PACKED_1_LO
+      this.out.setByte(start, (key << 4) | MORE_SIZE_FLAG | code)
+      this.out.setByte(start + 1, <u8>size)
+      return
+    }
+    const code = packedUpper ? ESCAPE_PACKED_4_UP : ESCAPE_PACKED_4_LO
+    this.out.insert(start + 2, 3)
+    this.out.setByte(start, (key << 4) | MORE_SIZE_FLAG | code)
+    this.out.setLE(start + 1, <u64>size, 4)
   }
 
   // ---- arrays ---------------------------------------------------------------

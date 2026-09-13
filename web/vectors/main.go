@@ -174,6 +174,26 @@ type Nested struct {
 
 // --- output ------------------------------------------------------------------
 
+// packedFrame is one string through the opt-in encoding, framed as a field.
+//
+// The encoder is the half of the codec a second implementation is most likely to
+// get subtly wrong: the scan is greedy rather than optimal, so a tie broken the
+// other way is still a legal frame that decodes to the same string — and two
+// encoders that disagree about a string produce two different messages for one
+// record. So this records the bytes rather than the round trip.
+type packedFrame struct {
+	Name string `json:"name"`
+	// The string, in hex, because several of these are not valid UTF-8.
+	Input string `json:"input"`
+	// The whole field at key 3 under each key width, in hex. A string the packed
+	// form would not shrink comes out as an ordinary raw blob, which is the
+	// never-inflate rule doing its job and is worth pinning too.
+	Narrow string `json:"narrow"`
+	Wide   string `json:"wide"`
+	// Whether the encoder kept the packed form.
+	Packed bool `json:"packed"`
+}
+
 // stringFrame pins the framing around a blob, which is the part of the format
 // REFACTOR_PLAN.md §4.2 moves. The payload is not recorded: it is Size copies
 // of Fill, so a 64 KB case costs two fields rather than 128 KB of hex, and what
@@ -271,6 +291,7 @@ type textCase struct {
 
 type vectors struct {
 	Strings []stringFrame `json:"strings"`
+	Packed5 []packedFrame `json:"packed5"`
 	Columns []columnCase  `json:"columns"`
 	Types   []typeCase    `json:"types"`
 	// Packed is types() again with the opt-in string encoding on. Separate
@@ -305,6 +326,7 @@ func build() vectors {
 	colbin.SetPacked5(false)
 	return vectors{
 		Strings: stringFrames(),
+		Packed5: packedFrames(),
 		Columns: columns(),
 		Types:   types(),
 		Packed:  packedTypes(),
@@ -360,6 +382,58 @@ func stringFrames() []stringFrame {
 	add("invalid-utf8", 1, []byte{0xFF, 0xFE}, 8)
 	add("nul-bytes", 1, []byte{0x00}, 12)
 	add("high-bytes", 1, []byte{0x80, 0xBF}, 16)
+	return out
+}
+
+// packedFrames runs a set of strings through wire's packed writers at both key
+// widths, which is where the encoder's every decision shows up as bytes.
+func packedFrames() []packedFrame {
+	inputs := []struct{ name, value string }{
+		{"lower", "helloworld"},
+		{"leading-upper", "Tin Light"},
+		{"all-upper", "MEXICO CITY"},
+		{"mixed-case-run", "aBCDe"},
+		{"two-upper", "aBCd"},
+		{"sku", "SKU-00042"},
+		{"digits-lone", "a1b"},
+		{"digits-run", "1023"},
+		{"digits-leading-zero", "00123"},
+		{"digits-long", "9999999"},
+		{"symbols", "a.b,c-d/e:f;g_h(i)j%"},
+		{"accents", "el niño comió jamón"},
+		{"accents-upper", "ÑANDÚ"},
+		{"euro", "12€ 34"},
+		{"newline-tab", "a\nb\tc"},
+		{"escape-one", "a\x00b"},
+		{"escape-run", "\x00\x01\x02\x03"},
+		{"escape-long", "\x00\x01\x02\x03\x04\x05\x06\x07"},
+		{"invalid-utf8", "a\xff\xfeb"},
+		{"empty-ish", "a"},
+		{"space-only", "   "},
+		{"long", strings.Repeat("the quick brown fox ", 20)},
+		{"long-upper", strings.Repeat("THE QUICK BROWN FOX ", 20)},
+		{"past-255-payload", strings.Repeat("abcdefghij", 60)},
+		{"unpackable", "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09"},
+	}
+
+	out := make([]packedFrame, 0, len(inputs))
+	for _, one := range inputs {
+		narrow := wire.Writer{}
+		narrow.PackedString(3, one.value)
+		wide := wire.Writer8{}
+		wide.PackedString(3, one.value)
+
+		// Whether the packed form was kept shows in the header: a narrow packed
+		// string sets the more flag, a raw one of this size does not.
+		packed := len(narrow.Buffer) > 0 && narrow.Buffer[0]&0b1000 != 0
+		out = append(out, packedFrame{
+			Name:   one.name,
+			Input:  hex.EncodeToString([]byte(one.value)),
+			Narrow: hex.EncodeToString(narrow.Buffer),
+			Wide:   hex.EncodeToString(wide.Buffer),
+			Packed: packed,
+		})
+	}
 	return out
 }
 

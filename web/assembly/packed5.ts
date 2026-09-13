@@ -323,3 +323,378 @@ function writeDecimal(out: Writer, value: u32): void {
   if (value >= 10) out.writeByte(0x30 + <u8>((value / 10) % 10))
   out.writeByte(0x30 + <u8>(value % 10))
 }
+
+// ---- the encoder ------------------------------------------------------------
+//
+// One greedy left-to-right scan, fused with the packer:
+//
+//   - an opposite-case run of one or two letters takes a CASE_TOGGLE_SIMPLE
+//     each; three or more takes a CASE_TOGGLE_LONG.
+//   - a decimal run takes the longest prefix the number token can legally carry,
+//     except that a lone digit takes the symbol table instead, since ten bits
+//     beat fifteen.
+//   - a byte with no token of its own is escaped, merged with the following
+//     unrepresentable bytes up to the escape's four-byte limit.
+//
+// There is no planning pass. The codec this replaced had two behavioural header
+// flags — a default case and a number mode — which changed what the scan emitted
+// and so had to be priced before it ran, in a second full walk that measured a
+// third to a half of encode time. Both are gone: the number token is
+// unconditional, and the case mode is an ordinary CASE_TOGGLE_LONG that
+// opensUpper hoists into the descriptor when it would have landed first.
+//
+// It is not a size-optimal encoder. The optimum is a shortest path over
+// (offset, case mode) nodes, which is exact and several times slower. What
+// matters here is narrower and is what the vectors check: it must produce the
+// same bytes Go's does, because two encoders that disagree about a string
+// produce two different messages for one record.
+
+/** The inverse tables, for the single-byte entries. -1 means "no operand in
+ * that table". Built once, because a StaticArray literal of 128 mostly-minus-one
+ * entries is worse to read than the loop that fills it. */
+// @ts-ignore: decorator
+@lazy
+const ASCII_SYM = fillAscii(SYM_TABLE)
+// @ts-ignore: decorator
+@lazy
+const ASCII_EXT = buildAsciiExt()
+/** The multi-byte entries, keyed on the low six bits of the UTF-8 continuation
+ * byte. Every non-ASCII entry is Latin-1 Supplement — a C2 or C3 lead — except
+ * the euro sign, and continuation bytes run 0x80..0xBF, so within well-formed
+ * input those six bits identify the character outright. Spanish text takes this
+ * path on nearly every word. */
+// @ts-ignore: decorator
+@lazy
+const LATIN_C2 = buildLatin(0xc2)
+// @ts-ignore: decorator
+@lazy
+const LATIN_C3 = buildLatin(0xc3)
+/** The euro sign's extTable index, which is the one three-byte entry. */
+const EXT_EURO: i32 = 13
+
+function fillAscii(table: StaticArray<u8>): StaticArray<i8> {
+  const out = new StaticArray<i8>(128)
+  for (let index = 0; index < 128; index++) unchecked((out[index] = -1))
+  for (let index = 0; index < table.length; index++) {
+    unchecked((out[unchecked(table[index])] = <i8>index))
+  }
+  return out
+}
+
+function buildAsciiExt(): StaticArray<i8> {
+  const out = new StaticArray<i8>(128)
+  for (let index = 0; index < 128; index++) unchecked((out[index] = -1))
+  for (let index = 0; index < <i32>EXT_RESERVED; index++) {
+    const start = unchecked(EXT_AT[index])
+    if (unchecked(EXT_AT[index + 1]) - start != 1) continue
+    out[unchecked(EXT_BYTES[start])] = <i8>index
+  }
+  return out
+}
+
+function buildLatin(lead: u8): StaticArray<i8> {
+  const out = new StaticArray<i8>(64)
+  for (let index = 0; index < 64; index++) unchecked((out[index] = -1))
+  for (let index = 0; index < <i32>EXT_RESERVED; index++) {
+    const start = unchecked(EXT_AT[index])
+    if (unchecked(EXT_AT[index + 1]) - start != 2) continue
+    if (unchecked(EXT_BYTES[start]) != lead) continue
+    out[unchecked(EXT_BYTES[start + 1]) & 0x3f] = <i8>index
+  }
+  return out
+}
+
+@inline
+function isLetter(c: u8): bool {
+  return <u8>((c | 0x20) - 0x61) < 26
+}
+
+@inline
+function isDigit(c: u8): bool {
+  return <u8>(c - 0x30) < 10
+}
+
+/** The case of a byte already known to be an ASCII letter: bit 5 is the case bit. */
+@inline
+function isUpper(c: u8): bool {
+  return (c & 0x20) == 0
+}
+
+@inline
+function letterIndex(c: u8): u8 {
+  return (c | 0x20) - 0x61
+}
+
+/** extMulti's two results, as module state: AssemblyScript has no tuple and this
+ * runs on every non-ASCII byte of both the scan and the escape test. */
+let multiIndex: i32 = -1
+let multiWidth: i32 = 0
+
+/** The extTable index of the multi-byte character at `at`, or -1. */
+function extMulti(src: Uint8Array, at: i32): void {
+  multiIndex = -1
+  multiWidth = 0
+  if (at + 1 >= src.length || (unchecked(src[at + 1]) & 0xc0) != 0x80) return
+  const lead = unchecked(src[at])
+  const low = unchecked(src[at + 1]) & 0x3f
+  if (lead == 0xc2) {
+    multiIndex = <i32>unchecked(LATIN_C2[low])
+    multiWidth = 2
+    return
+  }
+  if (lead == 0xc3) {
+    multiIndex = <i32>unchecked(LATIN_C3[low])
+    multiWidth = 2
+    return
+  }
+  if (lead == 0xe2 && at + 2 < src.length && unchecked(src[at + 1]) == 0x82 &&
+      unchecked(src[at + 2]) == 0xac) {
+    multiIndex = EXT_EURO
+    multiWidth = 3
+  }
+}
+
+/** Whether the byte at `at` has no token of its own. */
+function escapes(src: Uint8Array, at: i32): bool {
+  const c = unchecked(src[at])
+  if (isLetter(c) || c == 0x20) return false
+  if (c < 0x80) return unchecked(ASCII_SYM[c]) < 0 && unchecked(ASCII_EXT[c]) < 0
+  extMulti(src, at)
+  return multiIndex < 0
+}
+
+/**
+ * The case mode the stream starts in, which the descriptor carries for free in
+ * one bit.
+ *
+ * The rule is the first letter's case, and it is never worse than starting
+ * lower. Take the leading run of k letters in the opposite case: paying for it
+ * from lower costs 2k units for k of one or two and 1+k from three up, where
+ * starting in that mode costs k plus the one toggle that returns. Those are
+ * equal at k >= 3 and strictly better below it, and after the run both encoders
+ * are in the same mode with the same string left.
+ */
+export function opensUpper(src: Uint8Array, from: i32, size: i32): bool {
+  for (let at = from; at < from + size; at++) {
+    const c = unchecked(src[at])
+    if (isLetter(c)) return isUpper(c)
+  }
+  return false
+}
+
+/**
+ * The packer: eight five-bit units in, five bytes out.
+ *
+ * `limit` is the byte position the payload may not pass. The packed form is only
+ * ever used when it beats the raw bytes, so bounding the buffer by the raw
+ * length is both the allocation bound and the early-out — a stream that would
+ * not have been kept stops being written the moment it grows past its own
+ * budget, which costs a compare per group rather than a pass of its own.
+ */
+class UnitWriter {
+  buf: Uint8Array
+  at: i32
+  limit: i32
+  acc: u64 = 0
+  pending: i32 = 0
+  units: i32 = 0
+  over: bool = false
+
+  constructor(buf: Uint8Array, at: i32, limit: i32) {
+    this.buf = buf
+    this.at = at
+    this.limit = limit
+  }
+
+  /** One unit. Every eighth stores a group; the rest are a shift and an or. */
+  put(value: u8): void {
+    this.acc |= (<u64>value) << <u64>(5 * this.pending)
+    this.pending++
+    this.units++
+    if (this.pending == 8) {
+      if (this.at > this.limit) {
+        this.over = true
+      } else {
+        store<u64>(this.buf.dataStart + <usize>this.at, this.acc)
+        this.at += 5
+      }
+      this.pending = 0
+      this.acc = 0
+    }
+  }
+
+  /**
+   * Flushes the partial group and pads the stream to the unit grid.
+   *
+   * One trailing CASE_TOGGLE_SIMPLE lands it there when the byte rounding leaves
+   * room for a unit the tokens did not fill. It applies to no letter, so it
+   * decodes to nothing, and it cannot grow the payload: the gap exists exactly
+   * when one more unit still fits the same number of bytes.
+   */
+  finish(): i32 {
+    if (payloadUnits(payloadBytes(this.units)) > this.units) this.put(OP_CASE_SIMPLE)
+    if (this.pending > 0) {
+      if (this.at > this.limit) {
+        this.over = true
+      } else {
+        store<u64>(this.buf.dataStart + <usize>this.at, this.acc)
+        this.at += payloadBytes(this.pending)
+        this.pending = 0
+        this.acc = 0
+      }
+    }
+    return this.over ? -1 : this.at
+  }
+}
+
+/** How many bytes n units occupy. */
+@inline
+function payloadBytes(units: i32): i32 {
+  return (units * 5 + 7) / 8
+}
+
+/** The greedy scan, emitting units as each token is decided. */
+function tokenize(w: UnitWriter, src: Uint8Array, from: i32, size: i32, upper: bool): void {
+  const end = from + size
+  let cur = upper
+  let at = from
+  while (at < end && !w.over) {
+    const c = unchecked(src[at])
+
+    if (isLetter(c)) {
+      const index = letterIndex(c)
+      if (isUpper(c) == cur) {
+        w.put(index)
+        at++
+        continue
+      }
+      // Two simple toggles cost what a pair of long ones does, so the long form
+      // only pays from a run of three.
+      let run = 0
+      for (let scan = at; scan < end; scan++) {
+        const next = unchecked(src[scan])
+        if (!isLetter(next) || isUpper(next) == cur) break
+        run++
+      }
+      if (run >= 3) {
+        w.put(OP_CASE_LONG)
+        cur = !cur
+        continue // re-read the letter, now in the matching mode
+      }
+      w.put(OP_CASE_SIMPLE)
+      w.put(index)
+      at++
+      continue
+    }
+
+    if (c == 0x20) {
+      w.put(OP_SPACE)
+      at++
+      continue
+    }
+
+    if (isDigit(c)) {
+      // The longest prefix ten bits can hold. A token may not carry a leading
+      // zero, since it decodes as a plain decimal integer and "00123" must not
+      // come back as "123"; a lone "0" is fine.
+      let value = 0
+      let best = 0
+      let bestLen = 0
+      for (let length = 1; length <= 4 && at + length <= end; length++) {
+        const digit = unchecked(src[at + length - 1])
+        if (!isDigit(digit) || (length > 1 && unchecked(src[at]) == 0x30)) break
+        value = value * 10 + <i32>(digit - 0x30)
+        if (value > 1023) break
+        best = value
+        bestLen = length
+      }
+      if (bestLen == 1) {
+        w.put(OP_SYMBOL)
+        w.put(c - 0x30)
+      } else {
+        w.put(OP_NUMBER)
+        w.put(<u8>(best & 31))
+        w.put(<u8>(best >> 5))
+      }
+      at += bestLen
+      continue
+    }
+
+    if (c < 0x80) {
+      const sym = unchecked(ASCII_SYM[c])
+      if (sym >= 0) {
+        w.put(OP_SYMBOL)
+        w.put(<u8>sym)
+        at++
+        continue
+      }
+      const ext = unchecked(ASCII_EXT[c])
+      if (ext >= 0) {
+        w.put(OP_EXT)
+        w.put(<u8>ext)
+        at++
+        continue
+      }
+    } else {
+      extMulti(src, at)
+      if (multiIndex >= 0) {
+        w.put(OP_EXT)
+        w.put(<u8>multiIndex)
+        at += multiWidth
+        continue
+      }
+    }
+
+    // A raw escape: a count, then two units per byte. It carries bytes rather
+    // than runes, which is what makes the codec byte-exact for input that is not
+    // valid UTF-8, and lets the three-unit header be amortised over a run.
+    let run = 1
+    while (run < MAX_ESCAPE_RUN && at + run < end && escapes(src, at + run)) run++
+    w.put(OP_EXT)
+    w.put(EXT_ESCAPE)
+    w.put(<u8>(run - 1))
+    for (let index = 0; index < run; index++) {
+      const byte = unchecked(src[at + index])
+      w.put(byte & 31)
+      w.put(byte >> 5)
+    }
+    at += run
+  }
+}
+
+/** appendPayload's results, as module state. */
+export let packedSize: i32 = 0
+export let packedUpper: bool = false
+
+/**
+ * Appends the packed unit stream for a string onto `out` — no header, no length
+ * — leaving its byte size in `packedSize` and the case mode it opens in in
+ * `packedUpper`.
+ *
+ * Returns false when the packed form would not be smaller than the raw bytes,
+ * with nothing appended. The encoder discovers that by writing into a buffer
+ * bounded at the raw length and noticing when it runs out, so the answer costs a
+ * bounds test per group rather than a pass of its own.
+ *
+ * The packer stores eight bytes per group and advances five, so it overshoots
+ * its last group by three; the buffer is grown by eight past the limit to give
+ * it room.
+ */
+export function appendPayload(out: Writer, src: Uint8Array, from: i32, size: i32): bool {
+  packedSize = 0
+  packedUpper = false
+  if (size == 0) return false
+
+  packedUpper = opensUpper(src, from, size)
+  // A payload that reaches `size` has already lost to the raw bytes, so that is
+  // both the buffer bound and the point the writer gives up at.
+  out.ensure(size + 8)
+  const start = out.len
+  const w = new UnitWriter(out.buf, start, start + size)
+  tokenize(w, src, from, size, packedUpper)
+  const end = w.finish()
+  if (end < 0 || end - start >= size) return false
+  out.len = end
+  packedSize = end - start
+  return true
+}

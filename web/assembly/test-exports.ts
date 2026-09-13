@@ -12,6 +12,8 @@ import { Plan } from './plan'
 import { buildSection, parseSection } from './section'
 import { verify } from './verify'
 import { writeBlob as writeBlobNarrow } from './wire/narrow'
+import { NarrowWriter } from './wire/narrowwrite'
+import { WideWriter } from './wire/widewrite'
 import { writeBlob as writeBlobWide } from './wire/wide'
 
 const IN = new Uint8Array(1 << 22)
@@ -70,6 +72,20 @@ export function columnDecode(frameLen: i32, n: i32, width: i32): i32 {
 export function blobNarrow(key: i32, size: i32): i32 {
   const out = new Writer(size + 16)
   writeBlobNarrow(out, <u8>key, IN.subarray(0, size))
+  return emit(out.take())
+}
+
+/** A string of `size` bytes at inPtr -> its packed field at outPtr, at either
+ * key width. This is where the encoder's every decision shows up as bytes. */
+export function packedNarrow(key: i32, size: i32): i32 {
+  const out = new Writer(size + 32)
+  new NarrowWriter(out).packedString(<u8>key, IN.subarray(0, size))
+  return emit(out.take())
+}
+
+export function packedWide(key: i32, size: i32): i32 {
+  const out = new Writer(size + 32)
+  new WideWriter(out).packedString(<u8>key, IN.subarray(0, size))
   return emit(out.take())
 }
 
@@ -164,6 +180,7 @@ export function encodeJSON(len: i32, flags: i32): i32 {
   const plan = inferred.plan
   const built = buildSection(plan)
   const builder = new Builder(doc, scratch)
+  builder.packStrings = (flags & 4) != 0
   const selfDescribing = (flags & 1) != 0
   if (selfDescribing) {
     builder.out.writeByte(plan.isWide ? 0xdc : 0xd4)

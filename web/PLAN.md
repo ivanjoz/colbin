@@ -319,7 +319,7 @@ Two hazards are worth naming because each was found rather than foreseen:
 |---|---|---|
 | integers, bool | yes | int64 / uint64 / bool |
 | floats | yes | float64 |
-| strings | yes | raw. The module *reads* the packed encoding but does not write it — §10 |
+| strings | yes | raw, or packed behind `PACK_STRINGS` — §5.1 |
 | nested structs | yes | |
 | slices of structs | yes | list or table, decided per field on the row count |
 | integer and string arrays | yes | |
@@ -327,6 +327,34 @@ Two hazards are worth naming because each was found rather than foreseen:
 | `[]byte` | **no** | JSON has no bytes type; inventing a `"base64:"` convention would be inventing format semantics the library does not have |
 | maps | **no** | a JSON object is a struct here; a map needs a declared key type |
 | float / bool / nested arrays | **no** | §4.2 — the format has no op |
+
+### 5.1 The opt-in string encoding
+
+`PACK_STRINGS` offers every string to the packed encoding and keeps it where it
+is smaller. It is off by default, as Go's `SetPacked5` is, and for the same
+reason: a raw blob is a sub-slice of the message on the way out and a memcpy on
+the way in, where a packed one is a pass over every character on both sides.
+
+It is never a correctness question. The encoding is recorded in each string's own
+descriptor, so a decoder reads either form without being told — and the choice is
+made per string with the raw form winning ties, so turning it on cannot make a
+message larger.
+
+What it is worth, on the page's own examples:
+
+| | raw | packed | |
+|---|---:|---:|---:|
+| people | 180 B | 148 B | −17.8% |
+| big integers | 70 B | 61 B | −12.9% |
+| invoices | 163 B | 149 B | −8.6% |
+| products, clients, metrics | | | **0%** |
+
+The zeroes are not a failure and they are worth understanding: those three cross
+into the **table** layout, and a table's string column is written as a string
+*array* rather than as one blob per row. Neither implementation packs that — Go's
+`StringColumn` writes the raw list too — so the encoding reaches a scalar string
+field and not a string column. Whether it should is a format question rather than
+this module's.
 
 The decoder handles all of them regardless, asymmetrically and on purpose: a Go
 service that had a real struct will send `[]byte`, map and eight-bit-keyed
@@ -413,7 +441,7 @@ web/
     infer.ts           §3                                  build.ts   §5
     walk.ts jsontext.ts message.ts   §6                   ← codec/json.go
     verify.ts          §4.5           inspect.ts          the field tree
-    packed5.ts bitstream.ts          frozen; see §10
+    packed5.ts         the string codec, both ways   ← packed5/   (§5.1)
   tests/               node:test over the vectors, plus the fuzz target
   vectors/             Go: the generator, the oracle and the committed corpus
   src/                 the SvelteKit site (§9)
@@ -475,19 +503,6 @@ less dependency and one less config file.
 
 ## 10. What is still open
 
-**The packed string writer.** The module reads the opt-in encoding at both key
-widths — which encoding a field used comes off the wire, so nothing is
-configured — and writes raw.
-
-That asymmetry is the right way round rather than an unfinished edge. `Packed5()`
-is off by default in Go, so nothing an ordinary service sends is packed and a
-module that writes raw interoperates with everything; the *reader* is what a
-caller cannot do without, because a service that turned the encoding on to save
-bytes would otherwise be unreadable. The writer is the larger half — a greedy
-tokeniser over five operand tables, a case-mode hoist, a number opcode, a raw
-escape and a never-inflate fallback — and buys the module nothing it can use
-today. `REFACTOR_PLAN.md` §4.5 is the longer version.
-
 **The npm package.** `@ivanjoz/colbin`, which is the point of the port: a
 JavaScript client of a Go service answering in colbin currently has no way to
 read the response.
@@ -547,9 +562,13 @@ not one byte of output, which the vectors confirm.
 
 ### A.2 Size
 
-**42.9 KB gzipped** (156 KB raw, 34.5 KB brotli) against the 50 KB budget, with
-encode, decode, inference, the self-check and the inspector. The frozen string
-files are unimported and cost nothing.
+**46.2 KB gzipped** against the 50 KB budget, with encode, decode, inference, the
+self-check, the inspector and both halves of the string codec.
+
+It was 42.9 KB before the string codec landed, so that is 3.3 KB for the tables,
+the packing kernel, the greedy scan and the unit-stream reader. The budget is
+close enough now to be worth watching: the next thing added should say what it
+costs.
 
 ### A.3 Never narrowing integers costs nothing
 
