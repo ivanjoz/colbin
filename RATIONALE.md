@@ -1,3 +1,28 @@
+## A slice or map at the root is wrapped, not given a root shape of its own
+
+**Context** — The byte-aligned format encodes a struct and nothing else, which is
+what reserves `0xD0..0xDF`: the first byte is an ordinary STRUCT descriptor, so
+the other 240 values are guaranteed never to be colbin and an application may use
+them as its own framing. But a caller with a complex ORM column in its hand holds
+`[]Grant`, not a struct wrapping one, and the previous format took it. Refusing it
+made the format unusable for exactly the storage case it was written for.
+
+**Decision** — A non-struct root is encoded as a one-field message: key 0, the
+value, nothing else. `Marshal([]Grant{...})` writes byte for byte what marshalling
+a hand-written wrapper whose only field is tagged `cb:"0"` writes, and `Unmarshal`
+into a `*[]Grant` reads it back. Slices, arrays and maps are wrapped; a bare
+scalar is still refused. `codec/envelope.go`.
+
+**Rationale** — A root list would have spent one of the four root detail bits and
+forced every port — the Rust crate, the browser module — to grow a second root
+shape before it could read one blob. The envelope needs none of that: what lands
+on the wire is an ordinary message, so every reader that exists already parses it
+without being taught anything, and the reserved range keeps meaning what root.go
+says it means. It costs two bytes, the key and the descriptor. There is no copy
+and no allocation — a struct with one field at offset 0 has the address of that
+field, so the caller's pointer *is* the pointer the envelope plan reads through,
+and the synthetic type exists only to carry a cached plan.
+
 ## Minimal mode is a third mode, not a variant of compact
 
 **Context** — Both existing modes spend 60-90 ns per record on framing: a plan
