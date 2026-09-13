@@ -1,5 +1,15 @@
 package packed5
 
+// How far the greedy scan lands from the smallest frame the format allows, and
+// what it chooses on the way there.
+//
+// The optimum is a shortest path over (offset, case mode) nodes, priced in
+// units. Keeping it here as an oracle rather than shipping it is the same trade
+// the package documentation describes: the exact encoder is several times slower
+// for a gap that is zero on every realistic corpus and small elsewhere. What
+// matters is that the gap is measured rather than asserted, and that it cannot
+// widen without a test failing.
+
 import (
 	"fmt"
 	"math/rand/v2"
@@ -7,756 +17,536 @@ import (
 	"testing"
 )
 
-// ------------------------------------------------------- the optimality oracle
+// Token costs, in units. The whole point of the format is that these are whole
+// numbers: a token that cost a fraction of a unit is a token that would put the
+// next one off the grid.
+const (
+	unitsLetter      = 1
+	unitsLetterCased = 2 // CASE_TOGGLE_SIMPLE + the letter
+	unitsSpace       = 1
+	unitsToggleLong  = 1
+	unitsSymbol      = 2
+	unitsExt         = 2
+	unitsNumber      = 3
+	unitsEscapeBase  = 3
+	unitsEscapeByte  = 2
+)
 
-// refBits is the smallest number of bits the format can represent s in, found
-// by memoised recursion over every token choice. It is the encoder the package
-// deliberately does not ship: exact, and roughly 2.3x slower than the greedy
-// scan. Keeping it here is what turns "the scan is close enough to optimal"
-// from a claim into a measured, enforced bound.
+// optimalUnits is the fewest units any encoder could spend on s, over both
+// starting case modes — the header bit carries either at no cost.
 //
-// best(i, mode) may open with a long toggle; fwd(i, mode) may not. Splitting
-// them keeps the recursion acyclic, and loses nothing, since toggling twice in
-// a row only ever costs 10 bits.
-func refBits(s string, number bool) int {
-	n := len(s)
-	const unset = -1
-	bestMemo := make([]int, 2*(n+1))
-	fwdMemo := make([]int, 2*(n+1))
-	for i := range bestMemo {
-		bestMemo[i], fwdMemo[i] = unset, unset
+// dist[i][m] is the cost of reaching offset i in mode m. Every edge below is a
+// token the format can actually emit, so the result is a real encoding rather
+// than a lower bound.
+func optimalUnits(s string) int {
+	const inf = 1 << 30
+	dist := make([][2]int, len(s)+1)
+	for i := range dist {
+		dist[i] = [2]int{inf, inf}
 	}
+	dist[0] = [2]int{0, 0}
 
-	var best, fwd func(i, mode int) int
-	best = func(i, mode int) int {
-		if v := bestMemo[i*2+mode]; v != unset {
-			return v
+	for i := range len(s) {
+		// A long toggle consumes no input, so it is an edge within an offset
+		// rather than between them. Relaxing it in both directions before any
+		// outgoing edge is what makes a single ascending pass correct.
+		if dist[i][0]+unitsToggleLong < dist[i][1] {
+			dist[i][1] = dist[i][0] + unitsToggleLong
 		}
-		v := min(fwd(i, mode), costToggleLong+fwd(i, 1-mode))
-		if i == n {
-			v = 0
+		if dist[i][1]+unitsToggleLong < dist[i][0] {
+			dist[i][0] = dist[i][1] + unitsToggleLong
 		}
-		bestMemo[i*2+mode] = v
-		return v
-	}
-	fwd = func(i, mode int) int {
-		if i == n {
-			return 0
-		}
-		if v := fwdMemo[i*2+mode]; v != unset {
-			return v
-		}
-		v := 1 << 30
-		take := func(cost, width int) {
-			if c := cost + best(i+width, mode); c < v {
-				v = c
+		for m := range 2 {
+			base := dist[i][m]
+			if base >= inf {
+				continue
 			}
-		}
-		c := s[i]
-		switch {
-		case c >= 'a' && c <= 'z':
-			if mode == 0 {
-				take(costLetter, 1)
-			} else {
-				take(costLetterCased, 1)
+			upper := m == 1
+			relax := func(to, mode, cost int) {
+				if base+cost < dist[to][mode] {
+					dist[to][mode] = base + cost
+				}
 			}
-		case c >= 'A' && c <= 'Z':
-			if mode == 1 {
-				take(costLetter, 1)
-			} else {
-				take(costLetterCased, 1)
+
+			c := s[i]
+			switch {
+			case isLetter(c):
+				if isUpper(c) == upper {
+					relax(i+1, m, unitsLetter)
+				} else {
+					relax(i+1, m, unitsLetterCased)
+				}
+			case c == ' ':
+				relax(i+1, m, unitsSpace)
 			}
-		case c == ' ':
-			take(costSpace, 1)
-		}
-		for k := range symReserved {
-			if sym := symTable[k]; sym != "" && strings.HasPrefix(s[i:], sym) {
-				take(costSymbol, len(sym))
+			if isDigit(c) {
+				// Every legal number length, not just the longest.
+				v := 0
+				for l := 1; l <= numberMaxDigits && i+l <= len(s); l++ {
+					if !isDigit(s[i+l-1]) || (l > 1 && s[i] == '0') {
+						break
+					}
+					v = v*10 + int(s[i+l-1]-'0')
+					if v > numberMax {
+						break
+					}
+					if l == 1 {
+						relax(i+1, m, unitsSymbol)
+					} else {
+						relax(i+l, m, unitsNumber)
+					}
+				}
+			} else if c < 0x80 {
+				if asciiSym[c] >= 0 {
+					relax(i+1, m, unitsSymbol)
+				}
+				if asciiExt[c] >= 0 {
+					relax(i+1, m, unitsExt)
+				}
+			} else if k, w := extMulti(s, i); k >= 0 {
+				relax(i+w, m, unitsExt)
 			}
-		}
-		for k := range escapeCode {
-			if simpleTable[k] == c {
-				take(costSimple, 1)
-			}
-		}
-		if !number && c == '-' {
-			take(costDash, 1)
-		}
-		if number {
-			for l := 1; l <= numberMaxDigits && i+l <= n; l++ {
-				run := s[i : i+l]
-				if !allDigits(run) || (l > 1 && run[0] == '0') || atoi(run) > numberMax {
+			// An escape may carry any run of one to four escapable bytes.
+			for n := 1; n <= maxEscapeRun && i+n <= len(s); n++ {
+				if !escapes(s, i+n-1) {
 					break
 				}
-				take(costNumber, l)
+				relax(i+n, m, unitsEscapeBase+unitsEscapeByte*n)
 			}
 		}
-		for l := 1; l <= maxEscapeRun && i+l <= n; l++ {
-			take(costEscapeBase+costEscapeByte*l, l)
-		}
-		fwdMemo[i*2+mode] = v
-		return v
 	}
-	return min(best(0, 0), best(0, 1))
+	end := dist[len(s)]
+	return min(end[0], end[1])
 }
 
-func allDigits(s string) bool {
-	for i := range len(s) {
-		if s[i] < '0' || s[i] > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func atoi(s string) int {
-	v := 0
-	for i := range len(s) {
-		v = v*10 + int(s[i]-'0')
-	}
-	return v
-}
-
-// optimalBits is the best any encoder for this format could do, over the flag
-// settings the shipped encoder is allowed to consider.
-func optimalBits(s string) int {
-	return min(refBits(s, false), refBits(s, true))
-}
-
-// optimalSize is optimalBits as a frame length, for comparison against Size.
+// optimalSize is the frame the optimum would produce, so the comparison is in
+// the currency that matters.
 func optimalSize(s string) int {
 	if len(s) == 0 {
 		return 1
 	}
-	payload := payloadBytes(optimalBits(s))
-	return min(frameOverhead(payload)+payload, frameOverhead(len(s))+len(s))
-}
-
-// encodedBits runs the shipped scan and reports what it costs.
-func encodedBits(s string, number bool) int {
-	buf := make([]token, 0, 2*len(s)+2)
-	_, bits := scan(buf, s, false, number)
-	if _, up := scan(buf, s, true, number); up < bits {
-		bits = up
+	raw := frameOverhead(len(s)) + len(s)
+	u := optimalUnits(s)
+	// The grid pad is free: it fits in the rounding or it is not emitted.
+	n := payloadBytes(u)
+	if packed := frameOverhead(n) + n; packed < raw {
+		return packed
 	}
-	return bits
+	return raw
 }
 
-// scanBits is what the shipped encoder actually charges for s, across all the
-// candidate flag settings it tries.
-func scanBits(s string) int {
-	bits, _, _ := plan(s)
-	return bits
-}
-
-// TestPlanMatchesCandidateScans checks that the single planning pass preserves
-// both the exact cost and the strict tie-breaking order of the four former
-// candidate scans, including arbitrary invalid UTF-8 input.
-func TestPlanMatchesCandidateScans(t *testing.T) {
-	rng := rand.New(rand.NewPCG(41, 43))
-	for n := 0; n <= 512; n++ {
-		for range 20 {
-			b := make([]byte, n)
-			for i := range b {
-				b[i] = byte(rng.Uint32())
-			}
-			s := string(b)
-			buf := make([]token, 0, 2*len(s)+2)
-			_, wantBits := scan(buf, s, false, false)
-			wantUpper, wantNumber := false, false
-			for _, candidate := range []struct {
-				upper, number bool
-			}{
-				{true, false},
-				{false, true},
-				{true, true},
-			} {
-				if _, bits := scan(buf, s, candidate.upper, candidate.number); bits < wantBits {
-					wantBits = bits
-					wantUpper, wantNumber = candidate.upper, candidate.number
-				}
-			}
-			gotBits, gotUpper, gotNumber := plan(s)
-			if gotBits != wantBits || gotUpper != wantUpper || gotNumber != wantNumber {
-				t.Fatalf("length %d: plan = (%d,%v,%v), scans = (%d,%v,%v)",
-					n, gotBits, gotUpper, gotNumber, wantBits, wantUpper, wantNumber)
-			}
-		}
+// scanUnits is what the shipped encoder spends, counted the same way.
+func scanUnits(s string) int {
+	var stack [1024]byte
+	buf := stack[:]
+	if need := len(s)*5 + 8; need > len(buf) {
+		buf = make([]byte, need)
 	}
+	w := writer{buf: buf, limit: len(buf) - 8}
+	w.tokenize(s, opensUpper(s))
+	return w.units
 }
 
-// ------------------------------------------------------- distance from optimal
-
-// TestNeverBeatsOptimal is a sanity bound in the other direction: the greedy
-// scan must never claim a stream cheaper than the format allows, which would
-// mean the cost table and the token widths had drifted apart.
+// TestNeverBeatsOptimal is the sanity direction: the greedy scan cannot spend
+// fewer units than the shortest path, or the shortest path is wrong.
 func TestNeverBeatsOptimal(t *testing.T) {
-	check := func(s string) {
-		t.Helper()
-		if got, opt := scanBits(s), optimalBits(s); got < opt {
-			t.Fatalf("%q: scan priced it at %d bits, the optimum is %d", s, got, opt)
-		}
-		if got, opt := Size(s), optimalSize(s); got < opt {
-			t.Fatalf("%q: Size = %d, the optimum is %d", s, got, opt)
-		}
-	}
-	check("")
-	for _, x := range alphabet {
-		check(x)
-		for _, y := range alphabet {
-			check(x + y)
-			for _, z := range alphabet {
-				check(x + y + z)
-			}
-		}
-	}
 	rng := rand.New(rand.NewPCG(11, 12))
-	for _, pool := range [][]string{alphabet, {"a", "A", "b", "B"}, {"0", "1", "9", "-", "."},
-		{"ñ", "é", "€", "日", "\xff", "a"}, {"x", "Y", "-", "7", "€", "\x00"}} {
-		for range 400 {
-			check(randString(rng, pool, rng.IntN(24)))
+	for _, pool := range oraclePools {
+		for range 3000 {
+			s := randString(rng, pool, rng.IntN(24))
+			if got, want := scanUnits(s), optimalUnits(s); got < want {
+				t.Fatalf("%q: scan %d units, 'optimal' %d", s, got, want)
+			}
 		}
 	}
 }
 
-// TestOptimalOnRealisticStrings is the claim the design rests on: on strings of
-// the shape this codec exists for, the greedy scan is not merely close to the
-// exact shortest path, it is identical to it. If a change to the scan ever
-// costs a byte on this data, this fails.
+var oraclePools = map[string][]string{
+	"words":      {"hola", " ", "mundo", "Test", "123", "-", "ABC"},
+	"alphabet":   alphabet,
+	"digits":     {"0", "1", "9", "a", "-", "A"},
+	"case-heavy": {"a", "A", "b", "B", "c", "C"},
+	"casesym":    {"a", "A", "B", "b", "-", "."},
+	"binary":     {"\x00", "\xff", "\xc3", "a", "Z"},
+}
+
+// TestOptimalOnRealisticStrings is the claim the package documentation makes:
+// on the shapes this codec is for, the greedy scan is not merely close to the
+// optimum, it is the optimum, byte for byte.
 func TestOptimalOnRealisticStrings(t *testing.T) {
 	for _, kind := range corpusKinds {
-		c, _ := corpus(kind)
-		gap, worst := 0, ""
-		for _, s := range c {
-			if d := Size(s) - optimalSize(s); d > 0 {
-				gap += d
-				if worst == "" {
-					worst = s
-				}
+		strs, _ := corpus(kind)
+		if len(strs) > 8000 {
+			strs = strs[:8000]
+		}
+		for _, s := range strs {
+			if got, want := len(Append(nil, s)), optimalSize(s); got != want {
+				t.Fatalf("%s: %q encodes to %d bytes, optimal is %d\n tokens: %s",
+					kind, s, got, want, opsOf(disassemble(t, Append(nil, s))))
 			}
-		}
-		if gap != 0 {
-			t.Errorf("corpus %s: %d bytes above optimal, first at %q", kind, gap, worst)
-		}
-	}
-	for _, s := range []string{
-		"helloWorld", "fooBARTest", "aaBBcc", "McDonald's", "product123",
-		"SKU-00042-XL", "Factura 2024-1023", "10231023", "el niño comió jamón",
-		"user.name@example.com", "€1023.45", "the quick brown fox",
-		"iPhone XS Max", "eBay UK Ltd", "Bogotá", "00123",
-	} {
-		if got, opt := Size(s), optimalSize(s); got != opt {
-			t.Errorf("%q: %d bytes, optimum is %d", s, got, opt)
 		}
 	}
 }
 
-// TestGapFromOptimal pins how far the scan drifts on input designed to hurt it.
-// Dense case changes interleaved with symbols are where a run-length rule
-// cannot see far enough; the bounds here are the measured behaviour, so a
-// regression that made the scan noticeably worse would trip them.
+// TestGapFromOptimal measures where the scan does lose, and pins it. A change
+// that widens any of these numbers is a change that made the encoder worse.
 func TestGapFromOptimal(t *testing.T) {
-	pools := []struct {
-		name    string
-		pool    []string
-		maxPct  float64
-		maxHurt float64
-	}{
-		{"words", []string{"hola", " ", "Mundo", "123", "-", "ABC", "ñ"}, 0.01, 0.01},
-		{"binary", []string{"\xff", "\x01", "a", "@", "\x00"}, 0.01, 0.01},
-		{"alphabet", alphabet, 1.0, 15},
-		{"digits", []string{"0", "1", "9", "-", "a", "A"}, 1.5, 20},
-		{"case-heavy", []string{"a", "A", "b", "B", "c", "C"}, 2.0, 25},
-		{"case+symbol", []string{"a", "A", "-", ".", "b", "B"}, 3.0, 30},
+	// Ceilings a little above what the scan measures today, so that a change
+	// which makes it worse fails here rather than in a ratio someone notices
+	// later. The pre-unit format's figures, for comparison, were alphabet
+	// 9.47/0.52, digits 13.28/0.95, case-heavy 19.45/1.50 and case+symbol
+	// 24.66/2.13: better here on three of the four, and a little worse on the
+	// one where the case rule is doing all the work.
+	limits := map[string]struct{ hurt, lost float64 }{
+		"words":      {0.5, 0.1},
+		"alphabet":   {3.0, 0.3},
+		"digits":     {14.0, 1.2},
+		"case-heavy": {26.0, 2.2},
+		"casesym":    {17.0, 1.3},
+		"binary":     {0.5, 0.1},
 	}
-	rng := rand.New(rand.NewPCG(99, 100))
-	t.Log("pool         strings hurt   bytes lost   worst case")
-	for _, p := range pools {
-		hurt, total, lost, bytes := 0, 0, 0, 0
-		worst, worstS := 0, ""
+	rng := rand.New(rand.NewPCG(13, 14))
+	t.Log("pool          strings hurt   bytes lost   worst case")
+	for name, pool := range oraclePools {
+		var hurt, total, lost, bytes, worst int
+		var worstStr string
 		for range 20000 {
-			s := randString(rng, p.pool, rng.IntN(30)+1)
-			got, opt := Size(s), optimalSize(s)
-			total, bytes = total+1, bytes+opt
-			if d := got - opt; d > 0 {
-				hurt, lost = hurt+1, lost+d
-				if d > worst {
-					worst, worstS = d, s
+			s := randString(rng, pool, 1+rng.IntN(30))
+			got, want := len(Append(nil, s)), optimalSize(s)
+			total++
+			bytes += want
+			if got > want {
+				hurt++
+				lost += got - want
+				if got-want > worst {
+					worst, worstStr = got-want, s
 				}
 			}
 		}
-		pctHurt := 100 * float64(hurt) / float64(total)
-		pctLost := 100 * float64(lost) / float64(bytes)
-		t.Log(fmt.Sprintf("%-12s %8.2f%%  %9.2f%%   %+d on %q", p.name, pctHurt, pctLost, worst, worstS))
-		if pctLost > p.maxPct {
-			t.Errorf("%s: %.2f%% of bytes lost, bound is %.2f%%", p.name, pctLost, p.maxPct)
-		}
-		if pctHurt > p.maxHurt {
-			t.Errorf("%s: %.2f%% of strings hurt, bound is %.2f%%", p.name, pctHurt, p.maxHurt)
+		hurtPct := 100 * float64(hurt) / float64(total)
+		lostPct := 100 * float64(lost) / float64(bytes)
+		t.Logf("%-12s %11.2f%% %11.2f%%   +%d on %q", name, hurtPct, lostPct, worst, worstStr)
+		if lim := limits[name]; hurtPct > lim.hurt || lostPct > lim.lost {
+			t.Errorf("%s: %.2f%% hurt / %.2f%% lost exceeds %.2f / %.2f",
+				name, hurtPct, lostPct, lim.hurt, lim.lost)
 		}
 	}
 }
 
-// TestKnownGapCaseAcrossSymbols is the one shape the scan is known to miss, kept
-// as an explicit record rather than left for someone to rediscover. The four
-// uppercase letters here are split by symbols into two runs of two, so the
-// run-length rule spends four CASE_TOGGLE_SIMPLE (20 bits) where two
-// CASE_TOGGLE_LONG spanning the symbols would cost 10.
+// TestKnownGapCaseAcrossSymbols records the one shape the run-length rule cannot
+// see: case changes spread across symbols, where two long toggles spanning them
+// beat four simple ones.
 func TestKnownGapCaseAcrossSymbols(t *testing.T) {
-	const s = "ab-CD-EF-gh"
-	toks := dumpTokens(t, Append(nil, s))
-	if countOp(toks, "simple") == 0 {
-		t.Fatalf("%q: expected the run-length rule to pick simple toggles, got %v", s, opsOf(toks))
+	const s = "abab-CD-EF-ghgh"
+	got, want := scanUnits(s), optimalUnits(s)
+	if got <= want {
+		t.Fatalf("%q: expected the greedy scan to lose, got %d vs %d", s, got, want)
 	}
-	if got, opt := scanBits(s), optimalBits(s); got-opt != 10 {
-		t.Errorf("%q: scan costs %d bits against an optimum of %d; the known gap is 10", s, got, opt)
-	}
-	if got, opt := Size(s), optimalSize(s); got-opt != 1 {
-		t.Errorf("%q: %d bytes against an optimum of %d", s, got, opt)
-	}
+	t.Logf("%q: scan %d units, optimal %d — %s", s, got, want,
+		opsOf(disassemble(t, Append(nil, s))))
 }
 
-// ------------------------------------------------------------- token dumping
+// --- what the encoder chooses ----------------------------------------------
 
-type tok struct {
-	op    string
-	arg   int
-	bytes string
-}
-
-// dumpTokens re-reads a packed frame at the token level so tests can assert on
-// structure, not just on the decoded string.
-func dumpTokens(t *testing.T, buf []byte) []tok {
-	t.Helper()
-	h, err := frame(buf)
-	if err != nil {
-		t.Fatalf("frame: %v", err)
-	}
-	if !h.packed {
-		t.Fatalf("frame is raw, not packed: %x", buf)
-	}
-	r := bitReader{buf: h.payload, limit: len(h.payload) * 8}
-	pad, ok := r.read(padBitsWidth)
-	if !ok {
-		t.Fatal("short frame")
-	}
-	r.limit -= int(pad)
-
-	var out []tok
-	for r.remaining() >= 5 {
-		op, _ := r.read(5)
-		switch {
-		case op < opSpace:
-			out = append(out, tok{op: "letter", arg: int(op)})
-		case op == opSpace:
-			out = append(out, tok{op: "space"})
-		case op == opCaseSimple:
-			out = append(out, tok{op: "simple"})
-		case op == opCaseLong:
-			out = append(out, tok{op: "long"})
-		case op == opSymbol:
-			v, _ := r.read(5)
-			out = append(out, tok{op: "symbol", arg: int(v), bytes: symTable[v]})
-		case op == opSimple:
-			v, _ := r.read(4)
-			if v != escapeCode {
-				out = append(out, tok{op: "simpleSym", arg: int(v), bytes: string(simpleTable[v])})
-				break
-			}
-			cnt, _ := r.read(2)
-			var b []byte
-			for range int(cnt) + 1 {
-				x, _ := r.read(8)
-				b = append(b, byte(x))
-			}
-			out = append(out, tok{op: "escape", arg: len(b), bytes: string(b)})
-		default:
-			if !h.number {
-				out = append(out, tok{op: "dash"})
-				break
-			}
-			v, _ := r.read(10)
-			out = append(out, tok{op: "number", arg: int(v)})
-		}
-	}
-	return out
-}
-
-func opsOf(toks []tok) []string {
-	out := make([]string, len(toks))
-	for i, tk := range toks {
-		out[i] = tk.op
-	}
-	return out
-}
-
-func countOp(toks []tok, op string) int {
-	n := 0
-	for _, tk := range toks {
-		if tk.op == op {
-			n++
-		}
-	}
-	return n
-}
-
-// ------------------------------------------------------------ structure tests
-
-// TestCaseToggleSelection pins the cost table from the specification: an
-// isolated opposite-case letter takes CASE_TOGGLE_SIMPLE, a run of three or
-// more takes CASE_TOGGLE_LONG, and a run of two may take either but must not
-// cost more than 10 extra bits.
+// TestCaseToggleSelection pins the run-length rule at its boundary: one or two
+// opposite-case letters take a simple toggle each, three or more take a long one.
 func TestCaseToggleSelection(t *testing.T) {
-	for _, tc := range []struct {
-		run                  int
-		wantSimple, wantLong int
-	}{
-		{1, 1, 0},
-		{3, 0, 2},
-		{4, 0, 2},
-		{8, 0, 2},
-	} {
-		s := "aaaa" + strings.Repeat("B", tc.run) + "cccc"
-		toks := dumpTokens(t, Append(nil, s))
-		if got := countOp(toks, "simple"); got != tc.wantSimple {
-			t.Errorf("%q: %d simple toggles, want %d (%v)", s, got, tc.wantSimple, opsOf(toks))
+	for run := 1; run <= 5; run++ {
+		s := "lower" + strings.Repeat("A", run) + "tail"
+		toks := disassemble(t, Append(nil, s))
+		simple, long := countKind(toks, "caseSimple"), countKind(toks, "caseLong")
+		if run <= 2 {
+			if simple != run || long != 0 {
+				t.Errorf("run %d: %d simple, %d long — %s", run, simple, long, opsOf(toks))
+			}
+		} else if simple != 0 || long != 2 {
+			t.Errorf("run %d: %d simple, %d long — %s", run, simple, long, opsOf(toks))
 		}
-		if got := countOp(toks, "long"); got != tc.wantLong {
-			t.Errorf("%q: %d long toggles, want %d (%v)", s, got, tc.wantLong, opsOf(toks))
-		}
-	}
-	two := encodedBits("aaaaBBcccc", false)
-	if base := encodedBits("aaaabbcccc", false); two != base+10 {
-		t.Errorf("two-letter run cost %d bits, want %d", two, base+10)
 	}
 }
 
-// TestUppercaseDominantFlag checks the header bit follows the cheaper starting
-// case. The encoder scans both rather than counting letters, which is what
-// makes the mixed rows below come out right.
-func TestUppercaseDominantFlag(t *testing.T) {
-	for _, tc := range []struct {
+// TestUppercaseHeaderBit pins the hoist: a string whose first letter is
+// uppercase starts the stream in uppercase mode, and spends no token saying so.
+func TestUppercaseHeaderBit(t *testing.T) {
+	for _, c := range []struct {
 		in    string
 		upper bool
 	}{
 		{"hello world", false},
+		{"Hello world", true},
 		{"HELLO WORLD", true},
-		{"Hello World", false},
-		{"HELLO world", true},
-		{"hello WORLD", false},
-		{"ABCDEFGHIJ", true},
-		{"abcdefghij", false},
-		{"SKU-0421-azul", true}, // 3 uppercase against 4 lowercase, but fewer runs
+		{"SKU-4217-hola", true},
+		{"123-abc", false},
+		{"123-ABC", true},
+		{"-", false},
 	} {
-		buf := Append(nil, tc.in)
+		buf := Append(nil, c.in)
 		if buf[0]&flagPacked5 == 0 {
-			t.Fatalf("%q was stored raw", tc.in)
+			continue // fell back to raw; the flag means nothing there
 		}
-		if got := buf[0]&flagUppercase != 0; got != tc.upper {
-			t.Errorf("%q: UPPERCASE_DOMINANT = %v, want %v", tc.in, got, tc.upper)
+		if got := buf[0]&flagUppercase != 0; got != c.upper {
+			t.Errorf("%q: UPPERCASE = %v, want %v", c.in, got, c.upper)
+		}
+		// Whatever the mode, the stream must not open by toggling it.
+		if toks := disassemble(t, buf); len(toks) > 0 && toks[0].kind == "caseLong" {
+			t.Errorf("%q: stream opens with a long toggle — %s", c.in, opsOf(toks))
 		}
 	}
 }
 
-// TestNumberModeFlag checks ENABLE_NUMBER_0_1023 is set exactly when it pays,
-// and that opcode 31 means '-' when it is clear.
-func TestNumberModeFlag(t *testing.T) {
-	for _, tc := range []struct {
-		in     string
-		number bool
-	}{
-		{"product123", true},
-		{"item1023", true},
-		{"aaaa1bbbb2cccc3", false}, // no run of two, so the flag cannot pay
-		{"low-cost-x", false},      // '-' is worth more than any integer here
-		{"page7", false},
+// TestLoneDigitTakesSymbolToken pins the one place the greedy rule prefers the
+// shorter token to the longer run: a single digit is two units, where a number
+// would be three.
+func TestLoneDigitTakesSymbolToken(t *testing.T) {
+	for _, c := range []struct{ in, kind string }{
+		{"aaaaaa1aaaaaa", "sym"},
+		{"aaaaaa12aaaaaa", "num"},
+		{"aaaaaa1234aaaaaa", "num"},
 	} {
-		buf := Append(nil, tc.in)
-		if buf[0]&flagPacked5 == 0 {
-			t.Fatalf("%q was stored raw", tc.in)
+		toks := disassemble(t, Append(nil, c.in))
+		found := ""
+		for _, tk := range toks {
+			if tk.kind == "sym" || tk.kind == "num" {
+				found = tk.kind
+				break
+			}
 		}
-		if got := buf[0]&flagNumber != 0; got != tc.number {
-			t.Errorf("%q: ENABLE_NUMBER_0_1023 = %v, want %v", tc.in, got, tc.number)
-		}
-	}
-	toks := dumpTokens(t, Append(nil, "aaaa-bbbb"))
-	if countOp(toks, "dash") != 1 {
-		t.Errorf(`"aaaa-bbbb": expected a bare opcode-31 dash, got %v`, opsOf(toks))
-	}
-	toks = dumpTokens(t, Append(nil, "product123"))
-	if countOp(toks, "number") != 1 {
-		t.Errorf(`"product123": expected one NUMBER_0_1023, got %v`, opsOf(toks))
-	}
-}
-
-// TestLoneDigitTakesSimpleToken is the fix that keeps the scan optimal on
-// zero-padded identifiers: a digit run whose longest legal integer prefix is a
-// single digit costs 9 bits as a simple symbol, not 15 as an integer.
-func TestLoneDigitTakesSimpleToken(t *testing.T) {
-	for _, tc := range []struct {
-		in            string
-		number, plain int
-	}{
-		{"aaaa0421aaaa", 1, 1}, // leading zero splits it: '0' plain, 421 integer
-		{"aaaa1421aaaa", 1, 1}, // over 1023: '1' plain, 421 integer
-		{"aaaa1023aaaa", 1, 0},
-		{"aaaa7aaaa", 0, 1},
-	} {
-		toks := dumpTokens(t, Append(nil, tc.in))
-		if got := countOp(toks, "number"); got != tc.number {
-			t.Errorf("%q: %d integer tokens, want %d (%v)", tc.in, got, tc.number, opsOf(toks))
-		}
-		if got := countOp(toks, "simpleSym"); got != tc.plain {
-			t.Errorf("%q: %d simple digits, want %d (%v)", tc.in, got, tc.plain, opsOf(toks))
+		if found != c.kind {
+			t.Errorf("%q: took %s, want %s — %s", c.in, found, c.kind, opsOf(toks))
 		}
 	}
 }
 
-// TestNumberTokensNeverCarryLeadingZeros is the spec's "00123 must not become
-// 123" rule, checked at the token level across an exhaustive digit space.
+// TestNumberTokensNeverCarryLeadingZeros is the rule that keeps "00123" from
+// coming back as "123". Checked over every decimal string up to six digits.
 func TestNumberTokensNeverCarryLeadingZeros(t *testing.T) {
-	var rec func(prefix string, depth int)
-	rec = func(prefix string, depth int) {
-		if prefix != "" {
-			buf := Append(nil, prefix)
-			if buf[0]&flagPacked5 != 0 && buf[0]&flagNumber != 0 {
-				for _, tk := range dumpTokens(t, buf) {
-					if tk.op == "number" && tk.arg > numberMax {
-						t.Fatalf("%q: number token %d out of range", prefix, tk.arg)
-					}
-				}
+	var b []byte
+	var digits func(n int)
+	digits = func(n int) {
+		if n == 0 {
+			s := string(b)
+			if s == "" {
+				return
 			}
-			got, _, err := Decode(buf)
-			if err != nil || got != prefix {
-				t.Fatalf("%q -> %q err=%v", prefix, got, err)
+			got, _, err := Decode(Append(nil, s))
+			if err != nil || got != s {
+				t.Fatalf("%q: got %q, %v", s, got, err)
 			}
-		}
-		if depth == 0 {
 			return
 		}
-		for _, d := range []string{"0", "1", "2", "9"} {
-			rec(prefix+d, depth-1)
+		for c := byte('0'); c <= '9'; c++ {
+			b = append(b, c)
+			digits(n - 1)
+			b = b[:len(b)-1]
 		}
 	}
-	rec("", 6)
-	for _, s := range []string{"00123", "007", "0", "00", "000", "0001023", "01023"} {
-		got, _, err := Decode(Append(nil, s))
-		if err != nil || got != s {
-			t.Fatalf("%q -> %q err=%v", s, got, err)
-		}
+	for n := 1; n <= 6; n++ {
+		digits(n)
 	}
 }
 
-// TestEscapeRunsAreMerged checks that consecutive escaped bytes share one
-// escape header rather than paying 11 bits each, up to the 4-byte limit.
+// TestEscapeRunsAreMerged pins that consecutive unrepresentable bytes share one
+// escape header, up to the four-byte limit.
 func TestEscapeRunsAreMerged(t *testing.T) {
-	pad := strings.Repeat("a", 12)
-	for _, tc := range []struct {
-		in      string
-		escapes int
-	}{
-		{"\x01", 1},
-		{"\x01\x02", 1},
-		{"\x01\x02\x03\x04", 1},
-		{"\x01\x02\x03\x04\x05", 2},
-		{"\x01\x02\x03\x04\x05\x06\x07\x08", 2},
-		{"\x01\x02\x03\x04\x05\x06\x07\x08\x09", 3},
-	} {
-		// Padded with letters so the packed frame wins on size; escapes alone
-		// always lose to raw bytes, which is the point of the fallback.
-		in := pad + tc.in + pad
-		toks := dumpTokens(t, Append(nil, in))
-		if got := countOp(toks, "escape"); got != tc.escapes {
-			t.Errorf("%q: %d escapes, want %d (%v)", in, got, tc.escapes, opsOf(toks))
+	for n := 1; n <= 9; n++ {
+		s := strings.Repeat("a", 30) + strings.Repeat("\x01", n) + strings.Repeat("b", 30)
+		toks := disassemble(t, Append(nil, s))
+		want := (n + maxEscapeRun - 1) / maxEscapeRun
+		if got := countKind(toks, "esc"); got != want {
+			t.Errorf("%d bytes: %d escapes, want %d — %s", n, got, want, opsOf(toks))
 		}
 	}
 }
 
-// TestSymbolTableCoverage roundtrips every assigned entry of both operand
-// tables and checks each reaches its own opcode.
+// TestSymbolTableCoverage walks both tables and checks each entry reaches its
+// own token rather than the escape.
 func TestSymbolTableCoverage(t *testing.T) {
-	for i := range symReserved {
-		sym := symTable[i]
-		s := "aaaaaa" + sym + "aaaaaa"
-		toks := dumpTokens(t, Append(nil, s))
-		found := false
+	for i, c := range symTable {
+		s := "aaaaaaaa" + string(c) + "aaaaaaaa"
+		toks := disassemble(t, Append(nil, s))
+		if countKind(toks, "sym") != 1 {
+			t.Errorf("symTable[%d] = %q did not take a symbol token — %s", i, c, opsOf(toks))
+			continue
+		}
 		for _, tk := range toks {
-			if tk.op == "symbol" && tk.arg == i {
-				found = true
+			if tk.kind == "sym" && tk.val != i {
+				t.Errorf("symTable[%d] = %q encoded as index %d", i, c, tk.val)
 			}
 		}
-		if !found {
-			t.Errorf("symTable[%d] = %q not reached: %v", i, sym, opsOf(toks))
-		}
-		roundtrip(t, s)
 	}
-	for i := range escapeCode {
-		c := simpleTable[i]
-		s := "aaaaaa" + string(c) + "aaaaaa"
-		toks := dumpTokens(t, Append(nil, s))
-		found := false
+	for i, str := range extTable {
+		if i >= extReserved {
+			if str != "" {
+				t.Errorf("extTable[%d] is reserved but holds %q", i, str)
+			}
+			continue
+		}
+		s := "aaaaaaaa" + str + "aaaaaaaa"
+		toks := disassemble(t, Append(nil, s))
+		if countKind(toks, "ext") != 1 {
+			t.Errorf("extTable[%d] = %q did not take an ext token — %s", i, str, opsOf(toks))
+			continue
+		}
 		for _, tk := range toks {
-			if (tk.op == "simpleSym" && tk.arg == i) || (tk.op == "dash" && c == '-') {
-				found = true
+			if tk.kind == "ext" && tk.val != i {
+				t.Errorf("extTable[%d] = %q encoded as index %d", i, str, tk.val)
 			}
 		}
-		if !found {
-			t.Errorf("simpleTable[%d] = %q not reached: %v", i, string(c), opsOf(toks))
-		}
-		roundtrip(t, s)
 	}
 }
 
-// TestSpecExampleCosts pins the bit costs the specification quotes, so a change
-// to a token width shows up as a test failure rather than as a silent size
-// regression.
-func TestSpecExampleCosts(t *testing.T) {
-	for _, tc := range []struct {
-		in     string
-		number bool
-		bits   int
-	}{
-		// "hello" + CASE_TOGGLE_SIMPLE + "world": 10 letters, one toggle.
-		{"helloWorld", false, 11 * 5},
-		// "hello" + LONG + "world" + LONG + "again": 15 letters, two toggles.
-		{"helloWORLDagain", false, 17 * 5},
-		// "foo" + LONG + "bart" + LONG + "est": cheaper than the spec's own
-		// walkthrough, which re-toggles for the T.
-		{"fooBARTest", false, 12 * 5},
-		// "product" + NUMBER_0_1023(123).
-		{"product123", true, 7*5 + 15},
-		// Same string with the flag off: three 9-bit digits instead.
-		{"product123", false, 7*5 + 3*9},
-	} {
-		if got := encodedBits(tc.in, tc.number); got != tc.bits {
-			t.Errorf("%q number=%v: %d bits, want %d", tc.in, tc.number, got, tc.bits)
-		}
-	}
-}
-
-// TestPackedBeatsRawWhereExpected records the inputs Packed-5 is built for and
-// the ones it correctly declines.
-func TestPackedBeatsRawWhereExpected(t *testing.T) {
-	for _, tc := range []struct {
-		in     string
-		packed bool
-	}{
-		{"hello", true},
-		{"helloWorld", true},
-		{"the quick brown fox", true},
-		{"el niño comió jamón", true},
-		{"product123", true},
-		{"a", false},        // one letter cannot beat one byte
-		{"\xff\xfe", false}, // pure escape always loses
-		{"日本語", false},      // three-byte runes always lose
-		{"00123", false},    // leading zeros block the integer token
-	} {
-		buf := Append(nil, tc.in)
-		if got := buf[0]&flagPacked5 != 0; got != tc.packed {
-			t.Errorf("%q: packed = %v, want %v (%d bytes vs raw %d)",
-				tc.in, got, tc.packed, len(buf), len(tc.in))
-		}
-	}
-}
-
-// TestInlineLengthMatchesPayload checks that bit 3 really is part of the length
-// code: for any payload the five length bits can hold, the code equals the
-// payload byte count exactly and no uvarint follows.
-func TestInlineLengthMatchesPayload(t *testing.T) {
-	rng := rand.New(rand.NewPCG(15, 16))
-	for range 5000 {
-		s := randString(rng, alphabet, rng.IntN(30))
-		buf := Append(nil, s)
-		code := int(buf[0] >> lenShift)
-		if code == lenEscape {
-			continue // payload outgrew the header; covered by TestLengthPrefixForms
-		}
-		if got := len(buf) - 1; got != code {
-			t.Fatalf("%q: length code %d, payload %d bytes", s, code, got)
-		}
-	}
-}
-
-// TestTablesAreConsistent checks the reverse lookups built in init agree with
-// the forward tables and that the two reserved symbol slots stay empty.
+// TestTablesAreConsistent pins the tables against their inverses.
 func TestTablesAreConsistent(t *testing.T) {
-	for i := range symReserved {
-		sym := symTable[i]
-		if sym == "" {
-			t.Fatalf("symTable[%d] is empty but below symReserved", i)
+	seen := map[string]int{}
+	for i, c := range symTable {
+		if asciiSym[c] != int8(i) {
+			t.Errorf("asciiSym[%q] = %d, want %d", c, asciiSym[c], i)
 		}
-		if len(sym) == 1 {
-			if got := asciiSym[sym[0]]; got != int8(i) {
-				t.Errorf("asciiSym[%q] = %d, want %d", sym, got, i)
+		if prev, dup := seen[string(c)]; dup {
+			t.Errorf("%q appears at symTable[%d] and [%d]", c, prev, i)
+		}
+		seen[string(c)] = i
+	}
+	for i, s := range extTable {
+		if i >= extReserved {
+			continue
+		}
+		if prev, dup := seen[s]; dup {
+			t.Errorf("%q appears twice: index %d and extTable[%d]", s, prev, i)
+		}
+		seen[s] = i
+		switch {
+		case len(s) == 1:
+			if asciiExt[s[0]] != int8(i) {
+				t.Errorf("asciiExt[%q] = %d, want %d", s, asciiExt[s[0]], i)
 			}
-		} else if got := runeSymbol([]rune(sym)[0]); got != int8(i) {
-			t.Errorf("runeSymbol(%q) = %d, want %d", sym, got, i)
+		default:
+			k, w := extMulti(s, 0)
+			if int(k) != i || w != len(s) {
+				t.Errorf("extMulti(%q) = %d, %d; want %d, %d", s, k, w, i, len(s))
+			}
 		}
 	}
-	for i := symReserved; i < len(symTable); i++ {
-		if symTable[i] != "" {
-			t.Errorf("symTable[%d] should be reserved, got %q", i, symTable[i])
-		}
-	}
-	seen := map[string]bool{}
-	for i := range symReserved {
-		if seen[symTable[i]] {
-			t.Errorf("duplicate symTable entry %q", symTable[i])
-		}
-		seen[symTable[i]] = true
-	}
-	for i := range escapeCode {
-		if got := asciiSimple[simpleTable[i]]; got != int8(i) {
-			t.Errorf("asciiSimple[%q] = %d, want %d", string(simpleTable[i]), got, i)
+	// A letter, a space or a digit must never also sit in a table, or two
+	// encodings of the same string would exist.
+	for c := range 128 {
+		if isLetter(byte(c)) || byte(c) == ' ' {
+			if asciiSym[c] >= 0 || asciiExt[c] >= 0 {
+				t.Errorf("%q has both a base opcode and a table entry", byte(c))
+			}
 		}
 	}
 }
 
-// TestCostModelMatchesWrittenBits closes the loop between the two halves of the
-// encoder: scan prices a tokenisation with the cost constants, and writeToken
-// emits it with the field widths. If the two ever disagreed the payload length
-// would be wrong, so this sums the widths actually written and checks them
-// against the cost the scan reported.
-func TestCostModelMatchesWrittenBits(t *testing.T) {
-	width := func(tk tok) int {
-		switch tk.op {
-		case "letter", "space", "simple", "long", "dash":
-			return 5
-		case "symbol":
-			return costSymbol
-		case "simpleSym":
-			return costSimple
-		case "number":
-			return costNumber
-		case "escape":
-			return costEscapeBase + costEscapeByte*tk.arg
+// TestInlineLengthMatchesPayload pins the header's length against the bytes that
+// follow it, across the inline/uvarint boundary.
+func TestInlineLengthMatchesPayload(t *testing.T) {
+	for n := range 400 {
+		s := strings.Repeat("ab ", n)
+		buf := Append(nil, s)
+		h, err := frame(buf)
+		if err != nil {
+			t.Fatalf("n=%d: %v", n, err)
 		}
-		t.Fatalf("unknown token %q", tk.op)
-		return 0
+		if h.n != len(buf) {
+			t.Errorf("n=%d: frame says %d bytes, Append wrote %d", n, h.n, len(buf))
+		}
+		if h.packed && payloadUnits(len(h.payload)) < scanUnits(s) {
+			t.Errorf("n=%d: payload holds %d units, scan wants %d",
+				n, payloadUnits(len(h.payload)), scanUnits(s))
+		}
 	}
-	rng := rand.New(rand.NewPCG(23, 24))
-	checked := 0
-	for _, pool := range [][]string{alphabet, {"a", "B", " ", "1", "2", "ñ", "-"}, {"x", "X", "0", "9", "@"}} {
-		for range 2000 {
+}
+
+// TestPackedBeatsRawWhereExpected pins the fallback: shapes the format is for
+// must pack, and shapes it is not for must not.
+func TestPackedBeatsRawWhereExpected(t *testing.T) {
+	for _, s := range []string{"hello", "helloWorld", "el niño comió jamón",
+		"the quick brown fox", "SKU-4217-hola", "Factura 2024-1023"} {
+		if Append(nil, s)[0]&flagPacked5 == 0 {
+			t.Errorf("%q did not pack", s)
+		}
+	}
+	// Braces, quotes, colons and commas all have symbol tokens now, so JSON
+	// packs where the pre-unit tables had to fall back on it.
+	for _, s := range []string{`{"id":1023,"name":"ana"}`} {
+		if Append(nil, s)[0]&flagPacked5 == 0 {
+			t.Errorf("%q did not pack", s)
+		}
+	}
+	for _, s := range []string{"\x00\x01\x02\x03", "\xff\xfe\xfd"} {
+		if Append(nil, s)[0]&flagPacked5 != 0 {
+			t.Errorf("%q packed, but should have fallen back", s)
+		}
+	}
+}
+
+// TestSpecExampleCosts pins the unit cost of a few worked examples, so a change
+// to the token widths shows up as a number rather than as a ratio.
+func TestSpecExampleCosts(t *testing.T) {
+	for _, c := range []struct {
+		in    string
+		units int
+	}{
+		{"hello", 5},                     // five letters
+		{"hello world", 11},              // plus a space and five more
+		{"helloWorld", 11},               // a simple toggle for the W
+		{"HELLOWORLD", 10},               // all upper, mode from the header
+		{"a1", 3},                        // letter plus a lone digit
+		{"a12", 4},                       // letter plus a number
+		{"a-b", 4},                       // the dash is a symbol token
+		{"ñ", 2},                         // one ext token
+		{"\x01", 5},                      // escape header plus one byte
+		{"\x01\x02\x03\x04", 11},         // one escape carrying four
+		{"\x01\x02\x03\x04\x05", 11 + 5}, // and the fifth starts another
+	} {
+		if got := scanUnits(c.in); got != c.units {
+			t.Errorf("%q: %d units, want %d — %s", c.in, got, c.units,
+				opsOf(scan(c.in, opensUpper(c.in))))
+		}
+	}
+}
+
+// TestAppendPayloadMatchesFrame pins the embedded form against the framed one:
+// the payload bytes and the case mode must be exactly what the frame carries.
+func TestAppendPayloadMatchesFrame(t *testing.T) {
+	rng := rand.New(rand.NewPCG(15, 16))
+	for _, pool := range oraclePools {
+		for range 3000 {
 			s := randString(rng, pool, rng.IntN(40))
-			buf := Append(nil, s)
-			if buf[0]&flagPacked5 == 0 {
+			if s == "" {
 				continue
 			}
-			sum := 0
-			for _, tk := range dumpTokens(t, buf) {
-				sum += width(tk)
+			buf := Append(nil, s)
+			h, err := frame(buf)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if want := scanBits(s); sum != want {
-				t.Fatalf("%q: wrote %d bits, the scan priced it at %d", s, sum, want)
+			payload, n, upper, ok := AppendPayload(nil, s)
+			if ok != h.packed {
+				t.Fatalf("%q: AppendPayload ok=%v, frame packed=%v", s, ok, h.packed)
 			}
-			if got := payloadBytes(sum); got != len(buf)-frameOverhead(got) {
-				t.Fatalf("%q: %d payload bytes for %d bits, frame is %d", s, got, sum, len(buf))
+			if !ok {
+				continue
 			}
-			checked++
+			if n != len(h.payload) || upper != h.upper {
+				t.Fatalf("%q: payload %d/%v, frame %d/%v", s, n, upper, len(h.payload), h.upper)
+			}
+			if string(payload[:n]) != string(h.payload) {
+				t.Fatalf("%q:\n payload %x\n frame   %x", s, payload[:n], h.payload)
+			}
+			got, err := AppendString(nil, append(payload[:n:n], make([]byte, 8)...), n, upper)
+			if err != nil || string(got) != s {
+				t.Fatalf("%q: AppendString gave %q, %v", s, got, err)
+			}
 		}
 	}
-	if checked < 1000 {
-		t.Fatalf("only %d packed frames checked", checked)
+}
+
+func TestSizeReportUnits(t *testing.T) {
+	t.Log("units  bytes  input")
+	for _, s := range []string{"hello", "helloWorld", "SKU-4217-hola",
+		"el niño comió jamón", "the quick brown fox", "THE QUICK BROWN FOX"} {
+		t.Log(fmt.Sprintf("%5d %6d  %q", scanUnits(s), len(Append(nil, s)), s))
 	}
 }

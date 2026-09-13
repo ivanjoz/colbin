@@ -156,6 +156,18 @@ const (
 	escape4Bytes = 1
 	escape8Bytes = 2
 
+	// The packed5 escapes. A narrow blob header has no enc field — under K4 the
+	// schema says what a field is, not the wire — so a packed string names
+	// itself here instead, and carries the one bit the schema cannot know: the
+	// case mode its unit stream opens in.
+	//
+	// Spending four codes on it buys a two-byte header, the same as a raw blob's,
+	// where a separate flag byte would have cost three. Code 7 is still free.
+	escapePacked1Lo = 3 // 1-byte size, stream opens lowercase
+	escapePacked1Up = 4 // 1-byte size, stream opens uppercase
+	escapePacked4Lo = 5 // 4-byte size, stream opens lowercase
+	escapePacked4Up = 6 // 4-byte size, stream opens uppercase
+
 	// What each header carries before an escape is needed.
 	inlineBlobSize       = 1<<11 - 1
 	inlineArrayCount     = 1<<8 - 1

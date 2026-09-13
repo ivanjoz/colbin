@@ -36,6 +36,7 @@ func (plan *typePlan) simplePlan() bool {
 
 // appendScalars is writePlan without the composite arms.
 func appendScalars(writer *wire.Writer, plan *typePlan, record unsafe.Pointer) {
+	packed := Packed5()
 	for index := range plan.fields {
 		field := &plan.fields[index]
 		at := unsafe.Add(record, field.offset)
@@ -63,7 +64,11 @@ func appendScalars(writer *wire.Writer, plan *typePlan, record unsafe.Pointer) {
 		case opFloat64:
 			writer.F64(field.key, *(*float64)(at))
 		case opString:
-			writer.String(field.key, *(*string)(at))
+			if packed {
+				writer.PackedString(field.key, *(*string)(at))
+			} else {
+				writer.String(field.key, *(*string)(at))
+			}
 		case opBytes:
 			writer.Bytes(field.key, *(*[]byte)(at))
 		case opInt8s:
@@ -243,7 +248,9 @@ func readScalars(reader *wire.Reader, plan *typePlan, record unsafe.Pointer) boo
 		case opFloat64:
 			*(*float64)(at) = reader.F64()
 		case opString:
-			*(*string)(at) = reader.String()
+			// PackedString reads a raw blob too — the header says which — so the
+			// narrow decoder needs no setting and cannot be wrong about it.
+			*(*string)(at) = reader.PackedString()
 		case opBytes:
 			*(*[]byte)(at) = append([]byte(nil), reader.Bytes()...)
 		case opInt8s:

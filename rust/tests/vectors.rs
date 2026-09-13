@@ -481,10 +481,12 @@ fn packed5_cases() {
             text: "el niño comió jamón".into(),
         },
     );
+    // JSON punctuation all has symbol tokens now, so the fallback needs a string
+    // with no characters in either table.
     check(
         "packed5.does not pack",
         &PackedText {
-            text: "{\"id\":1023}".into(),
+            text: "\u{0}\u{1}\u{2}\u{3}\u{4}\u{5}".into(),
         },
     );
 }

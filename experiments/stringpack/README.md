@@ -1,5 +1,13 @@
 # stringpack — byte alignment, and where packed5's time really goes
 
+> **This experiment has landed.** `packed5/` now *is* `u5b`: unit-ised tokens,
+> the group packer, no planning pass, the case mode hoisted into a header bit,
+> and the grid padded with a trailing `CASE_TOGGLE_SIMPLE`. `wire` carries the
+> embedded field layouts under both key widths. So the `packed5` column below is
+> a record of the format as it was, not of the one in the tree — and running
+> these benchmarks today compares `u5b` against something very close to itself.
+> The reasoning and the negative results are what this file is still for.
+
 Test-only, like `experiments/bytealigned`. Nothing here is imported by the
 module; everything lives in `*_test.go`.
 

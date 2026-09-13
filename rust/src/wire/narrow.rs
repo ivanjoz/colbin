@@ -20,7 +20,7 @@
 
 use super::{
     ARRAY_POSITIVE_FLAG, ARRAY_WIDTH_SHIFT, ELEMENT_SIZE_ESCAPE, ESCAPE_2BYTES, ESCAPE_4BYTES,
-    ESCAPE_8BYTES, INLINE_ARRAY_COUNT, INLINE_BLOB_SIZE, INLINE_COMPOSITE_LENGTH,
+    ESCAPE_8BYTES, ESCAPE_PACKED1_LO, ESCAPE_PACKED1_UP, ESCAPE_PACKED4_LO, ESCAPE_PACKED4_UP, INLINE_ARRAY_COUNT, INLINE_BLOB_SIZE, INLINE_COMPOSITE_LENGTH,
     INLINE_ELEMENT_SIZE, INT_POSITIVE_FLAG, Integer, LENGTH_WIDTH, MAGNITUDE_WIDTH,
     MORE_ARRAY_LEN_FLAG, MORE_SIZE_FLAG, Mark, SIZE_CODE_ONE, UINT_INLINE_MAX, UINT_WIDTH_BASE,
     append_array, append_count, append_elements, append_magnitude, array_plan_of, bit_length,
@@ -237,6 +237,36 @@ impl<'a> Writer<'a> {
     /// Writes a length-prefixed string, and nothing when it is empty.
     pub fn string(&mut self, key: u8, value: &str) {
         self.bytes(key, value.as_bytes());
+    }
+
+    /// Writes a string in the packed5 encoding when that is smaller than the raw
+    /// bytes, and raw when it is not.
+    ///
+    /// The narrow header has no `enc` field, so the encoding rides in the blob
+    /// header's escape code. That keeps a packed string's header at two bytes,
+    /// the same as a raw one's, and is what lets packed5 run under narrow keys at
+    /// all: before this it forced a message to wide keys, which cost a byte on
+    /// every field rather than on the strings.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn packed_string(&mut self, key: u8, value: &str) {
+        if value.is_empty() {
+            return;
+        }
+        let Some((stream, upper)) = crate::packed5::payload(value.as_bytes()) else {
+            self.string(key, value);
+            return;
+        };
+        if stream.len() <= 0xFF {
+            let code = if upper { ESCAPE_PACKED1_UP } else { ESCAPE_PACKED1_LO };
+            self.buf.push(key << 4 | MORE_SIZE_FLAG | code);
+            self.buf.push(stream.len() as u8);
+        } else {
+            let code = if upper { ESCAPE_PACKED4_UP } else { ESCAPE_PACKED4_LO };
+            self.buf.push(key << 4 | MORE_SIZE_FLAG | code);
+            self.buf
+                .extend_from_slice(&(stream.len() as u32).to_le_bytes());
+        }
+        self.buf.extend_from_slice(&stream);
     }
 
     /// Writes a length-prefixed blob, and nothing when it is empty.
@@ -747,6 +777,77 @@ impl<'a> Reader<'a> {
             Ok(value) => value.to_owned(),
             Err(_) => {
                 self.fail(Error::NotUtf8);
+                String::new()
+            }
+        }
+    }
+
+    /// Reads a string written by [`Writer::packed_string`] or by
+    /// [`Writer::string`]. The header's escape code says which, so a reader needs
+    /// no configuration and cannot be wrong about it.
+    pub fn packed_string(&mut self) -> String {
+        let Some(header) = self.header() else {
+            return String::new();
+        };
+        let (size, start, upper) = if header & MORE_SIZE_FLAG == 0 {
+            match self.blob_size() {
+                Some((size, start)) => (size, start, None),
+                None => return String::new(),
+            }
+        } else {
+            match header & 0b111 {
+                code @ (ESCAPE_PACKED1_LO | ESCAPE_PACKED1_UP) => {
+                    let Some(&low) = self.buf.get(self.at + 1) else {
+                        self.fail(Error::Truncated);
+                        return String::new();
+                    };
+                    (usize::from(low), self.at + 2, Some(code == ESCAPE_PACKED1_UP))
+                }
+                code @ (ESCAPE_PACKED4_LO | ESCAPE_PACKED4_UP) => {
+                    let rest = &self.buf[self.at + 1..];
+                    if rest.len() < 4 {
+                        self.fail(Error::Truncated);
+                        return String::new();
+                    }
+                    let size = le_uint(rest, 4) as usize;
+                    if size <= 0xFF {
+                        self.fail(Error::BadEscape); // one size has one encoding
+                        return String::new();
+                    }
+                    (size, self.at + 5, Some(code == ESCAPE_PACKED4_UP))
+                }
+                _ => match self.blob_size() {
+                    Some((size, start)) => (size, start, None),
+                    None => return String::new(),
+                },
+            }
+        };
+        if size > self.buf.len() - start {
+            self.fail(Error::Truncated);
+            return String::new();
+        }
+        self.at = start + size;
+        let payload = &self.buf[start..start + size];
+        let Some(upper) = upper else {
+            return match core::str::from_utf8(payload) {
+                Ok(value) => value.to_owned(),
+                Err(_) => {
+                    self.fail(Error::NotUtf8);
+                    String::new()
+                }
+            };
+        };
+        let mut bytes = Vec::new();
+        match crate::packed5::append_string(&mut bytes, payload, upper) {
+            Ok(()) => match String::from_utf8(bytes) {
+                Ok(value) => value,
+                Err(_) => {
+                    self.fail(Error::NotUtf8);
+                    String::new()
+                }
+            },
+            Err(err) => {
+                self.fail(err.into());
                 String::new()
             }
         }

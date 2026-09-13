@@ -450,8 +450,11 @@ func cases() []caseOut {
 	add("packed5.string", "the opt-in string encoding, chosen per field by the descriptor", PackedText{
 		Text: "el niño comió jamón",
 	})
+	// JSON punctuation all has symbol tokens now, so the fallback needs a string
+	// that genuinely has no packed form: raw bytes with no characters in either
+	// table.
 	add("packed5.does not pack", "a string the packed form would not shrink is written raw", PackedText{
-		Text: `{"id":1023}`,
+		Text: "\x00\x01\x02\x03\x04\x05",
 	})
 	colbin.SetPacked5(false)
 

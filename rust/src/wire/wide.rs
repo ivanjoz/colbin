@@ -93,8 +93,15 @@ pub(crate) const STRUCT_WIDE_KEYS: u8 = 0b1000;
 /// only in what the body holds.
 pub(crate) const TABLE_FLAG: u8 = 0b1000;
 
-/// The BLOB descriptor's `enc` code for a packed5 string, in bits 3-2.
+/// The BLOB descriptor's `enc` codes, in bits 3-2.
+///
+/// packed5 owns two of the four. A packed string writes no frame header of its
+/// own — the descriptor already carries the size and the encoding, which is two
+/// of the three things a header would hold — so the spare code buys the third:
+/// the case mode the unit stream opens in.
 const ENC_PACKED5: u8 = 1 << 2;
+const ENC_PACKED5_UP: u8 = 3 << 2;
+const ENC_MASK: u8 = 3 << 2;
 
 /// Folds a signed value so that small negatives stay small, which is what makes
 /// the varint worth using for a delta. An unsigned value is not folded: it would
@@ -347,18 +354,16 @@ impl<'a> Writer8<'a> {
         if value.is_empty() {
             return;
         }
-        // packed5's size is exact, so the header can be written before the
-        // payload and there is nothing to patch or shift afterwards.
-        let size = packed5::size(value.as_bytes());
-        if size >= value.len() {
+        let Some((stream, upper)) = packed5::payload(value.as_bytes()) else {
             self.string(key, value);
             return;
-        }
-        let (code, width) = length_code_for(size as u64);
+        };
+        let enc = if upper { ENC_PACKED5_UP } else { ENC_PACKED5 };
+        let (code, width) = length_code_for(stream.len() as u64);
         self.buf.push(key);
-        self.buf.push(descriptor(CLASS_BLOB, ENC_PACKED5 | code));
-        append_magnitude(self.buf, size as u64, width);
-        packed5::append(self.buf, value.as_bytes());
+        self.buf.push(descriptor(CLASS_BLOB, enc | code));
+        append_magnitude(self.buf, stream.len() as u64, width);
+        self.buf.extend_from_slice(&stream);
     }
 
     /// Writes an array of integers at one width, chosen from the widest element,
@@ -824,9 +829,9 @@ impl<'a> Reader8<'a> {
             self.fail(Error::Truncated);
             return String::new();
         };
-        let packed = desc & ENC_PACKED5 != 0;
+        let enc = desc & ENC_MASK;
         let raw = self.bytes();
-        if !packed {
+        if enc == 0 {
             return match core::str::from_utf8(raw) {
                 Ok(value) => value.to_owned(),
                 Err(_) => {
@@ -835,8 +840,13 @@ impl<'a> Reader8<'a> {
                 }
             };
         }
-        match packed5::decode(raw) {
-            Ok((bytes, _)) => match String::from_utf8(bytes) {
+        if enc == 2 << 2 {
+            self.fail(Error::BadDescriptor); // a dictionary reference, not a string
+            return String::new();
+        }
+        let mut bytes = Vec::new();
+        match packed5::append_string(&mut bytes, raw, enc == ENC_PACKED5_UP) {
+            Ok(()) => match String::from_utf8(bytes) {
                 Ok(value) => value,
                 Err(_) => {
                     self.fail(Error::NotUtf8);
