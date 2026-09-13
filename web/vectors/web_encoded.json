@@ -4,14 +4,14 @@
       "name": "flat-object",
       "input": "{\"id\":1,\"name\":\"Tin Light\",\"price\":599,\"active\":true}",
       "section": "20010004000269640401046e616d650b0205707269636504030661637469766500",
-      "message": "d008100954696e204c696768742a570231",
+      "message": "d00901100954696e204c696768742a570231",
       "json": "{\"id\":1,\"name\":\"Tin Light\",\"price\":599,\"active\":true}"
     },
     {
       "name": "flat-object (packed)",
       "input": "{\"id\":1,\"name\":\"Tin Light\",\"price\":599,\"active\":true}",
       "section": "20010004000269640401046e616d650b0205707269636504030661637469766500",
-      "message": "d0081c0873a3ddf4e2c89c092a570231",
+      "message": "d009011c0873a3ddf4e2c89c092a570231",
       "json": "{\"id\":1,\"name\":\"Tin Light\",\"price\":599,\"active\":true}"
     },
     {
@@ -46,14 +46,14 @@
       "name": "records-under-the-table-threshold",
       "input": "{\"rows\":[{\"id\":0,\"qty\":0,\"cents\":499},{\"id\":1,\"qty\":1,\"cents\":512},{\"id\":2,\"qty\":2,\"cents\":525},{\"id\":3,\"qty\":3,\"cents\":538},{\"id\":4,\"qty\":4,\"cents\":551},{\"id\":5,\"qty\":5,\"cents\":564},{\"id\":6,\"qty\":6,\"cents\":577}]}",
       "section": "200200010004726f7773160100030002696404010371747904020563656e747304",
-      "message": "d0003307032af3010508182a000207090219022a0d0207090319032a1a0207090419042a270207090519052a340207090619062a4102",
+      "message": "d0003507032af30107090119012a000207090219022a0d0207090319032a1a0207090419042a270207090519052a340207090619062a4102",
       "json": "{\"rows\":[{\"cents\":499,\"id\":0,\"qty\":0},{\"id\":1,\"qty\":1,\"cents\":512},{\"id\":2,\"qty\":2,\"cents\":525},{\"id\":3,\"qty\":3,\"cents\":538},{\"id\":4,\"qty\":4,\"cents\":551},{\"id\":5,\"qty\":5,\"cents\":564},{\"id\":6,\"qty\":6,\"cents\":577}]}"
     },
     {
       "name": "records-under-the-table-threshold (packed)",
       "input": "{\"rows\":[{\"id\":0,\"qty\":0,\"cents\":499},{\"id\":1,\"qty\":1,\"cents\":512},{\"id\":2,\"qty\":2,\"cents\":525},{\"id\":3,\"qty\":3,\"cents\":538},{\"id\":4,\"qty\":4,\"cents\":551},{\"id\":5,\"qty\":5,\"cents\":564},{\"id\":6,\"qty\":6,\"cents\":577}]}",
       "section": "200200010004726f7773160100030002696404010371747904020563656e747304",
-      "message": "d0003307032af3010508182a000207090219022a0d0207090319032a1a0207090419042a270207090519052a340207090619062a4102",
+      "message": "d0003507032af30107090119012a000207090219022a0d0207090319032a1a0207090419042a270207090519052a340207090619062a4102",
       "json": "{\"rows\":[{\"cents\":499,\"id\":0,\"qty\":0},{\"id\":1,\"qty\":1,\"cents\":512},{\"id\":2,\"qty\":2,\"cents\":525},{\"id\":3,\"qty\":3,\"cents\":538},{\"id\":4,\"qty\":4,\"cents\":551},{\"id\":5,\"qty\":5,\"cents\":564},{\"id\":6,\"qty\":6,\"cents\":577}]}"
     },
     {
@@ -74,14 +74,14 @@
       "name": "four-deep",
       "input": "{\"a\":{\"b\":{\"c\":{\"d\":1,\"e\":\"deep\"}}}}",
       "section": "20040001000161150100010001621502000100016315030002000164040101650b",
-      "message": "d0000b0009000708100464656570",
+      "message": "d0000c000a00080901100464656570",
       "json": "{\"a\":{\"b\":{\"c\":{\"d\":1,\"e\":\"deep\"}}}}"
     },
     {
       "name": "four-deep (packed)",
       "input": "{\"a\":{\"b\":{\"c\":{\"d\":1,\"e\":\"deep\"}}}}",
       "section": "20040001000161150100010001621502000100016315030002000164040101650b",
-      "message": "d0000a00080006081b03839007",
+      "message": "d0000b0009000709011b03839007",
       "json": "{\"a\":{\"b\":{\"c\":{\"d\":1,\"e\":\"deep\"}}}}"
     },
     {
@@ -102,14 +102,14 @@
       "name": "nulls-and-missing-keys",
       "input": "[{\"id\":1,\"note\":\"hi\"},{\"id\":2,\"note\":null},{\"id\":3}]",
       "section": "1a0202010004726f777316010002000269640401046e6f7465180b",
-      "message": "d0000d03050810026869020902020903",
+      "message": "d0000e0306090110026869020902020903",
       "json": "[{\"id\":1,\"note\":\"hi\"},{\"id\":2,\"note\":null},{\"id\":3,\"note\":null}]"
     },
     {
       "name": "nulls-and-missing-keys (packed)",
       "input": "[{\"id\":1,\"note\":\"hi\"},{\"id\":2,\"note\":null},{\"id\":3}]",
       "section": "1a0202010004726f777316010002000269640401046e6f7465180b",
-      "message": "d0000d03050810026869020902020903",
+      "message": "d0000e0306090110026869020902020903",
       "json": "[{\"id\":1,\"note\":\"hi\"},{\"id\":2,\"note\":null},{\"id\":3,\"note\":null}]"
     },
     {
@@ -130,14 +130,14 @@
       "name": "big-integers",
       "input": "{\"small\":1,\"snowflake\":{\"digits\":\"7295013456321098765\"},\"max\":{\"digits\":\"9223372036854775807\"}}",
       "section": "350300030005736d616c6c040109736e6f77666c616b65150102036d61781502000100066469676974730b000100066469676974730b",
-      "message": "d00810150013373239353031333435363332313039383736352015001339323233333732303336383534373735383037",
+      "message": "d0090110150013373239353031333435363332313039383736352015001339323233333732303336383534373735383037",
       "json": "{\"small\":1,\"snowflake\":{\"digits\":\"7295013456321098765\"},\"max\":{\"digits\":\"9223372036854775807\"}}"
     },
     {
       "name": "big-integers (packed)",
       "input": "{\"small\":1,\"snowflake\":{\"digits\":\"7295013456321098765\"},\"max\":{\"digits\":\"9223372036854775807\"}}",
       "section": "350300030005736d616c6c040109736e6f77666c616b65150102036d61781502000100066469676974730b000100066469676974730b",
-      "message": "d008100f0b0d3fdb5fdfcfeae3f9dbf86cf702200f0b0d5ff31fd55fe6b7fabbfb44f603",
+      "message": "d00901100f0b0d3fdb5fdfcfeae3f9dbf86cf702200f0b0d5ff31fd55fe6b7fabbfb44f603",
       "json": "{\"small\":1,\"snowflake\":{\"digits\":\"7295013456321098765\"},\"max\":{\"digits\":\"9223372036854775807\"}}"
     },
     {
@@ -158,14 +158,14 @@
       "name": "floats",
       "input": "{\"one\":1,\"tenth\":0.1,\"neg\":-2.25,\"tiny\":5e-324,\"huge\":1.7976931348623157e+308,\"zero\":0}",
       "section": "2c01000600036f6e6504010574656e74680a02036e65670a030474696e790a0404687567650a05047a65726f04",
-      "message": "d0081f3fb999999999999a29c0023f00000000000000014f7fefffffffffffff",
+      "message": "d009011f3fb999999999999a29c0023f00000000000000014f7fefffffffffffff",
       "json": "{\"one\":1,\"tenth\":0.1,\"neg\":-2.25,\"tiny\":5e-324,\"huge\":1.7976931348623157e+308,\"zero\":0}"
     },
     {
       "name": "floats (packed)",
       "input": "{\"one\":1,\"tenth\":0.1,\"neg\":-2.25,\"tiny\":5e-324,\"huge\":1.7976931348623157e+308,\"zero\":0}",
       "section": "2c01000600036f6e6504010574656e74680a02036e65670a030474696e790a0404687567650a05047a65726f04",
-      "message": "d0081f3fb999999999999a29c0023f00000000000000014f7fefffffffffffff",
+      "message": "d009011f3fb999999999999a29c0023f00000000000000014f7fefffffffffffff",
       "json": "{\"one\":1,\"tenth\":0.1,\"neg\":-2.25,\"tiny\":5e-324,\"huge\":1.7976931348623157e+308,\"zero\":0}"
     },
     {
@@ -200,14 +200,14 @@
       "name": "long-strings",
       "input": "{\"lines\":[{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":0},{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":1},{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":2}]}",
       "section": "1b02000100056c696e65731601000200046e6f74650b010371747904",
-      "message": "d002a003000003ff2e010000012c787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878ff30010000012d7878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787818ff32010000012e78787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878781902",
+      "message": "d002a103000003ff2e010000012c787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878ff31010000012d787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878781901ff32010000012e78787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878781902",
       "json": "{\"lines\":[{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":0},{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":1},{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":2}]}"
     },
     {
       "name": "long-strings (packed)",
       "input": "{\"lines\":[{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":0},{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":1},{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":2}]}",
       "section": "1b02000100056c696e65731601000200046e6f74650b010371747904",
-      "message": "d0024302000003be0bbcf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de0bc00bbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7b3718c10bbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7b2f1902",
+      "message": "d0024402000003be0bbcf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de0bc10bbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7b371901c10bbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7b2f1902",
       "json": "{\"lines\":[{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":0},{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":1},{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":2}]}"
     },
     {
@@ -228,14 +228,14 @@
       "name": "sixteen-fields",
       "input": "{\"f0\":1,\"f1\":2,\"f2\":3,\"f3\":4,\"f4\":5,\"f5\":6,\"f6\":7,\"f7\":8,\"f8\":9,\"f9\":10,\"f10\":11,\"f11\":12,\"f12\":13,\"f13\":14,\"f14\":15,\"f15\":16}",
       "section": "5901001000026630040102663104020266320403026633040402663404050266350406026636040702663704080266380409026639040a03663130040b03663131040c03663132040d03663133040e03663134040f0366313504",
-      "message": "d00819022903390449055906690779088909990aa90bb90cc90dd90ee90ff910",
+      "message": "d0090119022903390449055906690779088909990aa90bb90cc90dd90ee90ff910",
       "json": "{\"f0\":1,\"f1\":2,\"f2\":3,\"f3\":4,\"f4\":5,\"f5\":6,\"f6\":7,\"f7\":8,\"f8\":9,\"f9\":10,\"f10\":11,\"f11\":12,\"f12\":13,\"f13\":14,\"f14\":15,\"f15\":16}"
     },
     {
       "name": "sixteen-fields (packed)",
       "input": "{\"f0\":1,\"f1\":2,\"f2\":3,\"f3\":4,\"f4\":5,\"f5\":6,\"f6\":7,\"f7\":8,\"f8\":9,\"f9\":10,\"f10\":11,\"f11\":12,\"f12\":13,\"f13\":14,\"f14\":15,\"f15\":16}",
       "section": "5901001000026630040102663104020266320403026633040402663404050266350406026636040702663704080266380409026639040a03663130040b03663131040c03663132040d03663133040e03663134040f0366313504",
-      "message": "d00819022903390449055906690779088909990aa90bb90cc90dd90ee90ff910",
+      "message": "d0090119022903390449055906690779088909990aa90bb90cc90dd90ee90ff910",
       "json": "{\"f0\":1,\"f1\":2,\"f2\":3,\"f3\":4,\"f4\":5,\"f5\":6,\"f6\":7,\"f7\":8,\"f8\":9,\"f9\":10,\"f10\":11,\"f11\":12,\"f12\":13,\"f13\":14,\"f14\":15,\"f15\":16}"
     },
     {

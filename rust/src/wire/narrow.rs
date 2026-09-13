@@ -251,13 +251,20 @@ impl<'a> Writer<'a> {
     /// the same as a raw one's, and is what lets packed5 run under narrow keys at
     /// all: before this it forced a message to wide keys, which cost a byte on
     /// every field rather than on the strings.
-    #[allow(clippy::cast_possible_truncation)]
     pub fn packed_string(&mut self, key: u8, value: &str) {
+        self.packed_bytes(key, value.as_bytes());
+    }
+
+    /// The same, for a caller holding UTF-8 it has not made a `str` of — which
+    /// is every string the JSON encoder writes, since those are slices into the
+    /// scanner's text arena.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn packed_bytes(&mut self, key: u8, value: &[u8]) {
         if value.is_empty() {
             return;
         }
-        let Some((stream, upper)) = crate::packed5::payload(value.as_bytes()) else {
-            self.string(key, value);
+        let Some((stream, upper)) = crate::packed5::payload(value) else {
+            self.bytes(key, value);
             return;
         };
         if stream.len() <= 0xFF {
@@ -353,13 +360,13 @@ impl<'a> Writer<'a> {
     /// the same reason the header sizes escalate: it removes the ceiling, and it
     /// makes the common element — anything under 255 bytes — cost one byte.
     #[allow(clippy::cast_possible_truncation)]
-    pub fn strings<S: AsRef<str>>(&mut self, key: u8, values: &[S]) {
+    pub fn strings<S: AsRef<[u8]>>(&mut self, key: u8, values: &[S]) {
         if values.is_empty() {
             return;
         }
         self.blob_header(key, values.len());
         for value in values {
-            let value = value.as_ref().as_bytes();
+            let value = value.as_ref();
             if value.len() <= INLINE_ELEMENT_SIZE {
                 self.buf.push(value.len() as u8);
             } else {
@@ -579,7 +586,7 @@ impl<'a> Writer<'a> {
     /// Writes a string column, which is a list of blobs under the column's key.
     /// Strings have no residual to transform, so a column of them is the same
     /// shape a list of them is.
-    pub fn string_column<S: AsRef<str>>(&mut self, key: u8, values: &[S]) {
+    pub fn string_column<S: AsRef<[u8]>>(&mut self, key: u8, values: &[S]) {
         if values.iter().all(|value| value.as_ref().is_empty()) {
             return;
         }

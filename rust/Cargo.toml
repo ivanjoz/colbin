@@ -24,12 +24,23 @@ colbin-derive = { version = "0.2", path = "derive", optional = true }
 # crate that touches the standard library; everything else is `core` + `alloc`,
 # which is what lets `rust/wasm` build this with `default-features = false` and
 # link no standard library at all.
-default = ["std"]
+default = ["std", "encode"]
 std = []
 # Only the macro is optional. The `Colbin` trait and the readers and writers it
 # generates against are always present, so a caller can hand-write an impl
 # without pulling in a proc-macro toolchain.
 derive = ["dep:colbin-derive"]
+# "JSON text in, colbin bytes out": the scanner, the type inference, the
+# plan-driven build and the self-check. It is the one thing colbin does that
+# needs no type at compile time, which is what a browser wants and what a
+# service accepting a document from a client wants.
+#
+# On by default, because an ordinary consumer should not have to ask for the
+# whole crate. Off is for the build that only reads — the wasm decoder next
+# door, which would otherwise link a float *parser* beside the float formatter
+# it already carries and pay for it in bytes downloaded before the page can do
+# anything.
+encode = []
 
 [dev-dependencies]
 # Only the cross-language vector corpus needs this; a consumer sees neither it

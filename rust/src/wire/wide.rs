@@ -362,11 +362,18 @@ impl<'a> Writer8<'a> {
     /// the descriptor says so — which is also why a reader never has to be told
     /// which to expect.
     pub fn packed_string(&mut self, key: u8, value: &str) {
+        self.packed_bytes(key, value.as_bytes());
+    }
+
+    /// The same, for a caller holding UTF-8 it has not made a `str` of — which
+    /// is every string the JSON encoder writes, since those are slices into the
+    /// scanner's text arena.
+    pub fn packed_bytes(&mut self, key: u8, value: &[u8]) {
         if value.is_empty() {
             return;
         }
-        let Some((stream, upper)) = packed5::payload(value.as_bytes()) else {
-            self.string(key, value);
+        let Some((stream, upper)) = packed5::payload(value) else {
+            self.bytes(key, value);
             return;
         };
         let enc = if upper { ENC_PACKED5_UP } else { ENC_PACKED5 };
@@ -402,7 +409,7 @@ impl<'a> Writer8<'a> {
     /// Writes a count and then each element behind its own length, inside a byte
     /// length that lets the whole field be skipped.
     #[allow(clippy::cast_possible_truncation)]
-    pub fn strings<S: AsRef<str>>(&mut self, key: u8, values: &[S]) {
+    pub fn strings<S: AsRef<[u8]>>(&mut self, key: u8, values: &[S]) {
         if values.is_empty() {
             return;
         }
@@ -426,7 +433,7 @@ impl<'a> Writer8<'a> {
         append_magnitude(self.buf, counted as u64, width);
         append_count(self.buf, values.len());
         for value in values {
-            let value = value.as_ref().as_bytes();
+            let value = value.as_ref();
             if value.len() <= INLINE_ELEMENT_SIZE {
                 self.buf.push(value.len() as u8);
             } else {
@@ -578,7 +585,7 @@ impl<'a> Writer8<'a> {
     /// A column of nothing but empty strings is omitted, for the same reason an
     /// all-zero integer column is: its absence already says so, and writing it
     /// would cost a byte per row to say nothing.
-    pub fn string_column<S: AsRef<str>>(&mut self, key: u8, values: &[S]) {
+    pub fn string_column<S: AsRef<[u8]>>(&mut self, key: u8, values: &[S]) {
         if values.iter().all(|value| value.as_ref().is_empty()) {
             return;
         }

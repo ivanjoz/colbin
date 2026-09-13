@@ -272,3 +272,77 @@ fn parse_desc(cursor: &mut Cursor<'_>, key: u8, table_len: usize) -> Result<Plan
     }
     Ok(field)
 }
+
+// ---- the write half ---------------------------------------------------------
+
+/// Serialises a struct table as a section.
+///
+/// The mirror of [`parse`], and the only thing between an inferred schema and a
+/// reader that has not got the type. The table is written in the order it is
+/// held, with the root at index 0 — [`crate::infer`] builds it in the pre-order
+/// a reader's own hoisting would produce, so a section written here and one
+/// written by Go for the same shape are the same bytes.
+///
+/// Every length goes out the way the format writes every count: one byte,
+/// escaping to four behind `0xFF`.
+#[cfg(feature = "encode")]
+#[must_use]
+pub fn build(schema: &Schema) -> Vec<u8> {
+    let mut body = Vec::with_capacity(64 * schema.plans.len());
+    append_length(&mut body, schema.plans.len());
+    for plan in &schema.plans {
+        let mut flags = 0u8;
+        if plan.is_wide {
+            flags |= SCHEMA_WIDE_KEYS;
+        }
+        if plan.is_envelope {
+            flags |= SCHEMA_ENVELOPE;
+        }
+        body.push(flags);
+        append_length(&mut body, plan.fields.len());
+        for (at, field) in plan.fields.iter().enumerate() {
+            body.push(field.key);
+            // A plan whose names ran short would write a field a reader cannot
+            // name. It cannot happen — `parse` pushes the two together and
+            // `infer` does too — and an empty name is a better answer than a
+            // panic if it ever did.
+            let name = plan.names.get(at).map_or("", |name| name.as_str());
+            append_length(&mut body, name.len());
+            body.extend_from_slice(name.as_bytes());
+            append_desc(&mut body, field);
+        }
+    }
+
+    let mut out = Vec::with_capacity(body.len() + 5);
+    append_length(&mut out, body.len());
+    out.extend_from_slice(&body);
+    out
+}
+
+/// One field's type: the op, and whatever the op does not say by itself.
+#[cfg(feature = "encode")]
+fn append_desc(out: &mut Vec<u8>, field: &PlanField) {
+    out.push(field.op);
+    match field.op {
+        OP_STRUCT | OP_STRUCTS => append_length(out, field.sub.unwrap_or(0) as usize),
+        OP_MAP => {
+            out.push(field.key_kind);
+            out.push(field.value_kind);
+        }
+        OP_POINTER => out.push(field.elem_op),
+        // Everything else is named by its op alone.
+        _ => {}
+    }
+}
+
+/// A length, the way this format writes every count: one byte, escaping to four
+/// behind `0xFF`. Not a varint, for the reason nothing here is a varint.
+#[cfg(feature = "encode")]
+fn append_length(out: &mut Vec<u8>, value: usize) {
+    if value < LENGTH_ESCAPE as usize {
+        out.push(value as u8);
+        return;
+    }
+    out.push(LENGTH_ESCAPE);
+    out.extend_from_slice(&(value as u32).to_le_bytes());
+}

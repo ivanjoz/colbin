@@ -75,8 +75,24 @@ export class NarrowWriter {
     this.out.writeLE(value, width)
   }
 
-  /** A signed field as a sign bit and a magnitude, and nothing when it is zero. */
+  /**
+   * A signed field as a sign bit and a magnitude, and nothing when it is zero.
+   *
+   * The small-positive case is written the way `wire/narrow.go`'s `Int` writes
+   * it — size code 1 and a byte — rather than through `magnitude` below. For
+   * every value but one the two agree; at exactly +1, `magnitude`'s size-code-0
+   * shortcut would spend one byte where Go spends two, and a message that is a
+   * byte different from the one Go writes for the same record is a second
+   * format. (Go's ordering costs that byte on a genuinely common value, and
+   * −1 still takes the shortcut. Worth revisiting in Go, where the decision
+   * lives; not worth diverging over here.)
+   */
   int(key: u8, value: i64): void {
+    if (value > 0 && value <= 0xff) {
+      this.byte((key << 4) | INT_POSITIVE_FLAG | 1)
+      this.byte(<u8>value)
+      return
+    }
     if (value == 0) return
     let header = (key << 4) | INT_POSITIVE_FLAG
     let magnitude = <u64>value
