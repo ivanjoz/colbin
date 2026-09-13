@@ -60,7 +60,7 @@ func appendNarrowStructs(writer *wire.Writer, field *planField, at unsafe.Pointe
 		} else {
 			writePlan(writer, field.sub, elementAt, buf)
 		}
-		writer.Close(element)
+		writer.CloseElement(element)
 	}
 	writer.Close(list)
 }

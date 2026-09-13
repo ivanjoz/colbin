@@ -1,6 +1,15 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { decode, encode, inspect, preload, type Column, type Diagnostic, type Report } from '$lib/codec'
+  import {
+    decode,
+    encode,
+    inspect,
+    preload,
+    type Encoded,
+    type Field,
+    type Diagnostic,
+    type Report,
+  } from '$lib/codec'
   import { bytes, compactSize, gzipSize } from '$lib/format'
   import { defaultExample, examples, type Example } from '$lib/examples'
   import ColumnTree from '$lib/ColumnTree.svelte'
@@ -12,7 +21,7 @@
   let text = $state(defaultExample.json)
   let status = $state<'idle' | 'working' | 'ready' | 'failed'>('idle')
 
-  let message = $state<Uint8Array | undefined>()
+  let encoded = $state<Encoded | undefined>()
   let report = $state<Report | undefined>()
   let error = $state<Diagnostic | undefined>()
   let warnings = $state<string[]>([])
@@ -20,7 +29,7 @@
   let messageGzip = $state(0)
   let encodeMs = $state(0)
 
-  let hovered = $state<Column | undefined>()
+  let hovered = $state<Field | undefined>()
   let showGzip = $state(false)
 
   // Compared against the compact form: the examples are pretty-printed to be
@@ -47,35 +56,41 @@
   async function run(source: string) {
     status = 'working'
     const started = performance.now()
-    const encoded = await encode(source)
+    const result = await encode(source)
     encodeMs = performance.now() - started
 
-    if (!encoded.ok) {
-      error = encoded.error
+    if (!result.ok) {
+      error = result.error
       warnings = []
-      message = undefined
+      encoded = undefined
       report = undefined
       status = 'failed'
       return
     }
 
     error = undefined
-    warnings = encoded.warnings
-    message = encoded.value
+    warnings = result.warnings
+    encoded = result.value
 
-    const inspected = await inspect(encoded.value)
+    const inspected = await inspect(result.value.message, result.value.section)
     report = inspected.ok ? inspected.value : undefined
     status = 'ready'
-    ;[jsonGzip, messageGzip] = await Promise.all([gzipSize(source), gzipSize(encoded.value)])
+    ;[jsonGzip, messageGzip] = await Promise.all([
+      gzipSize(source),
+      gzipSize(result.value.message),
+    ])
   }
 
+  // The file gets the self-describing form, not the one the page measures. A
+  // message on a wire is sent behind a section the far end already has; a file
+  // has nowhere to put one, so it carries its own and the root byte says so.
   function download() {
-    if (!message) return
-    const blob = new Blob([message as BlobPart], { type: 'application/octet-stream' })
+    if (!encoded) return
+    const blob = new Blob([encoded.standalone as BlobPart], { type: 'application/octet-stream' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `${selected.key}.cbj`
+    a.download = `${selected.key}.cb`
     a.click()
     URL.revokeObjectURL(url)
   }
@@ -113,8 +128,8 @@
       Every example is editable. You can paste your own JSON payload.
     </p>
     <label class="upload">
-      <input type="file" accept=".cbj,.cb,application/octet-stream" onchange={upload} />
-      <span>Open a .cbj file…</span>
+      <input type="file" accept=".cb,.cbj,application/octet-stream" onchange={upload} />
+      <span>Open a .cb file…</span>
     </label>
   </aside>
 
@@ -138,43 +153,63 @@
           <p class="sub">encoding…</p>
         {/if}
 
-        {#if report && message}
+        {#if report && encoded}
           <!-- The ratio is this pane's heading: it says what the pane is for, so
                the pane does not also need a row that says "Message". -->
           <SizeBars
             {jsonBytes}
-            messageBytes={message.length}
+            messageBytes={encoded.message.length}
             {jsonGzip}
             {messageGzip}
             timing={status === 'working' ? 'encoding…' : `${encodeMs.toFixed(1)} ms`}
             bind:showGzip
           >
-            <span class="fact">{report.recordCount} records</span>
-            <span class="fact">{report.columns.length} columns</span>
+            <span class="fact">{report.rows} {report.rows === 1 ? 'record' : 'records'}</span>
+            <span class="fact">{report.fields.length} {report.fields.length === 1 ? 'field' : 'fields'}</span>
             <span
               class="fact"
-              title="The schema section: field names and the type facts the columns leave out. It describes the type, so it does not grow with the record count."
+              title="Four-bit field ids are the fast path. A type goes to eight when it has more than sixteen fields, which costs a byte per present field."
             >
-              schema {bytes(report.schemaBytes)}
+              {report.wide ? '8-bit keys' : '4-bit keys'}
+            </span>
+            <span
+              class="fact"
+              title="The schema section: the field names and the type facts the bytes leave out. It is sent once per connection, not per message, so the bar above measures the body alone."
+            >
+              schema {bytes(encoded.section.length)} · sent once
+            </span>
+            <!-- The other delivery, and the one that keeps the bar honest. A
+                 stream sends the schema once and the bar is the whole truth; a
+                 single file has nowhere to put one and carries its own, which
+                 on a small document costs more than the document. Showing both
+                 is what stops the headline ratio from being a stream's number
+                 quoted at a file. -->
+            <span
+              class="fact"
+              class:is-loss={encoded.standalone.length >= jsonBytes}
+              title="The same document as a standalone file: the schema section in front of the body, which is what the download button writes. A small document is mostly schema."
+            >
+              as one file {bytes(encoded.standalone.length)} ·
+              {(jsonBytes / encoded.standalone.length).toFixed(2)}×
             </span>
           </SizeBars>
 
           <div class="download-row">
-            <button class="download" onclick={download}>Download .cbj</button>
+            <button class="download" onclick={download}>Download .cb</button>
           </div>
 
           <!-- Side by side, because the two halves are one gesture: hover a
                column on the left, its bytes light up on the right. -->
           <div class="panels">
             <div class="panel">
-              <h3>Columns</h3>
-              <p class="sub">Hover or tap a column to find its bytes in the message.</p>
-              <ColumnTree columns={report.columns} total={report.totalBytes} bind:hovered />
+              <h3>Fields</h3>
+              <p class="sub">Hover or tap a field to find its bytes in the message.</p>
+              <ColumnTree columns={report.fields} total={report.totalBytes} bind:hovered />
             </div>
             <div class="panel">
               <h3>Bytes</h3>
-              <p class="sub">The version byte and schema are dimmed.</p>
-              <HexView data={message} schemaBytes={report.schemaBytes} {hovered} />
+              <p class="sub">The root byte is dimmed. Everything after it is the record.</p>
+              <HexView data={encoded.message} schemaBytes={report.rootBytes} {hovered} />
             </div>
           </div>
         {/if}
@@ -325,6 +360,12 @@
   .scroll {
     overflow: auto;
     flex: 1;
+  }
+
+  /* A ratio under one is the point of the example rather than a fault, so it is
+     marked rather than hidden. */
+  :global(.fact.is-loss) {
+    color: #b45309;
   }
 
   /* The facts read as one line, so they are separated rather than merely

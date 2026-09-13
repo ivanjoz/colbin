@@ -109,13 +109,31 @@ jobs:
         working-directory: web
         run: bun install --frozen-lockfile
 
-      # Compiles both WebAssembly modules, regenerates the vectors from the Go
-      # codecs, and runs the suite against them. The vectors are what make this
-      # a comparison with colbin rather than with itself: a module that agrees
-      # with its own output would pass a round-trip test and fail here.
+      # The same discipline the Rust corpus gets, and for the same reason: the
+      # module asserts against the committed file, so a Go-side format change
+      # that nobody ported must fail on the Go side's own push rather than leave
+      # the port passing against a corpus that no longer describes anything.
+      - name: Regenerate the web vectors from the Go codecs
+        run: |
+          go run ./web/vectors
+          git diff --exit-code web/vectors/vectors.json
+
+      # Compiles both WebAssembly modules and runs the suite against those
+      # vectors. They are what make this a comparison with colbin rather than
+      # with itself: a module that agrees with its own output would pass a
+      # round-trip test and fail here.
       - name: Test the module against vectors generated from the Go codecs
         working-directory: web
         run: bun run test
+
+      # And the other direction, which no byte-for-byte corpus can test: the
+      # module encodes, Go decodes. Byte equality only covers the cases where
+      # two encoders agree exactly, and the one that matters to a caller — a
+      # JavaScript client writing for a Go service — is not one of them.
+      - name: Verify the module's encoder against the Go decoder
+        run: |
+          git diff --exit-code web/vectors/web_encoded.json
+          go test ./web/vectors
 
       - name: Type-check
         working-directory: web

@@ -155,7 +155,7 @@ try {
         "refused: !!document.querySelector('.box.bad')," +
         "message: document.querySelector('.box.bad p')?.textContent ?? ''," +
         "ratio: document.querySelector('.headline strong')?.textContent ?? ''," +
-        "columns: document.querySelectorAll('.tree .row').length," +
+        "fields: document.querySelectorAll('.tree .row').length," +
         "hexCells: document.querySelectorAll('.hex .cell').length" +
         '}))()'
     )
@@ -168,18 +168,37 @@ try {
     } else {
       check(name + ': encoded', !state.refused, state.message)
       check(name + ': has a ratio', /x$/.test(state.ratio), state.ratio)
-      check(name + ': columns listed', state.columns > 0)
+      check(name + ': fields listed', state.fields > 0)
       check(name + ': hex rendered', state.hexCells > 0)
     }
   }
 
-  // The honesty cases have to show what the format actually does.
+  // The honesty cases have to show what the format actually does — and what
+  // that is has changed. The schema now travels out of band, so a lone object
+  // is a 3x *win* as a stream and a tie as a file. The loss moved to the "as
+  // one file" fact, which is what the page has to keep showing.
   await click('One object')
   await wait(600)
-  check(
-    'a lone object is shown as a loss',
-    (await evaluate("document.querySelector('.headline').classList.contains('is-loss')")) === true
+  const lone = await evaluate(
+    "(() => ({" +
+      "ratio: document.querySelector('.headline strong').textContent," +
+      "file: Array.from(document.querySelectorAll('.fact')).find(f => /as one file/.test(f.textContent))?.textContent ?? ''" +
+      "}))()"
   )
+  check('a lone object wins as a stream', /^[2-9]/.test(lone.ratio), lone.ratio)
+  check('and its standalone size is shown beside it', /as one file/.test(lone.file), lone.file)
+
+  // The bare array is the loss that survived, and it has to look like one.
+  await click('A bare array of numbers')
+  await wait(600)
+  const bare = await evaluate(
+    "(() => {" +
+      "const f = Array.from(document.querySelectorAll('.fact')).find(f => /as one file/.test(f.textContent));" +
+      "return { text: f?.textContent ?? '', marked: f?.classList.contains('is-loss') ?? false };" +
+    "})()"
+  )
+  check('a bare array loses as a file', bare.marked === true, bare.text)
+  check('and the ratio under one is shown', /0\.\d\dx/.test(bare.text.replace('×', 'x')), bare.text)
 
   await click('Metric points')
   await wait(700)

@@ -1,13 +1,16 @@
 // The scanner against Go: exact integers, correctly-rounded floats, and the
 // escape rules encoding/json defines - including lone surrogates becoming
-// U+FFFD, which is what keeps packed5's input valid UTF-8 (PLAN.md 4.5).
+// U+FFFD, so that what reaches the encoder is always valid UTF-8.
+//
+// json.ts and decimal.ts are the two files the format change does not touch, so
+// this is the one suite that survives the re-port intact (REFACTOR_PLAN.md 2).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { load, vectors, hex } from './harness.mjs'
 
 const wasm = await load()
-const numbers = await vectors('numbers.json')
-const strings = await vectors('strings.json')
+const numbers = await vectors('numbers')
+const strings = await vectors('texts')
 
 const K = { NULL: 0, BOOL: 1, INT: 2, UINT: 3, FLOAT: 4, STRING: 5, ARRAY: 6, OBJECT: 7 }
 

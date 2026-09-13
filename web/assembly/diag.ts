@@ -5,6 +5,8 @@
 // the host as an RuntimeError carrying no path and no offset, which is exactly
 // what a caller cannot act on.
 
+import { Writer } from './bytes'
+
 export const D_NONE: i32 = 0
 export const D_SYNTAX: i32 = 1
 export const D_NUMBER: i32 = 2
@@ -46,6 +48,63 @@ export class Diag {
     this.message = ''
     this.warnings = []
   }
+
+  /** The diagnostic as JSON: code, offset, line, path, message, warnings. */
+  encode(): Uint8Array {
+    const out = new Writer(256)
+    writeText(out, '{"code":')
+    writeText(out, this.code.toString())
+    writeText(out, ',"offset":')
+    writeText(out, this.offset.toString())
+    writeText(out, ',"line":')
+    writeText(out, this.line.toString())
+    writeText(out, ',"path":')
+    writeJSONText(out, this.path)
+    writeText(out, ',"message":')
+    writeJSONText(out, this.message)
+    writeText(out, ',"warnings":[')
+    for (let index = 0; index < this.warnings.length; index++) {
+      if (index > 0) out.writeByte(0x2c)
+      writeJSONText(out, unchecked(this.warnings[index]))
+    }
+    writeText(out, ']}')
+    return out.take()
+  }
+}
+
+function writeText(out: Writer, text: string): void {
+  const bytes = Uint8Array.wrap(String.UTF8.encode(text, false))
+  out.writeBytes(bytes, 0, bytes.length)
+}
+
+/** A JSON string literal. Diagnostics are the only strings this writes, so the
+ * escape set is the minimum that keeps the envelope parseable rather than
+ * encoding/json's — jsontext.ts is where that one lives. */
+function writeJSONText(out: Writer, text: string): void {
+  const bytes = Uint8Array.wrap(String.UTF8.encode(text, false))
+  out.writeByte(0x22)
+  for (let index = 0; index < bytes.length; index++) {
+    const character = unchecked(bytes[index])
+    if (character == 0x22 || character == 0x5c) {
+      out.writeByte(0x5c)
+      out.writeByte(character)
+    } else if (character == 0x0a) {
+      out.writeByte(0x5c)
+      out.writeByte(0x6e)
+    } else if (character < 0x20) {
+      writeText(out, '\\u00')
+      out.writeByte(hexDigit(character >> 4))
+      out.writeByte(hexDigit(character & 0x0f))
+    } else {
+      out.writeByte(character)
+    }
+  }
+  out.writeByte(0x22)
+}
+
+@inline
+function hexDigit(value: u8): u8 {
+  return value < 10 ? 0x30 + value : 0x61 + (value - 10)
 }
 
 /**

@@ -533,3 +533,50 @@ func TestTheCrossLanguageVector(t *testing.T) {
 		t.Fatalf("the vector's FNV-1a is 0x%016X", checksum)
 	}
 }
+
+// TestNarrowListElementWidths pins the length form a list element takes at every
+// size either side of the escape.
+//
+// The element is the one composite with no descriptor in front of it, so it
+// cannot widen the way every other one does — there is nothing to put an `lw`
+// code in. Closing it with Close instead of CloseElement wrote a bare four-byte
+// length where Element reads the 0xFF escape, and OR-ed 2 into whatever byte
+// preceded the placeholder: a message the writer produced and the reader
+// refused, for any element body reaching 255 bytes.
+func TestNarrowListElementWidths(t *testing.T) {
+	for _, size := range []int{0, 1, 253, 254, 255, 256, 1000, 70000} {
+		w := Writer{}
+		list := w.OpenList(3, 1)
+		element := w.OpenElement()
+		w.Bytes(0, bytes.Repeat([]byte{'x'}, size))
+		w.CloseElement(element)
+		w.Close(list)
+
+		r := NewReader(w.Buffer)
+		if !r.More() || r.Key() != 3 {
+			t.Fatalf("size %d: no list at key 3", size)
+		}
+		count, elements, ok := r.Counted()
+		if !ok || count != 1 {
+			t.Fatalf("size %d: count %d, ok %v", size, count, ok)
+		}
+		body, ok := elements.Element()
+		if !ok {
+			t.Fatalf("size %d: %v", size, elements.Err())
+		}
+		inner := NewReader(body)
+		var got []byte
+		if size > 0 {
+			if !inner.More() {
+				t.Fatalf("size %d: the element body is empty", size)
+			}
+			got = inner.Bytes()
+		}
+		if err := inner.Err(); err != nil {
+			t.Fatalf("size %d: %v", size, err)
+		}
+		if len(got) != size {
+			t.Fatalf("size %d: read back %d bytes", size, len(got))
+		}
+	}
+}

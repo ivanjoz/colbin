@@ -1,31 +1,70 @@
-// Inference (PLAN.md §3) and enforcement (§4).
+// Inference (PLAN.md §3) and enforcement (§4), producing a plan.
 //
 // Two passes, and the split is load-bearing. The first observes every record
-// without deciding anything; the second resolves each observation into a type
-// and refuses the ones that contradict themselves. A schema decided from record
-// 0 that record 500 contradicts is precisely how an encoder emits a body its own
+// without deciding anything; the second resolves each observation into an op and
+// refuses the ones that contradict themselves. A schema decided from record 0
+// that record 500 contradicts is precisely how an encoder emits a body its own
 // schema does not describe (§4.5, rule 1), so nothing here commits to a type
 // until every record has been seen.
+//
+// The rules are the ones the first port implemented. What changed is what they
+// produce: a `Plan` of `fieldOp`s rather than the old format's type classes, and
+// with it three decisions the old format did not have.
+//
+// # Field ids are sequential, in first-seen order
+//
+// REFACTOR_PLAN.md §5.2. The old module hashed a field name with fnv8 and probed
+// past collisions, matching what Go does for an untagged struct — and a derived
+// id lands anywhere in 0..255, so every message it wrote used eight-bit keys.
+// Numbering them 0, 1, 2 instead puts any object of sixteen fields or fewer on
+// the four-bit fast path, which is a byte per field smaller. The section carries
+// the ids, so nothing that reads the section can be confused by it.
+//
+// First-seen order stays exactly as load-bearing as it was, for a different
+// reason: it is no longer the input to a hash, it *is* the id.
+//
+// # The root is a struct, and JSON's top level often is not
+//
+// REFACTOR_PLAN.md §5.1. `Marshal` encodes a struct and nothing else, so an
+// array or a bare scalar at the top level is wrapped in a one-field envelope.
+// The envelope is marked in the section rather than guessed at on the way back —
+// see section.ts.
+//
+// # What the format does not carry
+//
+// An array of floats, an array of bools and an array of arrays have no op. That
+// is the format's limit rather than this module's: `sliceOp` in codec/codec.go
+// resolves integers, strings and structs and refuses the rest. They are refused
+// here with a message that says so, because the alternative is a message that
+// does not decode.
 
-import { Diag, D_CONFLICT, D_LIMIT, D_UNSUPPORTED } from './diag'
+import { D_CONFLICT, D_LIMIT, D_UNSUPPORTED, Diag } from './diag'
 import { Doc, K_ARRAY, K_BOOL, K_FLOAT, K_INT, K_NULL, K_OBJECT, K_STRING, K_UINT } from './json'
 import {
-  FT_ARRAY,
-  FT_FLOAT,
-  FT_INT,
-  FT_STRING,
-  FT_STRUCT,
-  Field,
-  MAX_FIELDS,
-  SK_BOOL,
-  SK_FLOAT64,
-  SK_INT64,
-  SK_UINT64,
-  Type,
-  assignFieldIDs,
-} from './schema'
+  OP_BOOL,
+  OP_FLOAT64,
+  OP_INT64,
+  OP_INT64S,
+  OP_POINTER,
+  OP_STRING,
+  OP_STRINGS,
+  OP_STRUCT,
+  OP_STRUCTS,
+  OP_UINT64,
+  OP_UINT64S,
+  Plan,
+  PlanField,
+  columnableOp,
+} from './plan'
 
-// Value categories. Two different categories in one column is a conflict; the
+/** What eight key bits buy, and therefore the most fields one object may hold. */
+const MAX_FIELDS: i32 = 256
+
+/** The name the envelope's single field takes. It is only ever built when the
+ * top level is *not* an object, so it can never collide with a caller's key. */
+export const ENVELOPE_FIELD: string = 'rows'
+
+// Value categories. Two different categories in one position is a conflict; the
 // numeric one absorbs int, uint and float internally because those unify.
 const C_BOOL: i32 = 0
 const C_NUM: i32 = 1
@@ -34,12 +73,13 @@ const C_ARR: i32 = 3
 const C_OBJ: i32 = 4
 const C_COUNT: i32 = 5
 
+// @ts-ignore: decorator
+@lazy
 const CATEGORY_NAMES: StaticArray<string> = ['bool', 'number', 'string', 'array', 'object']
 
 /** What one position in the shape was observed to hold, across every record. */
 class Obs {
   sawNull: bool = false
-  sawInt: bool = false
   sawNeg: bool = false
   sawUint: bool = false
   sawFloat: bool = false
@@ -48,22 +88,22 @@ class Obs {
   catRec: StaticArray<i32> = new StaticArray<i32>(C_COUNT)
   catOff: StaticArray<i32> = new StaticArray<i32>(C_COUNT)
 
-  elem: Obs | null = null // array element
-  fields: Array<FieldObs> = [] // struct fields, first-seen order
+  elem: Obs | null = null
+  fields: Array<FieldObs> = []
   /** Objects merged into this position; a field short of it is nullable. */
   objects: i32 = 0
 
   constructor() {
-    for (let i = 0; i < C_COUNT; i++) {
-      unchecked((this.catRec[i] = -1))
-      unchecked((this.catOff[i] = -1))
+    for (let index = 0; index < C_COUNT; index++) {
+      unchecked((this.catRec[index] = -1))
+      unchecked((this.catOff[index] = -1))
     }
   }
 
-  @inline note(cat: i32, record: i32, offset: i32): void {
-    if (unchecked(this.catRec[cat]) < 0) {
-      unchecked((this.catRec[cat] = record))
-      unchecked((this.catOff[cat] = offset))
+  @inline note(category: i32, record: i32, offset: i32): void {
+    if (unchecked(this.catRec[category]) < 0) {
+      unchecked((this.catRec[category] = record))
+      unchecked((this.catOff[category] = offset))
     }
   }
 }
@@ -78,22 +118,17 @@ class FieldObs {
   }
 }
 
-export const SHAPE_RECORDS: i32 = 0 // array of objects
-export const SHAPE_SINGLE: i32 = 1 // one object, rendered back as an object
-export const SHAPE_VALUE: i32 = 2 // value mode
-
-export class Schema {
-  shape: i32 = SHAPE_RECORDS
-  /** The record type for records mode; the value's type for value mode. */
-  root: Type = new Type(FT_STRUCT, SK_INT64)
-  /** Node indices of the records, in order. */
-  records: Array<i32> = []
+/** An inferred schema: the root plan, and the nodes the body is written from. */
+export class Inferred {
+  plan: Plan = new Plan()
+  /** The document node the root plan describes. For an envelope this is the
+   * top-level value; otherwise it is the object itself. */
+  root: i32 = -1
 }
 
 export class Inferrer {
   doc: Doc
   diag: Diag
-  /** Path segments of the position being walked, for diagnostics. */
   path: Array<string> = []
   record: i32 = 0
 
@@ -104,67 +139,92 @@ export class Inferrer {
 
   pathString(): string {
     let out = ''
-    for (let i = 0; i < this.path.length; i++) out += unchecked(this.path[i])
+    for (let index = 0; index < this.path.length; index++) out += unchecked(this.path[index])
     return out
   }
 
-  infer(): Schema | null {
+  infer(): Inferred | null {
     const doc = this.doc
     const root = doc.root
-    const schema = new Schema()
     const kind = doc.kindOf(root)
 
-    if (kind == K_ARRAY) {
-      const n = doc.count(root)
-      if (n == 0) {
-        this.diag.fail(D_CONFLICT, unchecked(doc.off[root]), '', 'an empty array has no shape to infer')
-        return null
-      }
-      let allObjects = true
-      for (let i = 0; i < n; i++) {
-        if (doc.kindOf(doc.childAt(root, i)) != K_OBJECT) {
-          allObjects = false
-          break
-        }
-      }
-      if (!allObjects) {
-        // An array of anything else is one value, not a batch of records.
-        schema.shape = SHAPE_VALUE
-        schema.records.push(root)
-      } else {
-        schema.shape = SHAPE_RECORDS
-        for (let i = 0; i < n; i++) schema.records.push(doc.childAt(root, i))
-      }
-    } else if (kind == K_OBJECT) {
-      schema.shape = SHAPE_SINGLE
-      schema.records.push(root)
-    } else if (kind == K_NULL) {
+    if (kind == K_NULL) {
       this.diag.fail(D_CONFLICT, unchecked(doc.off[root]), '', 'null has no shape to infer')
       return null
-    } else {
-      // A bare scalar. One value, one column, and framing with nothing to
-      // amortise it over -- which is a case worth being able to show.
-      schema.shape = SHAPE_VALUE
-      schema.records.push(root)
+    }
+    if (kind == K_ARRAY && doc.count(root) == 0) {
+      this.diag.fail(
+        D_CONFLICT,
+        unchecked(doc.off[root]),
+        '',
+        'an empty array has no shape to infer',
+      )
+      return null
     }
 
-    // Pass one: observe every record without deciding anything.
-    const obs = new Obs()
-    for (let i = 0; i < schema.records.length; i++) {
-      this.record = i
+    const out = new Inferred()
+    out.root = root
+
+    if (kind == K_OBJECT) {
+      // The ordinary case: the top level is the record, and the root plan is its
+      // struct. No envelope, and nothing to unwrap on the way back.
+      const obs = new Obs()
+      this.record = 0
       this.path = []
-      this.path.push('[' + i.toString() + ']')
-      this.observe(obs, unchecked(schema.records[i]))
+      this.observe(obs, root)
+      if (!this.diag.ok) return null
+      this.path = []
+      const plan = this.resolveStruct(obs)
+      if (plan == null) return null
+      out.plan = plan
+      return out
+    }
+
+    // Everything else goes in an envelope, because the root of a colbin message
+    // is a struct and nothing else.
+    const obs = new Obs()
+    if (kind == K_ARRAY) {
+      // Each element is a record, so a conflict names the record it appeared in
+      // rather than "inside the array".
+      const count = doc.count(root)
+      for (let index = 0; index < count; index++) {
+        this.record = index
+        this.path = []
+        this.path.push('[' + index.toString() + ']')
+        this.observe(obs.elem == null ? this.makeElem(obs) : obs.elem!, doc.childAt(root, index))
+        if (!this.diag.ok) return null
+      }
+      obs.note(C_ARR, 0, unchecked(doc.off[root]))
+    } else {
+      this.record = 0
+      this.path = []
+      this.observe(obs, root)
       if (!this.diag.ok) return null
     }
 
-    // Pass two: resolve, which is where a contradiction becomes an error.
     this.path = []
-    const t = this.resolve(obs)
-    if (t == null) return null
-    schema.root = t
-    return schema
+    const field = new PlanField()
+    field.key = 0
+    const op = this.resolveOp(obs, field)
+    if (op < 0) return null
+    field.op = <u8>op
+
+    const plan = new Plan()
+    plan.isEnvelope = true
+    plan.fields.push(field)
+    plan.names.push(ENVELOPE_FIELD)
+    plan.finish()
+    out.plan = plan
+    return out
   }
+
+  private makeElem(obs: Obs): Obs {
+    const elem = new Obs()
+    obs.elem = elem
+    return elem
+  }
+
+  // ---- pass one: observe ----------------------------------------------------
 
   observe(obs: Obs, node: i32): void {
     if (!this.diag.ok) return
@@ -182,13 +242,11 @@ export class Inferrer {
     }
     if (kind == K_INT) {
       obs.note(C_NUM, this.record, offset)
-      obs.sawInt = true
       if (unchecked(doc.num[node]) < 0) obs.sawNeg = true
       return
     }
     if (kind == K_UINT) {
       obs.note(C_NUM, this.record, offset)
-      obs.sawInt = true
       obs.sawUint = true
       return
     }
@@ -203,166 +261,283 @@ export class Inferrer {
     }
     if (kind == K_ARRAY) {
       obs.note(C_ARR, this.record, offset)
-      const n = doc.count(node)
+      const count = doc.count(node)
       // Created only when there is an element to observe: a field that is always
-      // an empty array must stay distinguishable from one that is always null,
-      // because the two get different warnings and different element types.
-      if (n > 0 && obs.elem == null) obs.elem = new Obs()
+      // an empty array must stay distinguishable from one that is always null.
+      if (count > 0 && obs.elem == null) this.makeElem(obs)
       const elem = obs.elem
-      for (let i = 0; i < n; i++) {
-        this.path.push('[' + i.toString() + ']')
-        this.observe(elem!, doc.childAt(node, i))
+      if (elem == null) return
+      for (let index = 0; index < count; index++) {
+        this.path.push('[' + index.toString() + ']')
+        this.observe(elem, doc.childAt(node, index))
         this.path.pop()
         if (!this.diag.ok) return
       }
       return
     }
 
-    // K_OBJECT
+    // An object.
     obs.note(C_OBJ, this.record, offset)
     obs.objects++
-    const n = doc.count(node)
-    for (let i = 0; i < n; i++) {
-      const key = doc.keyOf(node, i)
+    const count = doc.count(node)
+    for (let index = 0; index < count; index++) {
+      const key = doc.keyOf(node, index)
       let slot = this.findField(obs, key)
       if (slot < 0) {
         if (obs.fields.length >= MAX_FIELDS) {
-          this.diag.fail(D_LIMIT, offset, this.pathString(),
-            'an object with more than ' + MAX_FIELDS.toString() +
-              ' fields cannot be encoded: field id 255 is the record terminator')
+          this.diag.fail(
+            D_LIMIT,
+            offset,
+            this.pathString(),
+            'an object with more than ' +
+              MAX_FIELDS.toString() +
+              ' fields cannot be encoded: a key is one byte',
+          )
           return
         }
         obs.fields.push(new FieldObs(copyBytes(key)))
         slot = obs.fields.length - 1
       }
-      const f = unchecked(obs.fields[slot])
+      const field = unchecked(obs.fields[slot])
       // A duplicate key overwrites, as JSON.parse does, so the count still
       // reflects records rather than occurrences.
-      if (f.present < obs.objects) f.present = obs.objects
+      if (field.present < obs.objects) field.present = obs.objects
       this.path.push('.' + bytesToString(key))
-      this.observe(f.obs, doc.childAt(node, i))
+      this.observe(field.obs, doc.childAt(node, index))
       this.path.pop()
       if (!this.diag.ok) return
     }
   }
 
-  findField(obs: Obs, key: Uint8Array): i32 {
-    for (let i = 0; i < obs.fields.length; i++) {
-      if (bytesEqual(unchecked(obs.fields[i]).name, key)) return i
+  private findField(obs: Obs, key: Uint8Array): i32 {
+    for (let index = 0; index < obs.fields.length; index++) {
+      if (bytesEqual(unchecked(obs.fields[index]).name, key)) return index
     }
     return -1
   }
 
-  /** Turns one observation into a type, or fails with the contradiction. */
-  resolve(obs: Obs): Type | null {
-    let seen = 0
-    for (let c = 0; c < C_COUNT; c++) {
-      if (unchecked(obs.catRec[c]) >= 0) seen++
-    }
+  // ---- pass two: resolve ----------------------------------------------------
 
+  /** The incumbent category, or -1 when the position contradicts itself. */
+  private categoryOf(obs: Obs): i32 {
+    let seen = 0
+    for (let category = 0; category < C_COUNT; category++) {
+      if (unchecked(obs.catRec[category]) >= 0) seen++
+    }
     if (seen > 1) {
       this.reportConflict(obs)
-      return null
+      return -1
     }
-
-    if (seen == 0) {
-      // Only ever null, or an array that was always empty.
-      this.diag.warn(this.pathString() + ' was only ever null; encoded as a nullable string')
-      const t = new Type(FT_STRING, SK_INT64)
-      t.nullable = true
-      return t
-    }
-
-    // Pick the incumbent category: the one with the lowest first record.
-    let cat = -1
-    for (let c = 0; c < C_COUNT; c++) {
-      if (unchecked(obs.catRec[c]) < 0) continue
-      if (cat < 0 || unchecked(obs.catRec[c]) < unchecked(obs.catRec[cat])) cat = c
-    }
-
-    let t: Type
-    if (cat == C_BOOL) {
-      t = new Type(FT_INT, SK_BOOL)
-    } else if (cat == C_NUM) {
-      if (obs.sawFloat) {
-        if (obs.sawUint) {
-          this.diag.warn(
-            this.pathString() +
-              ' mixes integers above 2^63 with floats; the column is float64 and those integers lose precision'
-          )
-        }
-        t = new Type(FT_FLOAT, SK_FLOAT64)
-      } else if (obs.sawUint) {
-        if (obs.sawNeg) {
-          this.diag.fail(D_CONFLICT, unchecked(obs.catOff[C_NUM]),
-            '[' + unchecked(obs.catRec[C_NUM]).toString() + ']' + this.pathString(),
-            'values span both below zero and above the int64 maximum, so no single integer column holds them exactly')
-          return null
-        }
-        t = new Type(FT_INT, SK_UINT64)
-      } else {
-        t = new Type(FT_INT, SK_INT64)
-      }
-    } else if (cat == C_STR) {
-      t = new Type(FT_STRING, SK_INT64)
-    } else if (cat == C_ARR) {
-      const elemObs = obs.elem
-      let elem: Type | null
-      if (elemObs == null) {
-        this.diag.warn(this.pathString() + ' was always an empty array; the element type is taken as string')
-        elem = new Type(FT_STRING, SK_INT64)
-      } else {
-        elem = this.resolve(elemObs)
-        if (elem == null) return null
-      }
-      t = new Type(FT_ARRAY, SK_INT64)
-      t.elem = elem
-    } else {
-      t = new Type(FT_STRUCT, SK_INT64)
-      for (let i = 0; i < obs.fields.length; i++) {
-        const fo = unchecked(obs.fields[i])
-        this.path.push('.' + bytesToString(fo.name))
-        const ft = this.resolve(fo.obs)
-        this.path.pop()
-        if (ft == null) return null
-        // A key absent from some record is indistinguishable from an explicit
-        // null on the wire (PLAN.md §6), and both make the column nullable.
-        if (fo.present < obs.objects) ft.nullable = true
-        const f = new Field(fo.name, ft)
-        f.present = fo.present
-        t.fields.push(f)
-      }
-      if (!assignFieldIDs(t.fields)) {
-        this.diag.fail(D_CONFLICT, -1, this.pathString(), 'two fields resolved to the same wire id')
-        return null
+    if (seen == 0) return -2 // only ever null
+    let winner = -1
+    for (let category = 0; category < C_COUNT; category++) {
+      if (unchecked(obs.catRec[category]) < 0) continue
+      if (winner < 0 || unchecked(obs.catRec[category]) < unchecked(obs.catRec[winner])) {
+        winner = category
       }
     }
-
-    if (obs.sawNull) t.nullable = true
-    return t
+    return winner
   }
 
-  reportConflict(obs: Obs): void {
+  /**
+   * One observation into an op, filling `field` with whatever the op does not
+   * say by itself. Returns -1 on a refusal.
+   */
+  private resolveOp(obs: Obs, field: PlanField): i32 {
+    const category = this.categoryOf(obs)
+    if (category == -1) return -1
+
+    if (category == -2) {
+      this.diag.warn(this.pathString() + ' was only ever null; encoded as a nullable string')
+      field.elemOp = OP_STRING
+      return OP_POINTER
+    }
+
+    if (category == C_OBJ) {
+      const sub = this.resolveStruct(obs)
+      if (sub == null) return -1
+      field.sub = sub
+      // A null where an object belongs cannot be a pointer — the format refuses
+      // a pointer to a composite — so it decodes back as an object of zeros.
+      if (obs.sawNull) {
+        this.diag.warn(
+          this.pathString() + ' is sometimes null; a null object decodes as an object of zeros',
+        )
+      }
+      return OP_STRUCT
+    }
+
+    if (category == C_ARR) {
+      return this.resolveArray(obs, field)
+    }
+
+    let op = OP_STRING
+    if (category == C_BOOL) {
+      op = OP_BOOL
+    } else if (category == C_NUM) {
+      const numeric = this.resolveNumber(obs)
+      if (numeric < 0) return -1
+      op = <u8>numeric
+    }
+
+    // A null, or a key absent from some record, makes the column a pointer:
+    // one that is nil is omitted and costs nothing, and one pointing at a zero
+    // writes an explicit zero so the two stay distinguishable.
+    if (obs.sawNull) {
+      field.elemOp = op
+      return OP_POINTER
+    }
+    return op
+  }
+
+  private resolveNumber(obs: Obs): i32 {
+    if (obs.sawFloat) {
+      if (obs.sawUint) {
+        this.diag.warn(
+          this.pathString() +
+            ' mixes integers above 2^63 with floats; the column is float64 and those integers lose precision',
+        )
+      }
+      return OP_FLOAT64
+    }
+    if (obs.sawUint) {
+      if (obs.sawNeg) {
+        this.diag.fail(
+          D_CONFLICT,
+          unchecked(obs.catOff[C_NUM]),
+          '[' + unchecked(obs.catRec[C_NUM]).toString() + ']' + this.pathString(),
+          'values span both below zero and above the int64 maximum, so no single integer column holds them exactly',
+        )
+        return -1
+      }
+      return OP_UINT64
+    }
+    return OP_INT64
+  }
+
+  private resolveArray(obs: Obs, field: PlanField): i32 {
+    const elem = obs.elem
+    if (elem == null) {
+      this.diag.warn(
+        this.pathString() + ' was always an empty array; the element type is taken as string',
+      )
+      return OP_STRINGS
+    }
+    const category = this.categoryOf(elem)
+    if (category == -1) return -1
+    if (category == -2) {
+      this.diag.warn(this.pathString() + ' holds only nulls; the element type is taken as string')
+      return OP_STRINGS
+    }
+    if (category == C_STR) return OP_STRINGS
+    if (category == C_OBJ) {
+      const sub = this.resolveStruct(elem)
+      if (sub == null) return -1
+      field.sub = sub
+      return OP_STRUCTS
+    }
+    if (category == C_NUM) {
+      const numeric = this.resolveNumber(elem)
+      if (numeric < 0) return -1
+      if (numeric == OP_FLOAT64) {
+        return this.unsupported('an array of floats')
+      }
+      return numeric == OP_UINT64 ? OP_UINT64S : OP_INT64S
+    }
+    if (category == C_BOOL) return this.unsupported('an array of booleans')
+    return this.unsupported('an array of arrays')
+  }
+
+  /**
+   * Every op the format carries as an array element is an integer, a string or
+   * a struct. The rest are refused here rather than encoded into something that
+   * does not decode.
+   */
+  private unsupported(what: string): i32 {
+    this.diag.fail(
+      D_UNSUPPORTED,
+      -1,
+      this.pathString(),
+      what + ' has no form on the wire: the format carries arrays of integers, of strings and of objects',
+    )
+    return -1
+  }
+
+  private resolveStruct(obs: Obs): Plan | null {
+    const plan = new Plan()
+    for (let index = 0; index < obs.fields.length; index++) {
+      const observed = unchecked(obs.fields[index])
+      this.path.push('.' + bytesToString(observed.name))
+      const field = new PlanField()
+      // Sequential, in first-seen order. See the header.
+      field.key = <u8>index
+      const op = this.resolveOp(observed.obs, field)
+      this.path.pop()
+      if (op < 0) return null
+      field.op = <u8>op
+
+      // A key absent from some record is indistinguishable from an explicit null
+      // on the wire (PLAN.md §6), and both make the column a pointer — where the
+      // format allows one.
+      if (observed.present < obs.objects && field.op != OP_POINTER && pointable(field.op)) {
+        field.elemOp = field.op
+        field.op = OP_POINTER
+      }
+      plan.fields.push(field)
+      plan.names.push(bytesToString(observed.name))
+    }
+    if (plan.fields.length == 0) {
+      this.diag.fail(
+        D_CONFLICT,
+        -1,
+        this.pathString(),
+        'an object with no fields has nothing to encode',
+      )
+      return null
+    }
+    plan.finish()
+    return plan
+  }
+
+  private reportConflict(obs: Obs): void {
     // The incumbent is whatever appeared first; the offender is the newcomer.
     let first = -1
     let last = -1
-    for (let c = 0; c < C_COUNT; c++) {
-      if (unchecked(obs.catRec[c]) < 0) continue
-      if (first < 0 || unchecked(obs.catRec[c]) < unchecked(obs.catRec[first])) first = c
-      if (last < 0 || unchecked(obs.catRec[c]) > unchecked(obs.catRec[last])) last = c
+    for (let category = 0; category < C_COUNT; category++) {
+      if (unchecked(obs.catRec[category]) < 0) continue
+      if (first < 0 || unchecked(obs.catRec[category]) < unchecked(obs.catRec[first])) {
+        first = category
+      }
+      if (last < 0 || unchecked(obs.catRec[category]) > unchecked(obs.catRec[last])) {
+        last = category
+      }
     }
-    const firstRec = unchecked(obs.catRec[first])
-    const lastRec = unchecked(obs.catRec[last])
-    let where = 'record ' + firstRec.toString()
-    if (lastRec - firstRec > 1) where = 'records ' + firstRec.toString() + '-' + (lastRec - 1).toString()
-
-    // pathString() is the pass-two path, which starts at the record's fields;
-    // the record index comes from the observation that caused the conflict.
-    this.diag.fail(D_CONFLICT, unchecked(obs.catOff[last]),
-      '[' + lastRec.toString() + ']' + this.pathString(),
-      'type conflict: ' + unchecked(CATEGORY_NAMES[last]) + ', but ' + where + ' had ' +
-        unchecked(CATEGORY_NAMES[first]))
+    const firstRecord = unchecked(obs.catRec[first])
+    const lastRecord = unchecked(obs.catRec[last])
+    let where = 'record ' + firstRecord.toString()
+    if (lastRecord - firstRecord > 1) {
+      where = 'records ' + firstRecord.toString() + '-' + (lastRecord - 1).toString()
+    }
+    this.diag.fail(
+      D_CONFLICT,
+      unchecked(obs.catOff[last]),
+      '[' + lastRecord.toString() + ']' + this.pathString(),
+      'type conflict: ' +
+        unchecked(CATEGORY_NAMES[last]) +
+        ', but ' +
+        where +
+        ' had ' +
+        unchecked(CATEGORY_NAMES[first]),
+    )
   }
+}
+
+/** Whether an op can sit behind a pointer. The format refuses a pointer to a
+ * composite: those carry a length already, and what a nil one should mean is
+ * not settled. */
+@inline
+function pointable(op: u8): bool {
+  return columnableOp(op)
 }
 
 function copyBytes(src: Uint8Array): Uint8Array {
@@ -376,10 +551,10 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): bool {
   return memory.compare(a.dataStart, b.dataStart, <usize>a.length) == 0
 }
 
-function bytesToString(b: Uint8Array): string {
-  return String.UTF8.decodeUnsafe(b.dataStart, <usize>b.length, false)
+function bytesToString(bytes: Uint8Array): string {
+  return String.UTF8.decodeUnsafe(bytes.dataStart, <usize>bytes.length, false)
 }
 
-export function inferSchema(doc: Doc, diag: Diag): Schema | null {
+export function inferPlan(doc: Doc, diag: Diag): Inferred | null {
   return new Inferrer(doc, diag).infer()
 }

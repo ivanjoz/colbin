@@ -42,6 +42,56 @@ export class Writer {
     this.len += length
   }
 
+  /**
+   * The low `count` bytes of `value`, least significant first.
+   *
+   * Every multi-byte quantity in the format is little-endian, which is one
+   * native load on every machine this runs on — so a width-taking store is the
+   * shape every caller wants, rather than one method per width.
+   */
+  @inline writeLE(value: u64, count: i32): void {
+    this.ensure(count)
+    let at = this.len
+    for (let index = 0; index < count; index++) {
+      unchecked((this.buf[at++] = <u8>(value >> <u64>(index << 3))))
+    }
+    this.len = at
+  }
+
+  /** Overwrites one byte already written, which is how a composite's reserved
+   * length placeholder is patched. */
+  @inline setByte(at: i32, b: u8): void {
+    unchecked((this.buf[at] = b))
+  }
+
+  /** Overwrites `count` little-endian bytes at an offset already written. */
+  @inline setLE(at: i32, value: u64, count: i32): void {
+    for (let index = 0; index < count; index++) {
+      unchecked((this.buf[at + index] = <u8>(value >> <u64>(index << 3))))
+    }
+  }
+
+  /**
+   * Makes room for `count` bytes at `at`, shifting what follows up.
+   *
+   * This is the rare half of a composite's backpatch: the writer reserves one
+   * byte for a length, writes the body, and widens only when the body outgrew
+   * it — a memmove on a buffer already in cache, against a pass over every
+   * nested value to size it first.
+   */
+  insert(at: i32, count: i32): void {
+    this.ensure(count)
+    const tail = this.len - at
+    if (tail > 0) {
+      memory.copy(
+        this.buf.dataStart + <usize>(at + count),
+        this.buf.dataStart + <usize>at,
+        <usize>tail,
+      )
+    }
+    this.len += count
+  }
+
   /** A copy of exactly what was written. */
   take(): Uint8Array {
     const out = new Uint8Array(this.len)
@@ -90,4 +140,58 @@ export class Reader {
     }
     return true
   }
+
+  /**
+   * `count` little-endian bytes as a u64, or 0 with the failure recorded.
+   *
+   * Sizes in this format never escalate past eight bytes, so one entry point
+   * covers every length the wire can name.
+   */
+  @inline readLE(count: i32): u64 {
+    if (!this.has(count)) return 0
+    let value: u64 = 0
+    for (let index = 0; index < count; index++) {
+      value |= <u64>unchecked(this.buf[this.pos + index]) << <u64>(index << 3)
+    }
+    this.pos += count
+    return value
+  }
+
+  /** The next n bytes as a view onto the same memory, without copying them. */
+  slice(n: i32): Uint8Array {
+    if (!this.has(n)) return new Uint8Array(0)
+    const out = this.buf.subarray(this.pos, this.pos + n)
+    this.pos += n
+    return out
+  }
+
+  /** The byte at an absolute offset, without moving the cursor. */
+  @inline at(offset: i32): u8 {
+    if (offset < 0 || offset >= this.buf.length) {
+      this.fail(ERR_TRUNCATED)
+      return 0
+    }
+    return unchecked(this.buf[offset])
+  }
+}
+
+/**
+ * Eight little-endian bytes from `at`, stopping at the end of the buffer rather
+ * than past it.
+ *
+ * This is the safe form of the column codec's one-load read. Go leans on the
+ * runtime's unconditional bounds check for the same job and recovers the panic;
+ * here the check has to be the code, because an unchecked load in
+ * AssemblyScript returns whatever is adjacent in linear memory and says nothing
+ * (PLAN.md §4.3).
+ */
+@inline
+export function gather8(buf: Uint8Array, at: i32): u64 {
+  if (at < 0) return 0
+  if (at + 8 <= buf.length) return load<u64>(buf.dataStart + <usize>at)
+  let value: u64 = 0
+  for (let index = 0; at + index < buf.length && index < 8; index++) {
+    value |= <u64>unchecked(buf[at + index]) << <u64>(index << 3)
+  }
+  return value
 }

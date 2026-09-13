@@ -1,7 +1,7 @@
 <script lang="ts">
-  import type { Column } from './codec'
+  import type { Field } from './codec'
 
-  let { data, schemaBytes, hovered }: { data: Uint8Array; schemaBytes: number; hovered: Column | undefined } =
+  let { data, schemaBytes, hovered }: { data: Uint8Array; schemaBytes: number; hovered: Field | undefined } =
     $props()
 
   // Enough to read, not so much that a 200-record message renders 30k spans.
