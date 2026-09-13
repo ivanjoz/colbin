@@ -67,7 +67,18 @@ class Checker {
   input: Doc
   back: Doc
   diag: Diag
-  path: Array<string> = []
+  /**
+   * The path to the value being compared, as a trail rather than as text.
+   *
+   * Every entry is either an array index or a key of the *decoded* document,
+   * held as the node and the slot it sits in. Building the string eagerly put
+   * a `String.UTF8.decodeUnsafe` — an allocation — on every key of every
+   * record, for a path that is read only when something differs. It cost more
+   * than the comparison it was annotating.
+   */
+  private trailKind: Array<i32> = []
+  private trailA: Array<i32> = []
+  private trailB: Array<i32> = []
 
   constructor(input: Doc, back: Doc, diag: Diag) {
     this.input = input
@@ -75,9 +86,35 @@ class Checker {
     this.diag = diag
   }
 
+  @inline private pushIndex(index: i32): void {
+    this.trailKind.push(0)
+    this.trailA.push(index)
+    this.trailB.push(0)
+  }
+
+  @inline private pushKey(node: i32, slot: i32): void {
+    this.trailKind.push(1)
+    this.trailA.push(node)
+    this.trailB.push(slot)
+  }
+
+  @inline private pop(): void {
+    this.trailKind.pop()
+    this.trailA.pop()
+    this.trailB.pop()
+  }
+
+  /** The trail as text, built only when there is a failure to describe. */
   private pathString(): string {
     let out = ''
-    for (let index = 0; index < this.path.length; index++) out += unchecked(this.path[index])
+    for (let index = 0; index < this.trailKind.length; index++) {
+      if (unchecked(this.trailKind[index]) == 0) {
+        out += '[' + unchecked(this.trailA[index]).toString() + ']'
+      } else {
+        const key = this.back.keyOf(unchecked(this.trailA[index]), unchecked(this.trailB[index]))
+        out += '.' + String.UTF8.decodeUnsafe(key.dataStart, <usize>key.length, false)
+      }
+    }
     return out.length == 0 ? '(root)' : out
   }
 
@@ -128,7 +165,7 @@ class Checker {
       return
     }
     if (kind == K_STRING) {
-      if (back.kindOf(theirs) != K_STRING || !sameBytes(input.strOf(mine), back.strOf(theirs))) {
+      if (back.kindOf(theirs) != K_STRING || !sameText(input, mine, back, theirs)) {
         this.differs('a string came back differently')
       }
       return
@@ -186,9 +223,9 @@ class Checker {
       return
     }
     for (let index = 0; index < count && this.diag.ok; index++) {
-      this.path.push('[' + index.toString() + ']')
+      this.pushIndex(index)
       this.compare(input.childAt(mine, index), back.childAt(theirs, index))
-      this.path.pop()
+      this.pop()
     }
   }
 
@@ -204,21 +241,21 @@ class Checker {
     // is compared against -1, which is the absent case above.
     const count = back.count(theirs)
     for (let index = 0; index < count && this.diag.ok; index++) {
-      const key = back.keyOf(theirs, index)
-      this.path.push('.' + String.UTF8.decodeUnsafe(key.dataStart, <usize>key.length, false))
-      this.compare(findKey(input, mine, key), back.childAt(theirs, index))
-      this.path.pop()
+      this.pushKey(theirs, index)
+      this.compare(findKey(input, mine, back, theirs, index), back.childAt(theirs, index))
+      this.pop()
     }
     // And the other way: a key the input carried that the decoder did not write
     // is a field the schema lost, which is the failure this whole file exists
     // to catch.
     const written = input.count(mine)
     for (let index = 0; index < written && this.diag.ok; index++) {
-      const key = input.keyOf(mine, index)
-      if (findKey(back, theirs, key) < 0) {
-        this.path.push('.' + String.UTF8.decodeUnsafe(key.dataStart, <usize>key.length, false))
-        this.differs('the input carried a key the message does not')
-        this.path.pop()
+      if (findKey(back, theirs, input, mine, index) < 0) {
+        const key = input.keyOf(mine, index)
+        this.differs(
+          'the input carried a key the message does not: ' +
+            String.UTF8.decodeUnsafe(key.dataStart, <usize>key.length, false),
+        )
       }
     }
   }
@@ -246,17 +283,56 @@ class Checker {
   }
 }
 
-/** The last child under `key`, or -1. Last rather than first, because a
- * duplicate key overwrites — which is what JSON.parse does and what build.ts
- * writes. */
-function findKey(doc: Doc, node: i32, key: Uint8Array): i32 {
+/**
+ * The child of `node` in `doc` under the same key that `want` holds at slot
+ * `wantSlot`, or -1. Last rather than first, because a duplicate key overwrites
+ * — which is what JSON.parse does and what build.ts writes.
+ *
+ * Both sides are compared where they already are, in their own text arenas.
+ * Taking `keyOf` on each would have allocated a view per comparison, and this
+ * runs once per key per key per record: two hundred thousand allocations on a
+ * thousand seven-field records, which was most of what the self-check cost.
+ */
+function findKey(doc: Doc, node: i32, want: Doc, wantNode: i32, wantSlot: i32): i32 {
   if (node < 0 || doc.kindOf(node) != K_OBJECT) return -1
   const count = doc.count(node)
   let found = -1
   for (let index = 0; index < count; index++) {
-    if (sameBytes(doc.keyOf(node, index), key)) found = doc.childAt(node, index)
+    if (sameKey(doc, node, index, want, wantNode, wantSlot)) found = doc.childAt(node, index)
   }
   return found
+}
+
+/** Two object keys, compared in place. */
+@inline
+function sameKey(a: Doc, aNode: i32, aSlot: i32, b: Doc, bNode: i32, bSlot: i32): bool {
+  const at = unchecked(a.a[aNode]) + aSlot
+  const bt = unchecked(b.a[bNode]) + bSlot
+  const length = unchecked(a.keyB[at])
+  if (length != unchecked(b.keyB[bt])) return false
+  if (length == 0) return true
+  return (
+    memory.compare(
+      a.text.buf.dataStart + <usize>unchecked(a.keyA[at]),
+      b.text.buf.dataStart + <usize>unchecked(b.keyA[bt]),
+      <usize>length,
+    ) == 0
+  )
+}
+
+/** Two string values, compared in place, for the same reason. */
+@inline
+function sameText(a: Doc, aNode: i32, b: Doc, bNode: i32): bool {
+  const length = unchecked(a.b[aNode])
+  if (length != unchecked(b.b[bNode])) return false
+  if (length == 0) return true
+  return (
+    memory.compare(
+      a.text.buf.dataStart + <usize>unchecked(a.a[aNode]),
+      b.text.buf.dataStart + <usize>unchecked(b.a[bNode]),
+      <usize>length,
+    ) == 0
+  )
 }
 
 function numberAsFloat(doc: Doc, node: i32): f64 {

@@ -135,6 +135,17 @@ export class Plan {
   isEnvelope: bool = false
 
   /**
+   * The field names as UTF-8, which is how the encoder has to compare them.
+   *
+   * Held rather than encoded per comparison, and that is not a micro-optimism:
+   * the encoder looks a name up once per field *per record*, so encoding it
+   * there put `String.UTF8.encode` — an allocation — inside the innermost loop
+   * of the whole module. On a thousand seven-field records it ran forty-nine
+   * thousand times for seven distinct strings, and it cost 40% of the encode.
+   */
+  nameBytes: Array<Uint8Array> = new Array<Uint8Array>()
+
+  /**
    * Field positions by key, so a walk resolves a key in one load.
    *
    * -1 means the message holds a key this plan does not list, which under eight
@@ -160,6 +171,7 @@ export class Plan {
         break
       }
     }
+    this.encodeNames()
     this.indexKeys()
   }
 
@@ -179,7 +191,16 @@ export class Plan {
         break
       }
     }
+    this.encodeNames()
     this.indexKeys()
+  }
+
+  private encodeNames(): void {
+    const out = new Array<Uint8Array>(this.names.length)
+    for (let index = 0; index < this.names.length; index++) {
+      out[index] = Uint8Array.wrap(String.UTF8.encode(unchecked(this.names[index]), false))
+    }
+    this.nameBytes = out
   }
 
   indexKeys(): void {

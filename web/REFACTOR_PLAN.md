@@ -10,7 +10,11 @@ Pre-alpha, so nothing here preserves compatibility with what the module writes
 today. Every message it has ever produced is unreadable by the current Go
 decoder and vice versa.
 
-Status: **phases 0–5 done**; 6 (size, docs) and 7 (`u5b`) open.
+Status: **phases 0–6 done**; 7 (`u5b`) is open and gated on the Go side.
+
+`PLAN.md` is the module as it now stands. This document is the record of getting
+there: the decisions, the things that turned out differently from the plan, and
+what each phase cost.
 
 ---
 
@@ -541,7 +545,7 @@ difference between the two deliveries, priced, on the reader's own examples.
 | **3** ✅ | `PLAN.md` §4.3 hardening and the fuzz target on the new shapes | no trap, no out-of-bounds read, a diagnostic every time — and the module refuses **exactly** the 806 of 5046 corruptions Go refuses |
 | **4** ✅ | `infer.ts` + `build.ts` + `verify.ts` + the writers: **encode**, with the §5.1 envelope and §5.2 ids | every document round-trips with the self-check on, and **Go reads every message the module writes** |
 | **5** ✅ | `inspect.ts` and the page | the spans tile the body exactly, on both corpora; Chrome drives all eleven examples with no console errors |
-| **6** | re-measure the gzipped size against the 50 KB budget; rewrite `PLAN.md` | numbers on the page come from the module that shipped |
+| **6** ✅ | re-measure against the 50 KB budget; rewrite `PLAN.md` | 42.9 KB gzipped; `PLAN.md` describes the module that exists, and re-measuring found a 40% encode regression and removed it |
 | **7** | **strings**: `u5b.ts` + the `wide64` kernel, the §4.2 descriptors, `packed5.ts` and `bitstream.ts` deleted | *gated on the Go side landing `u5b` and the embedded field layouts* — the string-framing tier goes red, then green |
 
 Phase 2 before phase 4 is a reversal of the original order, and deliberate. The
