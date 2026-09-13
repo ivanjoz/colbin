@@ -362,14 +362,14 @@ export class Builder {
   private valueOf(plan: Plan, index: i32, node: i32): i32 {
     const doc = this.doc
     if (node < 0 || doc.kindOf(node) != K_OBJECT) return -1
-    const name = unchecked(plan.names[index])
+    const name = unchecked(plan.nameBytes[index])
     const count = doc.count(node)
     // The last occurrence wins, as JSON.parse does. Taking the first was a real
     // bug the self-check caught the first time it ran, on a document with a
     // duplicate key.
     let found = -1
     for (let at = 0; at < count; at++) {
-      if (keyEquals(doc.keyOf(node, at), name)) found = doc.childAt(node, at)
+      if (keyEquals(doc, node, at, name)) found = doc.childAt(node, at)
     }
     return found
   }
@@ -464,8 +464,27 @@ export class Builder {
   }
 }
 
-function keyEquals(key: Uint8Array, name: string): bool {
-  const wanted = Uint8Array.wrap(String.UTF8.encode(name, false))
-  if (key.length != wanted.length) return false
-  return memory.compare(key.dataStart, wanted.dataStart, <usize>key.length) == 0
+/**
+ * Whether the record's key at `slot` is the field's name, compared where the key
+ * already is.
+ *
+ * `doc.keyOf` would hand back a view, and a view is an allocation. This runs
+ * once per key per field per record — on a thousand seven-field records that is
+ * forty-nine thousand of them, for a comparison that touches a handful of bytes.
+ * The same shape cost the self-check most of its time until verify.ts stopped
+ * doing it.
+ */
+@inline
+function keyEquals(doc: Doc, node: i32, slot: i32, name: Uint8Array): bool {
+  const at = unchecked(doc.a[node]) + slot
+  const length = unchecked(doc.keyB[at])
+  if (length != name.length) return false
+  if (length == 0) return true
+  return (
+    memory.compare(
+      doc.text.buf.dataStart + <usize>unchecked(doc.keyA[at]),
+      name.dataStart,
+      <usize>length,
+    ) == 0
+  )
 }
