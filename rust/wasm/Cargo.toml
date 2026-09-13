@@ -1,0 +1,47 @@
+# The browser decoder: colbin bytes in, JSON text out.
+#
+# A separate crate from `colbin` rather than a copy of it. The library is the
+# format and other Rust code depends on it normally; this is a `cdylib` with a
+# C ABI and a profile tuned for size, and neither of those belongs on the
+# library everyone else links. Nothing is duplicated — the wire readers, the
+# column codec and the schema walk all come from the crate next door, and LTO
+# drops everything this ABI does not reach, which is how the encoder stays out
+# of the module without a second implementation to keep in step.
+[package]
+name = "colbin-wasm"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.88"
+description = "The colbin decoder, compiled to WebAssembly for the browser"
+license = "MIT"
+repository = "https://github.com/ivanjoz/colbin"
+publish = false
+
+# Its own workspace, deliberately. Cargo only honours a `[profile]` at a
+# workspace root, and the profile below sets `panic = "abort"`, which would break
+# `cargo test` for every other member if it were hoisted up there. A wasm
+# artifact wanting its own profile is the normal reason to split.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# default-features = false so the `std::error::Error` impl — the one piece of
+# `std` left in the library — does not pull the standard library in behind it.
+colbin = { path = "..", default-features = false }
+
+[profile.release]
+# `3` rather than `s` or `z`, which is not the obvious choice for something
+# downloaded before it can do anything — so it was measured rather than argued.
+# Through `wasm-opt -Oz` all three land within 34 bytes of each other gzipped
+# (34 790 / 34 790 / 34 824 B) and within noise on throughput. `wasm-opt`
+# dominates the size outcome, so the rustc level may as well be the fast one.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+# No unwinding tables, and no formatting machinery behind a panic message. The
+# library has no `unwrap`, `expect` or `panic!` in it, so this mostly removes
+# code that was never going to run.
+panic = "abort"
+strip = true

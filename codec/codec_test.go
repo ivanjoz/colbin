@@ -7,33 +7,33 @@ import (
 )
 
 type charge struct {
-	CompanyID    int32  `cb:"0"`
-	UserID       int32  `cb:"1"`
-	RouteID      uint16 `cb:"2"`
-	CPU          uint16 `cb:"3"`
-	Inference    uint16 `cb:"4"`
-	ExtraAllowed bool   `cb:"5"`
-	Access1      uint16 `cb:"6"`
-	Access2      uint16 `cb:"7"`
+	CompanyID    int32  `cb:"1"`
+	UserID       int32  `cb:"2"`
+	RouteID      uint16 `cb:"3"`
+	CPU          uint16 `cb:"4"`
+	Inference    uint16 `cb:"5"`
+	ExtraAllowed bool   `cb:"6"`
+	Access1      uint16 `cb:"7"`
+	Access2      uint16 `cb:"8"`
 }
 
 type everyShape struct {
-	Flag    bool     `cb:"0"`
-	Small   int8     `cb:"1"`
-	Medium  int16    `cb:"2"`
-	Wide    int64    `cb:"3"`
-	Counted uint32   `cb:"4"`
-	Ratio   float64  `cb:"5"`
-	Single  float32  `cb:"6"`
-	Name    string   `cb:"7"`
-	Blob    []byte   `cb:"8"`
-	IDs     []int32  `cb:"9"`
-	Grants  []uint16 `cb:"10"`
-	Longs   []int64  `cb:"11"`
-	Words   []string `cb:"12"`
-	Tiny    []int8   `cb:"13"`
-	Huge    []uint64 `cb:"14"`
-	Counts  []uint32 `cb:"15"`
+	Flag    bool     `cb:"1"`
+	Small   int8     `cb:"2"`
+	Medium  int16    `cb:"3"`
+	Wide    int64    `cb:"4"`
+	Counted uint32   `cb:"5"`
+	Ratio   float64  `cb:"6"`
+	Single  float32  `cb:"7"`
+	Name    string   `cb:"8"`
+	Blob    []byte   `cb:"9"`
+	IDs     []int32  `cb:"10"`
+	Grants  []uint16 `cb:"11"`
+	Longs   []int64  `cb:"12"`
+	Words   []string `cb:"13"`
+	Tiny    []int8   `cb:"14"`
+	Huge    []uint64 `cb:"15"`
+	Counts  []uint32 `cb:"16"`
 }
 
 func TestRoundTripsEveryShape(t *testing.T) {
@@ -142,24 +142,57 @@ type untagged struct {
 }
 
 type tooManyFields struct {
-	First int32 `cb:"0"`
-	Last  int32 `cb:"16"`
+	First int32 `cb:"1"`
+	Last  int32 `cb:"17"`
 }
 
 type clashing struct {
-	First int32 `cb:"3"`
-	Other int32 `cb:"3"`
+	First int32 `cb:"4"`
+	Other int32 `cb:"4"`
+}
+
+// zeroID is what a type written against the old zero-based numbering looks like,
+// and is the single mistake counting from one can cause. It has to be refused by
+// name: a silent reading of it would derive a key from the field name instead,
+// which both moves the field and takes the whole type wide.
+type zeroID struct {
+	First int32 `cb:"0"`
+}
+
+// pastOneByte is one id past what a key holds — 256 of them, counted from one.
+type pastOneByte struct {
+	First int32 `cb:"257"`
+}
+
+// sixteenFields is the widest a narrow record gets: ids 1..16 over keys 0..15.
+type sixteenFields struct {
+	F1  int32 `cb:"1"`
+	F2  int32 `cb:"2"`
+	F3  int32 `cb:"3"`
+	F4  int32 `cb:"4"`
+	F5  int32 `cb:"5"`
+	F6  int32 `cb:"6"`
+	F7  int32 `cb:"7"`
+	F8  int32 `cb:"8"`
+	F9  int32 `cb:"9"`
+	F10 int32 `cb:"10"`
+	F11 int32 `cb:"11"`
+	F12 int32 `cb:"12"`
+	F13 int32 `cb:"13"`
+	F14 int32 `cb:"14"`
+	F15 int32 `cb:"15"`
+	F16 int32 `cb:"16"`
 }
 
 type nested struct {
-	Inner charge `cb:"0"`
+	Inner charge `cb:"1"`
 }
 
 // A pointer to a scalar is carried — see pointer.go. A pointer to a composite
 // is not: a composite already expresses absence with a length, and nothing has
 // asked what a nil one should mean.
 type pointerToComposite struct {
-	Values *[]int32 `cb:"0"`
+	Values *[]int32 `cb:"1"`
 }
 
 // Every refusal names the field and says what to do about it, because each one is
@@ -169,7 +202,7 @@ func TestRefusesTypesItCannotCarry(t *testing.T) {
 		value any
 		wants string
 	}{
-		{clashing{}, "id 3 is on both"},
+		{clashing{}, "id 4 is on both"},
 		{pointerToComposite{}, "a pointer to []int32 is not carried"},
 		{42, "encodes a struct"},
 	} {
@@ -183,7 +216,7 @@ func TestRefusesTypesItCannotCarry(t *testing.T) {
 	}
 }
 
-// Seventeen fields is no longer a refusal: the ids past fifteen put the message
+// Seventeen fields is no longer a refusal: the ids past sixteen put the message
 // on the wide path, which is what the wide path is for. It is refused only past
 // 256, where a one-byte key runs out.
 func TestManyFieldsGoWideRatherThanBeingRefused(t *testing.T) {
@@ -197,6 +230,54 @@ func TestManyFieldsGoWideRatherThanBeingRefused(t *testing.T) {
 	var back tooManyFields
 	if err := Unmarshal(message, &back); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Ids count from one and keys count from zero, and assignKeys is the only place
+// the two meet. So the sixteen a nibble holds are ids 1..16, the first of them
+// writes key 0, and the type still takes the narrow path at its sixteenth field.
+func TestFieldIDsCountFromOne(t *testing.T) {
+	ids, err := FieldIDs(sixteenFields{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 16 || ids["F1"] != 0 || ids["F16"] != 15 {
+		t.Fatalf("ids 1..16 resolved to keys %v", ids)
+	}
+	message, err := Marshal(&sixteenFields{F16: 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message[0] != rootStructNarrow {
+		t.Fatalf("sixteen fields went wide: root is %#02x", message[0])
+	}
+	var back sixteenFields
+	if err := Unmarshal(message, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.F16 != 9 {
+		t.Fatalf("the sixteenth field round-tripped as %d", back.F16)
+	}
+}
+
+// Both ends of the range are refused by name, because each one is an edit rather
+// than a runtime condition — and id 0 in particular is a whole type numbered
+// against the old rule, which is worth saying outright.
+func TestRefusesIDsOutsideTheOneBasedRange(t *testing.T) {
+	for _, testCase := range []struct {
+		value any
+		wants string
+	}{
+		{zeroID{}, "one-based"},
+		{pastOneByte{}, "1..256"},
+	} {
+		_, err := Marshal(testCase.value)
+		if err == nil {
+			t.Fatalf("%T was accepted", testCase.value)
+		}
+		if !strings.Contains(err.Error(), testCase.wants) {
+			t.Fatalf("%T said %q, wanted it to mention %q", testCase.value, err, testCase.wants)
+		}
 	}
 }
 

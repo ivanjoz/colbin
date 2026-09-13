@@ -6,16 +6,16 @@ import (
 )
 
 type inner struct {
-	ID   uint32 `cb:"0"`
-	Name string `cb:"1"`
+	ID   uint32 `cb:"1"`
+	Name string `cb:"2"`
 }
 
 type outer struct {
-	Head  uint32  `cb:"0"`
-	One   inner   `cb:"1"`
-	Many  []inner `cb:"2"`
-	Tail  string  `cb:"3"`
-	Empty []inner `cb:"4"`
+	Head  uint32  `cb:"1"`
+	One   inner   `cb:"2"`
+	Many  []inner `cb:"3"`
+	Tail  string  `cb:"4"`
+	Empty []inner `cb:"5"`
 }
 
 // A nested struct and a slice of them round-trip, and the type goes wide of its
@@ -55,18 +55,18 @@ func TestNestedStructsRoundTrip(t *testing.T) {
 // forces the wide one.
 // Skipping an unknown composite needs the wide width, because a narrow
 // descriptor has no class for a reader to size a field it does not know. The
-// type therefore carries an id past fifteen, which is what puts it there.
+// type therefore carries an id past sixteen, which is what puts it there.
 type wideOuter struct {
-	Head uint32  `cb:"0"`
-	One  inner   `cb:"1"`
-	Many []inner `cb:"2"`
-	Tail string  `cb:"20"`
+	Head uint32  `cb:"1"`
+	One  inner   `cb:"2"`
+	Many []inner `cb:"3"`
+	Tail string  `cb:"21"`
 }
 
 func TestUnknownCompositeIsSkipped(t *testing.T) {
 	type narrowerOuter struct {
-		Head uint32 `cb:"0"`
-		Tail string `cb:"20"`
+		Head uint32 `cb:"1"`
+		Tail string `cb:"21"`
 	}
 	value := wideOuter{
 		Head: 7,
@@ -89,8 +89,8 @@ func TestUnknownCompositeIsSkipped(t *testing.T) {
 
 // A type that reaches itself must build a plan and terminate on the data.
 type node struct {
-	Name string `cb:"0"`
-	Kids []node `cb:"1"`
+	Name string `cb:"1"`
+	Kids []node `cb:"2"`
 }
 
 func TestRecursiveTypeRoundTrips(t *testing.T) {
@@ -154,17 +154,17 @@ func BenchmarkNestedUnmarshal(b *testing.B) {
 // stays a list. The reader dispatches on the class it finds, so both round-trip
 // through the same call.
 type tableRow struct {
-	ID     int32   `cb:"0"`
-	UserID int32   `cb:"1"`
-	Amount int64   `cb:"2"`
-	Ratio  float64 `cb:"3"`
-	Name   string  `cb:"4"`
-	OK     bool    `cb:"5"`
+	ID     int32   `cb:"1"`
+	UserID int32   `cb:"2"`
+	Amount int64   `cb:"3"`
+	Ratio  float64 `cb:"4"`
+	Name   string  `cb:"5"`
+	OK     bool    `cb:"6"`
 }
 
 type tableHolder struct {
-	Head uint32     `cb:"0"`
-	Rows []tableRow `cb:"1"`
+	Head uint32     `cb:"1"`
+	Rows []tableRow `cb:"2"`
 }
 
 func makeTableRows(n int) []tableRow {

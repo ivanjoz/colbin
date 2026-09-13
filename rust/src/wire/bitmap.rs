@@ -35,6 +35,8 @@
 use super::wide::{CLASS_BLOB, CLASS_INT, Reader8, descriptor};
 use super::{INT_POSITIVE_FLAG, append_magnitude, length_code_for, size_code_for};
 use crate::Error;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// The largest key a bitmap run carries. It is 63 rather than 255 because the
 /// writer holds the bitmap in one word: a wider one would have to live in

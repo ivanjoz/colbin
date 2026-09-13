@@ -27,7 +27,7 @@
 // and buys 256 ids, the ability to skip a field the reader has never heard of,
 // and the packed5 string encoding.
 //
-// A type goes wide when it has a field id above fifteen, or when SetPacked5 is
+// A type goes wide when it has a field id above sixteen, or when SetPacked5 is
 // on and it has a string to spend it on. Nothing else changes.
 //
 // # Layers
@@ -49,4 +49,15 @@
 // bytes — send it once per connection and turn messages into JSON with ToJSON,
 // or put it in front of one message with MarshalSelfDescribing. The body is
 // unchanged either way, and so is everything an ordinary decode costs.
+//
+// # A value without a Go type
+//
+// `any`, `[]any` and `map[string]any` are carried, and are the one place the
+// wire holds a type: such a value has none declared, so each one says what it is
+// in its own descriptor. A slice of structs inside one is written behind a tag
+// naming a struct the section describes, so an array of records costs what the
+// same typed slice costs rather than repeating its field names per row.
+//
+// It is the escape hatch, not the default. A dynamic map writes its keys as
+// strings on every message, which is what a declared type exists to avoid.
 package colbin

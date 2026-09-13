@@ -73,6 +73,7 @@ func ParseSchema(section []byte) (*Schema, error) {
 	// where a later version would put something this one does not know about.
 	return &Schema{
 		plan:    plans[0],
+		plans:   plans,
 		section: append([]byte(nil), section[:width+length]...),
 	}, nil
 }
@@ -88,6 +89,7 @@ func parseStructDef(plan *typePlan, plans []*typePlan, data []byte) ([]byte, err
 		return nil, errShortSection
 	}
 	plan.isWide = data[0]&schemaWideKeys != 0
+	plan.envelope = data[0]&schemaEnvelope != 0
 	data = data[1:]
 
 	count, at, ok := wire.ReadLength(data)

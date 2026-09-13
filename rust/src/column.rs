@@ -59,6 +59,7 @@
 //! [`decode_array`] must be instantiated with the type that encoded.
 
 use crate::Error;
+use alloc::vec::Vec;
 
 /// How many residuals share one width byte. 128 is what makes every width land
 /// on a byte boundary, and it puts the width header at 0.8% overhead while

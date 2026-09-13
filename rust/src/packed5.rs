@@ -61,6 +61,7 @@
 //! decide what a frame that is not UTF-8 means.
 
 use crate::error::Packed5Error;
+use alloc::vec::Vec;
 
 // Header flag bits, in byte 0 of every frame.
 const FLAG_PACKED5: u8 = 1 << 0;
@@ -92,7 +93,8 @@ const NUMBER_MAX_DIGITS: usize = 4;
 /// spaces are accounted for. All 32 entries are assigned.
 const SYM_TABLE: [u8; 32] = [
     b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'.', b',', b'-', b'/', b':', b';',
-    b'_', b'(', b')', b'%', b'#', b'"', b'\'', b'!', b'?', b'@', b'=', b'+', b'*', b'&', b'<', b'>',
+    b'_', b'(', b')', b'%', b'#', b'"', b'\'', b'!', b'?', b'@', b'=', b'+', b'*', b'&', b'<',
+    b'>',
 ];
 
 /// The opcode 30 operand table. Indices 28..=30 are reserved and 31 is the
@@ -506,11 +508,7 @@ fn units_of(payload: &[u8]) -> Vec<u8> {
 
 /// Walks a bare unit stream — a payload with no frame header, as [`payload`]
 /// writes it — and appends the bytes it holds to `dst`.
-pub fn append_string(
-    dst: &mut Vec<u8>,
-    payload: &[u8],
-    upper: bool,
-) -> Result<(), Packed5Error> {
+pub fn append_string(dst: &mut Vec<u8>, payload: &[u8], upper: bool) -> Result<(), Packed5Error> {
     let units = units_of(payload);
     let mut cur = upper;
     let mut pending = false;

@@ -22,6 +22,7 @@ package codec
 //
 //	section   := [byteLength] [structCount] structDef{structCount}
 //	structDef := [flags:1] [fieldCount] field{fieldCount}
+//	flags     := [wideKeys:1] [envelope:1] [reserved:6]
 //	field     := [key:1] [nameLen] name [desc]
 //	desc      := [op:1] extra
 //
@@ -72,9 +73,19 @@ import (
 	"github.com/ivanjoz/colbin/wire"
 )
 
-// schemaWideKeys is the structDef flag saying the run it describes uses
-// eight-bit keys.
-const schemaWideKeys uint8 = 0x01
+// structDef flags.
+const (
+	// schemaWideKeys says the run it describes uses eight-bit keys.
+	schemaWideKeys uint8 = 0x01
+	// schemaEnvelope says this def is the synthetic one-field struct that carries
+	// a slice or a map at the root, so a reader building a document should take
+	// the field's value and drop the wrapper. See envelope.go.
+	//
+	// It is a flag on every structDef rather than on the section, for the reason
+	// the key width is: one rule per definition is cheaper to hold than a rule
+	// plus an exception about which definition it applies to.
+	schemaEnvelope uint8 = 0x02
+)
 
 // Schema is a type described in bytes rather than in Go: what a decoder needs to
 // turn a message into JSON without the type that wrote it.
@@ -91,7 +102,12 @@ const schemaWideKeys uint8 = 0x01
 //
 // A Schema is immutable and safe for concurrent use.
 type Schema struct {
-	plan    *typePlan
+	plan *typePlan
+	// plans is the struct table, root first, in the order the section names
+	// them. A walk needs it because a dynamic value can carry a struct *index*
+	// rather than a type — that is what keeps an array of records inside an
+	// `any` from writing its field names per row. See dynamic.go.
+	plans   []*typePlan
 	section []byte
 }
 
@@ -109,59 +125,81 @@ func (schema *Schema) Size() int { return len(schema.section) }
 // allocates, and a section is a property of the type alone.
 var schemaCache sync.Map // reflect.Type -> *Schema or error
 
-// SchemaFor describes T, which must be a struct the format accepts.
+// SchemaFor describes T, which must be a type the format accepts at the root: a
+// struct, or a slice or map the envelope carries.
 func SchemaFor[T any]() (*Schema, error) {
 	var zero T
-	structType, err := structTypeOf(zero)
+	rootType, err := rootTypeOf(zero)
 	if err != nil {
 		return nil, err
 	}
-	return schemaForType(structType)
+	return schemaForRoot(rootType)
 }
 
-// SchemaOf describes the type of v, which must be a struct or a pointer to one.
+// SchemaOf describes the type of v, which must be a struct, a pointer to one, or
+// a slice or map the envelope carries.
 func SchemaOf(v any) (*Schema, error) {
-	structType, err := structTypeOf(v)
+	rootType, err := rootTypeOf(v)
 	if err != nil {
 		return nil, err
 	}
-	return schemaForType(structType)
+	return schemaForRoot(rootType)
 }
 
-func schemaForType(structType reflect.Type) (*Schema, error) {
-	if cached, ok := schemaCache.Load(structType); ok {
+// schemaForRoot describes whatever a message's root would be, which is the root
+// type's own plan when it is a struct and its envelope's otherwise.
+//
+// The cache is keyed on the type the caller named rather than on the envelope,
+// so `[]Grant` and `Grant` are different entries and neither can be handed back
+// for the other.
+func schemaForRoot(rootType reflect.Type) (*Schema, error) {
+	if cached, ok := schemaCache.Load(rootType); ok {
 		if schema, ok := cached.(*Schema); ok {
 			return schema, nil
 		}
 		return nil, cached.(error)
 	}
-	plan, err := planFor(structType)
+	plan, err := planForRoot(rootType)
 	if err != nil {
-		schemaCache.Store(structType, err)
+		schemaCache.Store(rootType, err)
 		return nil, err
 	}
-	schema := &Schema{plan: plan, section: buildSection(plan)}
-	schemaCache.Store(structType, schema)
+	builder := newSectionBuilder(plan)
+	schema := &Schema{plan: plan, plans: builder.plans, section: builder.bytes()}
+	schemaCache.Store(rootType, schema)
 	return schema, nil
 }
 
-// buildSection serialises a plan and everything it reaches.
-func buildSection(root *typePlan) []byte {
-	builder := sectionBuilder{index: make(map[*typePlan]int, 4)}
-	builder.structIndex(root) // the root is index 0, by being asked for first
+// newSectionBuilder starts a table with root at index 0, by asking for it first.
+func newSectionBuilder(root *typePlan) *sectionBuilder {
+	builder := &sectionBuilder{index: make(map[*typePlan]int, 4)}
+	builder.structIndex(root)
+	return builder
+}
 
+// sectionBuilder collects the struct table while the descriptors are emitted.
+//
+// It is reachable from the *encoder* as well as from here, because a dynamic
+// value can name a struct the type alone never mentions — `map[string]any`
+// holding a `[]User` is described by walking the value, not the type. So the
+// table grows while the body is written, and bytes() is called after. See
+// marshalDynamic in dynamic.go.
+type sectionBuilder struct {
+	index map[*typePlan]int
+	defs  [][]byte
+	// plans is defs' parallel: what each index describes, for a reader that has
+	// the plans already and wants the numbering rather than the bytes.
+	plans []*typePlan
+}
+
+// bytes serialises the table as it stands.
+func (builder *sectionBuilder) bytes() []byte {
 	body := wire.AppendLength(make([]byte, 0, 64), len(builder.defs))
 	for _, def := range builder.defs {
 		body = append(body, def...)
 	}
 	section := wire.AppendLength(make([]byte, 0, len(body)+5), len(body))
 	return append(section, body...)
-}
-
-// sectionBuilder collects the struct table while the descriptors are emitted.
-type sectionBuilder struct {
-	index map[*typePlan]int
-	defs  [][]byte
 }
 
 // structIndex returns a plan's slot in the table, describing it on first use.
@@ -175,10 +213,14 @@ func (builder *sectionBuilder) structIndex(plan *typePlan) int {
 	at := len(builder.defs)
 	builder.index[plan] = at
 	builder.defs = append(builder.defs, nil) // reserved, filled in below
+	builder.plans = append(builder.plans, plan)
 
 	flags := uint8(0)
 	if plan.isWide {
-		flags = schemaWideKeys
+		flags |= schemaWideKeys
+	}
+	if plan.envelope {
+		flags |= schemaEnvelope
 	}
 	def := wire.AppendLength([]byte{flags}, len(plan.fields))
 	for index := range plan.fields {
@@ -217,6 +259,10 @@ func (builder *sectionBuilder) appendDesc(dst []byte, field *planField) []byte {
 // form — it steps over a section it does not need. So a self-describing message
 // decodes into the Go type *and* into JSON, which is the property worth keeping.
 //
+// v may be a slice or a map as well as a struct, and the envelope that carries
+// one (envelope.go) does not appear in the JSON: the document is the array or
+// the object, not a wrapper holding it.
+//
 // It is the wrong default. For the corpus Sale type the section is 173 bytes
 // against a mean body of 90, so a stream that sends it per message sends the
 // schema nearly twice over for every record. Send Schema.Bytes() once per
@@ -227,17 +273,42 @@ func MarshalSelfDescribing(v any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	schema, err := schemaForType(value.Type())
-	if err != nil {
-		return nil, err
-	}
+	record := unsafe.Pointer(value.UnsafeAddr())
 	root := rootStructNarrowSchema
 	if plan.isWide {
 		root = rootStructWideSchema
 	}
+	if plan.hasDynamic {
+		return marshalDynamic(root, plan, record)
+	}
+	schema, err := schemaForRoot(value.Type())
+	if err != nil {
+		return nil, err
+	}
 	dst := make([]byte, 0, 1+len(schema.section)+plan.sizeHint)
 	dst = append(append(dst, root), schema.section...)
-	return appendRun(dst, plan, unsafe.Pointer(value.UnsafeAddr())), nil
+	body, err := appendRun(dst, plan, record)
+	return body, err
+}
+
+// marshalDynamic is MarshalSelfDescribing for a type that can reach a struct the
+// type itself never names.
+//
+// The section cannot be resolved from the type and then written, because a
+// `map[string]any` holding a `[]Sale` says nothing about Sale until the value is
+// walked. So the body goes into its own buffer with the table open, the walk
+// adds every struct it meets, and the section is serialised afterwards — which
+// is also why this one is not cached, while every static type's is.
+func marshalDynamic(root byte, plan *typePlan, record unsafe.Pointer) ([]byte, error) {
+	builder := newSectionBuilder(plan)
+	buf := scratch{section: builder}
+	body, err := appendRunInto(make([]byte, 0, plan.sizeHint), plan, record, &buf)
+	if err != nil {
+		return nil, err
+	}
+	section := builder.bytes()
+	dst := make([]byte, 0, 1+len(section)+len(body))
+	return append(append(append(dst, root), section...), body...), nil
 }
 
 // appendRun writes a plan's key run with no root descriptor in front of it,
@@ -248,15 +319,33 @@ func MarshalSelfDescribing(v any) ([]byte, error) {
 // branch, and the flat walk split out so that neither the scratch buffer nor the
 // writer escapes. This one runs once per self-describing message, so it takes
 // the general walk and none of that care.
-func appendRun(dst []byte, plan *typePlan, record unsafe.Pointer) []byte {
+func appendRun(dst []byte, plan *typePlan, record unsafe.Pointer) ([]byte, error) {
 	var buf scratch
+	return appendRunInto(dst, plan, record, &buf)
+}
+
+// appendRunInto is appendRun with the caller's scratch, which is what carries
+// the section table a dynamic value writes into.
+func appendRunInto(
+	dst []byte, plan *typePlan, record unsafe.Pointer, buf *scratch,
+) ([]byte, error) {
+	out := appendRunBytes(dst, plan, record, buf)
+	if buf.err != nil {
+		return nil, buf.err
+	}
+	return out, nil
+}
+
+func appendRunBytes(
+	dst []byte, plan *typePlan, record unsafe.Pointer, buf *scratch,
+) []byte {
 	if plan.isWide {
 		writer := wire.Writer8{Buffer: dst}
-		appendWide(&writer, plan, record, &buf)
+		appendWide(&writer, plan, record, buf)
 		return writer.Buffer
 	}
 	writer := wire.Writer{Buffer: dst}
-	writePlan(&writer, plan, record, &buf)
+	writePlan(&writer, plan, record, buf)
 	return writer.Buffer
 }
 

@@ -20,14 +20,18 @@
 
 use super::{
     ARRAY_POSITIVE_FLAG, ARRAY_WIDTH_SHIFT, ELEMENT_SIZE_ESCAPE, ESCAPE_2BYTES, ESCAPE_4BYTES,
-    ESCAPE_8BYTES, ESCAPE_PACKED1_LO, ESCAPE_PACKED1_UP, ESCAPE_PACKED4_LO, ESCAPE_PACKED4_UP, INLINE_ARRAY_COUNT, INLINE_BLOB_SIZE, INLINE_COMPOSITE_LENGTH,
-    INLINE_ELEMENT_SIZE, INT_POSITIVE_FLAG, Integer, LENGTH_WIDTH, MAGNITUDE_WIDTH,
-    MORE_ARRAY_LEN_FLAG, MORE_SIZE_FLAG, Mark, SIZE_CODE_ONE, UINT_INLINE_MAX, UINT_WIDTH_BASE,
-    append_array, append_count, append_elements, append_magnitude, array_plan_of, bit_length,
-    le_uint, length_code_for, read_count, size_code_for,
+    ESCAPE_8BYTES, ESCAPE_PACKED1_LO, ESCAPE_PACKED1_UP, ESCAPE_PACKED4_LO, ESCAPE_PACKED4_UP,
+    INLINE_ARRAY_COUNT, INLINE_BLOB_SIZE, INLINE_COMPOSITE_LENGTH, INLINE_ELEMENT_SIZE,
+    INT_POSITIVE_FLAG, Integer, LENGTH_WIDTH, MAGNITUDE_WIDTH, MORE_ARRAY_LEN_FLAG, MORE_SIZE_FLAG,
+    Mark, SIZE_CODE_ONE, UINT_INLINE_MAX, UINT_WIDTH_BASE, append_array, append_count,
+    append_elements, append_magnitude, array_plan_of, bit_length, le_uint, length_code_for,
+    read_count, size_code_for,
 };
 use crate::Error;
 use crate::column;
+use alloc::borrow::ToOwned;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// Appends fields with four-bit keys onto a buffer the caller owns.
 ///
@@ -257,11 +261,19 @@ impl<'a> Writer<'a> {
             return;
         };
         if stream.len() <= 0xFF {
-            let code = if upper { ESCAPE_PACKED1_UP } else { ESCAPE_PACKED1_LO };
+            let code = if upper {
+                ESCAPE_PACKED1_UP
+            } else {
+                ESCAPE_PACKED1_LO
+            };
             self.buf.push(key << 4 | MORE_SIZE_FLAG | code);
             self.buf.push(stream.len() as u8);
         } else {
-            let code = if upper { ESCAPE_PACKED4_UP } else { ESCAPE_PACKED4_LO };
+            let code = if upper {
+                ESCAPE_PACKED4_UP
+            } else {
+                ESCAPE_PACKED4_LO
+            };
             self.buf.push(key << 4 | MORE_SIZE_FLAG | code);
             self.buf
                 .extend_from_slice(&(stream.len() as u32).to_le_bytes());
@@ -837,7 +849,11 @@ impl<'a> Reader<'a> {
                         self.fail(Error::Truncated);
                         return String::new();
                     };
-                    (usize::from(low), self.at + 2, Some(code == ESCAPE_PACKED1_UP))
+                    (
+                        usize::from(low),
+                        self.at + 2,
+                        Some(code == ESCAPE_PACKED1_UP),
+                    )
                 }
                 code @ (ESCAPE_PACKED4_LO | ESCAPE_PACKED4_UP) => {
                     let rest = &self.buf[self.at + 1..];

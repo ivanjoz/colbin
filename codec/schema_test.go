@@ -44,12 +44,14 @@ func TestFieldOpsArePinned(t *testing.T) {
 		"opStructs": {opStructs, 22},
 		"opMap":     {opMap, 23},
 		"opPointer": {opPointer, 24},
+		"opAny":     {opAny, 25},
+		"opAnys":    {opAnys, 26},
 	} {
 		if uint8(pinned.op) != pinned.want {
 			t.Errorf("%s is %d, and the wire says %d", name, pinned.op, pinned.want)
 		}
 	}
-	if opCount != 25 {
+	if opCount != 27 {
 		t.Errorf("there are %d ops; a new one goes on the end and this number follows it",
 			opCount)
 	}
@@ -68,6 +70,7 @@ func TestMapKindsArePinned(t *testing.T) {
 		"mapFloat64": {mapFloat64, 3},
 		"mapBool":    {mapBool, 4},
 		"mapFloat32": {mapFloat32, 5},
+		"mapAny":     {mapAny, 6},
 	} {
 		if uint8(pinned.kind) != pinned.want {
 			t.Errorf("%s is %d, and the wire says %d", name, pinned.kind, pinned.want)
@@ -78,8 +81,8 @@ func TestMapKindsArePinned(t *testing.T) {
 // recursive is the type struct hoisting exists for: it cannot be described by
 // inlining, because inlining it does not terminate.
 type recursive struct {
-	Name string      `cb:"0"`
-	Kids []recursive `cb:"1"`
+	Name string      `cb:"1"`
+	Kids []recursive `cb:"2"`
 }
 
 // schemaCases is every shape the section has a rule for.
@@ -118,7 +121,7 @@ func TestSchemaRoundTripsThroughItsSection(t *testing.T) {
 		}
 		// Serialising what was parsed has to give the bytes back, or the two
 		// sides do not agree on what the section says.
-		if again := buildSection(parsed.plan); !bytes.Equal(again, built.section) {
+		if again := newSectionBuilder(parsed.plan).bytes(); !bytes.Equal(again, built.section) {
 			t.Fatalf("%T: re-serialising the parsed plan gave\n%x\nwant\n%x",
 				value, again, built.section)
 		}
@@ -167,8 +170,8 @@ func samePlan(t *testing.T, path string, got, want *typePlan, seen map[[2]*typeP
 // for one small type so that a change to the layout has to be deliberate.
 func TestSchemaGoldenBytes(t *testing.T) {
 	type row struct {
-		ID   uint32 `cb:"1"`
-		Name string `cb:"2"`
+		ID   uint32 `cb:"2"`
+		Name string `cb:"3"`
 	}
 	schema, err := SchemaFor[row]()
 	if err != nil {

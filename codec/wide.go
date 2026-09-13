@@ -18,7 +18,9 @@ package codec
 // two widths encode in 5.3 ns and 5.4, and narrow decodes in 14.8 against 25.4
 // and writes 9 bytes against 11. A type goes wide when it has to:
 //
-//   - a field id above fifteen, which four key bits cannot carry; or
+//   - a field id above sixteen, whose key four bits cannot carry;
+//   - a dynamic value, whose descriptor has to name its own class and cannot do
+//     that in four bits (dynamic.go); or
 //   - packed5 on and a string field to spend it on, because the encoding code
 //     lives in the wide descriptor and a narrow one has no room for it.
 //
@@ -54,7 +56,7 @@ const (
 // now (wire.Writer.PackedString), so the encoding costs what it weighs and
 // nothing else.
 func (plan *typePlan) wide() bool {
-	return plan.anyKeyPastNarrow || plan.derivedKeys
+	return plan.anyKeyPastNarrow || plan.derivedKeys || plan.hasDynamic
 }
 
 // appendWide is writePlan for the wide key width. It is a separate function
@@ -118,9 +120,13 @@ func appendWide(writer *wire.Writer8, plan *typePlan, record unsafe.Pointer, buf
 		case opStructs:
 			appendStructsField(writer, field, at, buf)
 		case opMap:
-			appendMapField(writer, field, at)
+			appendMapField(writer, field, at, buf)
 		case opPointer:
 			appendPointerWide(writer, field, at)
+		case opAny:
+			appendAnyField(writer, field, at, buf)
+		case opAnys:
+			appendAnysField(writer, field, at, buf)
 		}
 	}
 }
@@ -178,9 +184,13 @@ func readWideField(reader *wire.Reader8, field *planField, record unsafe.Pointer
 	case opStructs:
 		readStructsField(reader, field, at, buf)
 	case opMap:
-		readMapField(reader, field, at)
+		readMapField(reader, field, at, buf)
 	case opPointer:
 		readPointerWide(reader, field, at)
+	case opAny:
+		*(*any)(at) = readAnyValue(reader, buf)
+	case opAnys:
+		*(*[]any)(at) = readAnyList(reader, buf)
 	}
 }
 
@@ -189,7 +199,9 @@ func readWideField(reader *wire.Reader8, field *planField, record unsafe.Pointer
 // A key the plan does not declare is *skipped* rather than refused, which is the
 // whole point of the wide width: the descriptor sizes the field, so a reader can
 // step over something a newer peer added. The narrow path cannot, and says so.
-func unmarshalWide(body []byte, plan *typePlan, record unsafe.Pointer, what reflect.Type) error {
+func unmarshalWide(
+	body, section []byte, plan *typePlan, record unsafe.Pointer, what reflect.Type,
+) error {
 	// A separate reader per branch, for the reason appendPlan declares a separate
 	// writer: escape analysis is per variable, and sharing one with the composite
 	// walk would heap it on the flat path too.
@@ -202,7 +214,7 @@ func unmarshalWide(body []byte, plan *typePlan, record unsafe.Pointer, what refl
 		return nil
 	}
 	reader := wire.NewReader8(body)
-	var buf scratch
+	buf := scratch{rawSection: section}
 	readRun(&reader, plan, record, &buf)
 	if err := reader.Err(); err != nil {
 		return fmt.Errorf("colbin: %s: %w", what, err)
@@ -217,22 +229,31 @@ func unmarshalWide(body []byte, plan *typePlan, record unsafe.Pointer, what refl
 // record on every decode — one allocation and about 8 ns on a ten-field one,
 // entirely to describe a failure that does not happen.
 func rootOf(data []byte) (body []byte, wide, ok bool) {
+	_, body, wide, ok = rootParts(data)
+	return body, wide, ok
+}
+
+// rootParts is rootOf with the section kept rather than stepped over.
+//
+// A typed decode does not need it — it has the Go type — which is what keeps a
+// self-describing message an ordinary message to everyone else. One thing does:
+// a dynamic value can name a struct the *section* describes, and nothing in the
+// Go type says what that struct is. So the bytes are carried along unparsed and
+// looked at only if such a value turns up. See scratch.structPlans.
+func rootParts(data []byte) (section, body []byte, wide, ok bool) {
 	if len(data) == 0 {
-		return nil, false, false
+		return nil, nil, false, false
 	}
 	switch data[0] {
 	case rootStructNarrow:
-		return data[1:], false, true
+		return nil, data[1:], false, true
 	case rootStructWide:
-		return data[1:], true, true
+		return nil, data[1:], true, true
 	case rootStructNarrowSchema, rootStructWideSchema:
-		// A typed decode does not need the section — it has the Go type — so it
-		// steps over it and reads the body behind. That is what keeps a
-		// self-describing message an ordinary message to everyone else.
-		_, body, ok := splitSchemaSection(data[1:])
-		return body, data[0]&rootWide != 0, ok
+		section, body, ok := splitSchemaSection(data[1:])
+		return section, body, data[0]&rootWide != 0, ok
 	default:
-		return nil, false, false
+		return nil, nil, false, false
 	}
 }
 
@@ -247,14 +268,15 @@ func errBadRoot(data []byte, what reflect.Type) error {
 		what, data[0])
 }
 
-// structTypeOf resolves the struct type behind a value or a pointer to one.
-func structTypeOf(v any) (reflect.Type, error) {
-	structType := reflect.TypeOf(v)
-	for structType != nil && structType.Kind() == reflect.Pointer {
-		structType = structType.Elem()
+// rootTypeOf resolves the type behind a value or a pointer to one. What may
+// stand at a root is planForRoot's business, not this one's.
+func rootTypeOf(v any) (reflect.Type, error) {
+	rootType := reflect.TypeOf(v)
+	for rootType != nil && rootType.Kind() == reflect.Pointer {
+		rootType = rootType.Elem()
 	}
-	if structType == nil {
+	if rootType == nil {
 		return nil, fmt.Errorf("colbin: expected a struct, got nil")
 	}
-	return structType, nil
+	return rootType, nil
 }

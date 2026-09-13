@@ -27,7 +27,7 @@ import (
 func (plan *typePlan) simplePlan() bool {
 	for _, field := range plan.fields {
 		switch field.op {
-		case opStruct, opStructs, opMap, opPointer:
+		case opStruct, opStructs, opMap, opPointer, opAny, opAnys:
 			return false
 		}
 	}

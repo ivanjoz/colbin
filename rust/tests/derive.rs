@@ -8,25 +8,25 @@ use colbin::{Colbin, Error};
 /// The ten-field benchmark record the Go side measures, narrow-keyed.
 #[derive(Colbin, Debug, PartialEq)]
 struct Charge {
-    #[cb(0)]
-    company_id: u32,
     #[cb(1)]
-    user_id: u32,
+    company_id: u32,
     #[cb(2)]
-    route_id: u32,
+    user_id: u32,
     #[cb(3)]
-    cpu: u8,
+    route_id: u32,
     #[cb(4)]
-    memory: u16,
+    cpu: u8,
     #[cb(5)]
-    duration: i64,
+    memory: u16,
     #[cb(6)]
-    access_1: u16,
+    duration: i64,
     #[cb(7)]
-    access_2: u16,
+    access_1: u16,
     #[cb(8)]
-    created: i64,
+    access_2: u16,
     #[cb(9)]
+    created: i64,
+    #[cb(10)]
     updated: i64,
 }
 
@@ -76,29 +76,29 @@ fn an_omitted_field_reads_back_as_zero() {
 
 #[derive(Colbin, Debug, PartialEq)]
 struct Scalars {
-    #[cb(0)]
-    flag: bool,
     #[cb(1)]
-    tiny: i8,
+    flag: bool,
     #[cb(2)]
-    small: i16,
+    tiny: i8,
     #[cb(3)]
-    medium: i32,
+    small: i16,
     #[cb(4)]
-    large: i64,
+    medium: i32,
     #[cb(5)]
-    byte: u8,
+    large: i64,
     #[cb(6)]
-    half: u16,
+    byte: u8,
     #[cb(7)]
-    word: u32,
+    half: u16,
     #[cb(8)]
-    giant: u64,
+    word: u32,
     #[cb(9)]
-    single: f32,
+    giant: u64,
     #[cb(10)]
-    double: f64,
+    single: f32,
     #[cb(11)]
+    double: f64,
+    #[cb(12)]
     text: String,
 }
 
@@ -193,23 +193,23 @@ fn a_float_trims_its_low_end() {
 
 #[derive(Colbin, Debug, PartialEq)]
 struct Arrays {
-    #[cb(0)]
-    blob: Vec<u8>,
     #[cb(1)]
-    tiny: Vec<i8>,
+    blob: Vec<u8>,
     #[cb(2)]
-    small: Vec<i16>,
+    tiny: Vec<i8>,
     #[cb(3)]
-    medium: Vec<i32>,
+    small: Vec<i16>,
     #[cb(4)]
-    large: Vec<i64>,
+    medium: Vec<i32>,
     #[cb(5)]
-    halves: Vec<u16>,
+    large: Vec<i64>,
     #[cb(6)]
-    words: Vec<u32>,
+    halves: Vec<u16>,
     #[cb(7)]
-    giants: Vec<u64>,
+    words: Vec<u32>,
     #[cb(8)]
+    giants: Vec<u64>,
+    #[cb(9)]
     texts: Vec<String>,
 }
 
@@ -250,15 +250,15 @@ fn a_long_blob_escapes_its_size() {
 
 #[derive(Colbin, Debug, PartialEq)]
 struct Optionals {
-    #[cb(0)]
-    maybe_int: Option<i32>,
     #[cb(1)]
-    maybe_uint: Option<u32>,
+    maybe_int: Option<i32>,
     #[cb(2)]
-    maybe_text: Option<String>,
+    maybe_uint: Option<u32>,
     #[cb(3)]
-    maybe_flag: Option<bool>,
+    maybe_text: Option<String>,
     #[cb(4)]
+    maybe_flag: Option<bool>,
+    #[cb(5)]
     maybe_float: Option<f64>,
 }
 
@@ -291,23 +291,23 @@ fn a_present_zero_is_not_an_absent_field() {
 
 #[derive(Colbin, Debug, PartialEq, Clone)]
 struct Line {
-    #[cb(0)]
-    sku: String,
     #[cb(1)]
-    quantity: i32,
+    sku: String,
     #[cb(2)]
+    quantity: i32,
+    #[cb(3)]
     price: f64,
 }
 
 #[derive(Colbin, Debug, PartialEq)]
 struct Order {
-    #[cb(0)]
-    id: u32,
     #[cb(1)]
-    customer: Line,
+    id: u32,
     #[cb(2)]
-    lines: Vec<Line>,
+    customer: Line,
     #[cb(3)]
+    lines: Vec<Line>,
+    #[cb(4)]
     note: String,
 }
 
@@ -382,11 +382,11 @@ fn a_long_slice_of_structs_becomes_a_table() {
 
 #[derive(Colbin, Debug, PartialEq)]
 struct Maps {
-    #[cb(0)]
-    labels: BTreeMap<String, String>,
     #[cb(1)]
-    counts: BTreeMap<i64, f64>,
+    labels: BTreeMap<String, String>,
     #[cb(2)]
+    counts: BTreeMap<i64, f64>,
+    #[cb(3)]
     flags: HashMap<String, bool>,
 }
 
@@ -410,21 +410,21 @@ fn maps_round_trip() {
 /// buys 256 ids and the ability to step over an unknown field.
 #[derive(Colbin, Debug, PartialEq)]
 struct Wide {
-    #[cb(0)]
+    #[cb(1)]
     first: u32,
-    #[cb(200)]
+    #[cb(201)]
     last: String,
 }
 
 #[derive(Colbin, Debug, PartialEq)]
 struct WideEvolved {
-    #[cb(0)]
+    #[cb(1)]
     first: u32,
-    #[cb(200)]
-    last: String,
     #[cb(201)]
-    added: Vec<i32>,
+    last: String,
     #[cb(202)]
+    added: Vec<i32>,
+    #[cb(203)]
     also: f64,
 }
 
@@ -458,7 +458,7 @@ fn a_wide_reader_steps_over_a_field_it_does_not_know() {
 /// nothing can size a field it cannot classify.
 #[derive(Colbin, Debug, PartialEq)]
 struct NarrowOne {
-    #[cb(0)]
+    #[cb(1)]
     first: u32,
 }
 
@@ -485,7 +485,7 @@ struct Hashed {
     company_id: i32,
     #[cb(name = "User")]
     user: String,
-    #[cb(7)]
+    #[cb(8)]
     pinned: u32,
     #[cb(skip)]
     ignored: u64,
@@ -512,7 +512,7 @@ fn hashed_ids_round_trip_and_a_skipped_field_is_not_written() {
 #[derive(Colbin, Debug, PartialEq)]
 #[cb(wide)]
 struct ForcedWide {
-    #[cb(0)]
+    #[cb(1)]
     value: u32,
 }
 
@@ -521,14 +521,14 @@ struct ForcedWide {
 #[derive(Colbin, Debug, PartialEq)]
 #[cb(packed5)]
 struct Packed {
-    #[cb(0)]
+    #[cb(1)]
     text: String,
 }
 
 #[derive(Colbin, Debug, PartialEq)]
 #[cb(wide)]
 struct Unpacked {
-    #[cb(0)]
+    #[cb(1)]
     text: String,
 }
 
@@ -614,15 +614,15 @@ fn a_message_that_is_not_one_is_refused() {
 fn a_list_element_past_the_inline_length_round_trips() {
     #[derive(Colbin, Clone, Debug, Default, PartialEq)]
     struct Row {
-        #[cb(0)]
-        id: i32,
         #[cb(1)]
+        id: i32,
+        #[cb(2)]
         text: String,
     }
 
     #[derive(Colbin, Clone, Debug, Default, PartialEq)]
     struct Document {
-        #[cb(0)]
+        #[cb(1)]
         rows: Vec<Row>,
     }
 

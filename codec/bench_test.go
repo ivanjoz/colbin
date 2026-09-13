@@ -11,16 +11,16 @@ import (
 // façade over a cached plan, and compact mode through its typed handle.
 
 type benchRecord struct {
-	CompanyID    int32  `cb:"0"`
-	UserID       int32  `cb:"1"`
-	RouteID      uint16 `cb:"2"`
-	CPU          uint16 `cb:"3"`
-	Inference    uint16 `cb:"4"`
-	ExtraAllowed bool   `cb:"5"`
-	Access1      uint16 `cb:"6"`
-	Access2      uint16 `cb:"7"`
-	Access3      uint16 `cb:"8"`
-	Access4      uint16 `cb:"9"`
+	CompanyID    int32  `cb:"1"`
+	UserID       int32  `cb:"2"`
+	RouteID      uint16 `cb:"3"`
+	CPU          uint16 `cb:"4"`
+	Inference    uint16 `cb:"5"`
+	ExtraAllowed bool   `cb:"6"`
+	Access1      uint16 `cb:"7"`
+	Access2      uint16 `cb:"8"`
+	Access3      uint16 `cb:"9"`
+	Access4      uint16 `cb:"10"`
 }
 
 var benchCharge = benchRecord{

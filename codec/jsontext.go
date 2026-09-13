@@ -80,13 +80,24 @@ func (s *jsonSink) endArray() {
 }
 
 func (s *jsonSink) key(name string) {
+	s.beforeKey()
+	s.buffer = append(appendJSONString(s.buffer, name), ':')
+}
+
+// keyBytes is key without the string conversion, through the same elision the
+// compiler gives textBytes: Go recognises string(b) in a call argument.
+func (s *jsonSink) keyBytes(name []byte) {
+	s.beforeKey()
+	s.buffer = append(appendJSONString(s.buffer, string(name)), ':')
+}
+
+func (s *jsonSink) beforeKey() {
 	if top := len(s.stack) - 1; top >= 0 {
 		if !s.stack[top].first {
 			s.buffer = append(s.buffer, ',')
 		}
 		s.stack[top].first = false
 	}
-	s.buffer = append(appendJSONString(s.buffer, name), ':')
 }
 
 func (s *jsonSink) null() {

@@ -38,6 +38,29 @@ pub enum Error {
     /// A string field holds bytes that are not UTF-8. The Go codec is byte
     /// exact and permits it; a Rust `String` cannot be.
     NotUtf8,
+    /// The message nests deeper than this decoder walks.
+    TooDeep,
+    /// A table claims more rows than a decode will allocate for. A budget rather
+    /// than a proof: a constant column is nine bytes for any length, so the
+    /// bound cannot come from the bytes left.
+    TooManyRows,
+    /// The schema puts a field type where a value belongs.
+    UnwalkableOp(u8),
+    /// A float that JSON has no spelling for. Writing `null` instead would turn
+    /// "not a number" into "no value", and the two are not the same thing.
+    NotJson,
+    /// A shape this decoder does not implement yet — today, a map.
+    Unsupported,
+    /// A message carrying no schema section arrived with none held. The
+    /// out-of-band delivery sends the section once per connection, so this is
+    /// what a caller sees when the first message beat it.
+    NoSchema,
+    /// A schema section is malformed: a declared length its bytes cannot hold, a
+    /// type code this version does not assign, or a struct index outside the
+    /// table it points into. One variant rather than a dozen, because a section
+    /// arrives whole and a caller who cannot parse it can do nothing differently
+    /// depending on which byte was wrong.
+    BadSection,
     /// A packed5 frame the decoder refused.
     Packed5(Packed5Error),
 }
@@ -83,6 +106,24 @@ impl fmt::Display for Error {
                  and a narrow key cannot be skipped"
             ),
             Self::NotUtf8 => out.write_str("colbin: a string field is not valid UTF-8"),
+            Self::BadSection => out.write_str("colbin: malformed schema section"),
+            Self::TooDeep => {
+                out.write_str("colbin: the message nests deeper than this decoder walks")
+            }
+            Self::TooManyRows => {
+                out.write_str("colbin: a table claims more rows than a decode will allocate for")
+            }
+            Self::UnwalkableOp(op) => {
+                write!(
+                    out,
+                    "colbin: the schema puts field type {op} where a value belongs"
+                )
+            }
+            Self::NotJson => out.write_str("colbin: a NaN or an infinity has no JSON spelling"),
+            Self::Unsupported => out.write_str("colbin: this decoder does not render maps yet"),
+            Self::NoSchema => {
+                out.write_str("colbin: the message carries no schema section and none was set")
+            }
             Self::Packed5(inner) => write!(out, "colbin: packed5 {inner}"),
         }
     }
@@ -100,6 +141,10 @@ impl fmt::Display for Packed5Error {
     }
 }
 
+/// The one thing in this crate that needs the standard library, and therefore
+/// the one thing the `std` feature gates. A `no_std` consumer — the WebAssembly
+/// decoder in `rust/wasm` — still gets `Display`, which is where the text is.
+#[cfg(feature = "std")]
 impl std::error::Error for Error {}
 
 impl From<Packed5Error> for Error {

@@ -56,42 +56,42 @@ import (
 // User is the ordinary flat record: a few small integers and a few short
 // strings, which is the shape most messages on a wire actually are.
 type User struct {
-	ID        uint32 `cb:"1"`
-	Name      string `cb:"2"`
-	Email     string `cb:"3"`
-	Country   string `cb:"4"` // an ISO code, upper case, so packed5 can reach it
-	Age       uint8  `cb:"5"`
-	Active    bool   `cb:"6"`
-	CreatedAt int64  `cb:"7"` // unix seconds
+	ID        uint32 `cb:"2"`
+	Name      string `cb:"3"`
+	Email     string `cb:"4"`
+	Country   string `cb:"5"` // an ISO code, upper case, so packed5 can reach it
+	Age       uint8  `cb:"6"`
+	Active    bool   `cb:"7"`
+	CreatedAt int64  `cb:"8"` // unix seconds
 }
 
 // Product carries the strings. The SKU is upper-case alphanumeric on purpose:
 // it is what packed5 is for, and what decides whether packed5 is worth its key
 // width on a real record.
 type Product struct {
-	ID         uint32   `cb:"1"`
-	SKU        string   `cb:"2"`
-	Name       string   `cb:"3"`
-	PriceCents int64    `cb:"4"`
-	Stock      uint32   `cb:"5"`
-	CategoryID uint16   `cb:"6"`
-	Tags       []string `cb:"7"`
+	ID         uint32   `cb:"2"`
+	SKU        string   `cb:"3"`
+	Name       string   `cb:"4"`
+	PriceCents int64    `cb:"5"`
+	Stock      uint32   `cb:"6"`
+	CategoryID uint16   `cb:"7"`
+	Tags       []string `cb:"8"`
 }
 
 type Category struct {
-	ID       uint16 `cb:"1"`
-	Name     string `cb:"2"`
-	ParentID uint16 `cb:"3"`
+	ID       uint16 `cb:"2"`
+	Name     string `cb:"3"`
+	ParentID uint16 `cb:"4"`
 }
 
 // Store is the only table with floats in it, so that the float trim is not
 // measured only by its unit test.
 type Store struct {
-	ID   uint16  `cb:"1"`
-	Code string  `cb:"2"`
-	City string  `cb:"3"`
-	Lat  float64 `cb:"4"`
-	Lon  float64 `cb:"5"`
+	ID   uint16  `cb:"2"`
+	Code string  `cb:"3"`
+	City string  `cb:"4"`
+	Lat  float64 `cb:"5"`
+	Lon  float64 `cb:"6"`
 }
 
 // Sale holds no string and no float: every field is an integer, and every
@@ -100,48 +100,48 @@ type Store struct {
 // tableThreshold is transposed into columns rather than written row by row, and
 // the same dataset exercises both layouts.
 type Sale struct {
-	ID            uint64     `cb:"1"`
-	UserID        uint32     `cb:"2"`
-	StoreID       uint16     `cb:"3"`
-	CreatedAt     int64      `cb:"4"`
-	SubtotalCents int64      `cb:"5"`
-	TaxCents      int64      `cb:"6"`
-	TotalCents    int64      `cb:"7"`
-	PaidCents     int64      `cb:"8"`
-	Detail        []SaleLine `cb:"9"`
+	ID            uint64     `cb:"2"`
+	UserID        uint32     `cb:"3"`
+	StoreID       uint16     `cb:"4"`
+	CreatedAt     int64      `cb:"5"`
+	SubtotalCents int64      `cb:"6"`
+	TaxCents      int64      `cb:"7"`
+	TotalCents    int64      `cb:"8"`
+	PaidCents     int64      `cb:"9"`
+	Detail        []SaleLine `cb:"10"`
 }
 
 // SaleLine is every field an integer, which is what makes a slice of them a
 // candidate for the columnar layout. A single string here would disqualify the
 // whole table.
 type SaleLine struct {
-	ProductID  uint32 `cb:"1"`
-	Quantity   uint32 `cb:"2"`
-	UnitCents  int64  `cb:"3"`
-	DiscountBP uint16 `cb:"4"` // basis points, 0..10000
-	TaxBP      uint16 `cb:"5"`
-	TotalCents int64  `cb:"6"`
+	ProductID  uint32 `cb:"2"`
+	Quantity   uint32 `cb:"3"`
+	UnitCents  int64  `cb:"4"`
+	DiscountBP uint16 `cb:"5"` // basis points, 0..10000
+	TaxBP      uint16 `cb:"6"`
+	TotalCents int64  `cb:"7"`
 }
 
 // Event is the awkward one: long strings, a string array and a map. It is the
 // table whose encoding is *not* byte-stable, because a Go map has no iteration
 // order.
 type Event struct {
-	At      int64             `cb:"1"`
-	Level   string            `cb:"2"`
-	Actor   string            `cb:"3"`
-	Message string            `cb:"4"`
-	Frames  []string          `cb:"5"`
-	Fields  map[string]string `cb:"6"`
+	At      int64             `cb:"2"`
+	Level   string            `cb:"3"`
+	Actor   string            `cb:"4"`
+	Message string            `cb:"5"`
+	Frames  []string          `cb:"6"`
+	Fields  map[string]string `cb:"7"`
 }
 
 // Metric is three integers, which is the shape the column codec was written
 // for: dense ascending ids, clustered timestamps, and values with a narrow
 // range.
 type Metric struct {
-	SeriesID uint32 `cb:"1"`
-	At       int64  `cb:"2"`
-	Value    int64  `cb:"3"`
+	SeriesID uint32 `cb:"2"`
+	At       int64  `cb:"3"`
+	Value    int64  `cb:"4"`
 }
 
 // Corpus is one generated dataset.

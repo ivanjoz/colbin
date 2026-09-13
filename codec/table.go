@@ -64,13 +64,80 @@ func (plan *typePlan) transposable() bool {
 	return len(plan.fields) > 0
 }
 
-// scratch is the transposition buffer. One per column, reused across the columns
+// scratch is what an encode carries beside the buffer it is writing into. One
+// per message, threaded down the whole walk.
+//
+// Most of it is the transposition buffer: one column, reused across the columns
 // of a table and across tables in the same message, because a column is read out
 // of it and into the wire before the next is gathered.
+//
+// The rest is what a dynamic value needs, and it is here rather than in a second
+// parameter because this is already the thing every writer is handed. See
+// dynamic.go.
 type scratch struct {
 	ints    []int64
 	strings []string
+	// section is the struct table being built, when the message is carrying one.
+	// A dynamic struct adds itself to it and writes the index; nil means there is
+	// nowhere to put a def, and such a struct goes out as a map of names.
+	section *sectionBuilder
+	// rawSection is the other direction: the section a message arrived with, kept
+	// unparsed because most decodes never look at it. A TYPED value is the only
+	// thing that needs the table, so structPlans parses on first use.
+	rawSection []byte
+	plans      []*typePlan
+	planned    bool
+	// depth bounds how far a dynamic value is followed, because `m["self"] = m`
+	// is a value a caller can build.
+	depth int
+	// err is the first failure. The writers cannot return one — they are shaped
+	// around never needing to — so it is recorded here and the entry points in
+	// codec.go hand it back.
+	err error
 }
+
+// structPlans is the struct table a TYPED value indexes into, parsed from the
+// message's own section the first time one is asked for.
+//
+// It answers nil with no error when the message carried no section. That is not
+// a failure yet: a dynamic value only needs the table if it names a struct, and
+// most do not. The walk says so if one does.
+func (buf *scratch) structPlans() ([]*typePlan, error) {
+	if buf.planned {
+		return buf.plans, nil
+	}
+	buf.planned = true
+	if len(buf.rawSection) == 0 {
+		return nil, nil
+	}
+	schema, err := ParseSchema(buf.rawSection)
+	if err != nil {
+		return nil, err
+	}
+	buf.plans = schema.plans
+	return buf.plans, nil
+}
+
+// fail records the first failure of an encode.
+func (buf *scratch) fail(err error) {
+	if err != nil && buf.err == nil {
+		buf.err = err
+	}
+}
+
+// enter and leave bound a dynamic value's nesting. enter answers false at the
+// limit, and the caller writes a null in place of what it could not follow —
+// the message is abandoned anyway, since err is set.
+func (buf *scratch) enter() bool {
+	if buf.depth >= maxDynamicDepth {
+		buf.fail(errDynamicDepth)
+		return false
+	}
+	buf.depth++
+	return true
+}
+
+func (buf *scratch) leave() { buf.depth-- }
 
 // reserve grows the transposition buffers to hold one column of rows rows.
 //

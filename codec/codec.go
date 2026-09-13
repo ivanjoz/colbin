@@ -18,8 +18,9 @@ import (
 // other two, is in wire/README.md. What matters here is the one property that
 // shapes this file: **a colbin message carries no version byte and no field
 // ids beyond four bits**, so the type has to say everything. A field needs an
-// explicit `cb:"N"` with N under sixteen, and a type that does not number its
-// fields is refused rather than hashed into ids that would not fit.
+// explicit `cb:"N"` with N no higher than sixteen — ids count from one, and the
+// key on the wire is N-1 — and a type that does not number its fields is refused
+// rather than hashed into ids that would not fit.
 
 // fieldOp says what a field is. It is the whole of what a plan holds about a
 // field's type, and — since the schema section — the whole of what the *wire*
@@ -60,6 +61,10 @@ const (
 	opStructs
 	opMap
 	opPointer
+	// opAny is a field of type `any`, and opAnys a slice of them: a value with no
+	// declared type, which says on the wire what it is. See dynamic.go.
+	opAny
+	opAnys
 
 	// opCount bounds the block, so a schema section carrying a number this
 	// version does not assign is refused rather than indexed on.
@@ -95,6 +100,11 @@ type typePlan struct {
 	// What decides the key width, resolved once with the plan. See wide.go.
 	anyKeyPastNarrow bool
 	hasStrings       bool
+	// hasDynamic says some field of this type carries a value whose type is not
+	// declared — an `any`, a slice of them, or a map of them. Such a value is
+	// written as a descriptor that names its own class, and a four-bit descriptor
+	// has no room for one, so the scope goes wide. See dynamic.go.
+	hasDynamic bool
 	// byKey maps a wire key to an index into fields, or -1. See find.
 	byKey []int16
 	// sizeHint is what Marshal reserves. See planSizeHint.
@@ -110,7 +120,7 @@ type typePlan struct {
 	// walk in scalars.go instead. See simplePlan.
 	simple bool
 	// derivedKeys says at least one id came from a field name rather than a tag.
-	// Such an id lands anywhere in 0..255, so the type uses eight-bit keys. See
+	// Such a key lands anywhere in 0..255, so the type uses eight-bit keys. See
 	// assignKeys.
 	derivedKeys bool
 	// fromSchema says this plan was parsed off a wire section rather than
@@ -119,6 +129,12 @@ type typePlan struct {
 	// over the head of the record. Only the JSON walkers may use such a plan.
 	// See schema_plan.go.
 	fromSchema bool
+	// envelope says this plan is the synthetic one-field struct that carries a
+	// slice or a map at the root, rather than a type somebody declared. The
+	// encoding is an ordinary message either way; what the flag changes is the
+	// JSON walk, which unwraps it so that the document is the value and not a
+	// struct holding one. See envelope.go.
+	envelope bool
 }
 
 var planCache sync.Map // reflect.Type -> *typePlan or error
@@ -171,7 +187,7 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 	var (
 		hashNames  []string // the name the id is derived from, tag override included
 		fieldNames []string // the Go name, for errors
-		declared   []int    // >= 0 explicit, -1 to be derived
+		declared   []int    // >= 1 explicit, noFieldID to be derived
 	)
 	for index := range structType.NumField() {
 		field := structType.Field(index)
@@ -182,10 +198,19 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 		if skip {
 			continue
 		}
-		if explicitID >= wire.MaxWideFields {
+		// Ids are one-based and a key is one byte, so 1..256 is the whole range at
+		// either width. Zero gets its own sentence, because it is what a tag from
+		// the old zero-based numbering says and a reader deserves to be told that
+		// rather than left to wonder why every field moved by one.
+		if explicitID != noFieldID && (explicitID < 1 || explicitID > wire.MaxWideFields) {
+			if explicitID == 0 {
+				return nil, fmt.Errorf(
+					"colbin: field ids are one-based, so %s.%s cannot be id 0: the first field is `cb:\"1\"`",
+					typeName(structType), field.Name)
+			}
 			return nil, fmt.Errorf(
-				"colbin: a field id is one byte: %s.%s has id %d, and the most is %d",
-				typeName(structType), field.Name, explicitID, wire.MaxWideFields-1)
+				"colbin: a field id is one byte counted from one: %s.%s has id %d, and the range is 1..%d",
+				typeName(structType), field.Name, explicitID, wire.MaxWideFields)
 		}
 
 		op, sub, sliceType, stride, compositeErr := compositeOpFor(field.Type, building)
@@ -222,6 +247,9 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 		if op == opString || op == opStrings || elemOp == opString {
 			plan.hasStrings = true
 		}
+		if op == opAny || op == opAnys || (op == opMap && valueKind == mapAny) {
+			plan.hasDynamic = true
+		}
 		plan.fields = append(plan.fields, planField{
 			offset:    field.Offset,
 			op:        op,
@@ -249,6 +277,7 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 	// an untagged field is called what Go calls it. One name, not two.
 	plan.names = hashNames
 	plan.indexKeys()
+	plan.envelope = isEnvelope(structType)
 	plan.isWide = plan.wide()
 	plan.canTable = plan.transposable()
 	plan.simple = plan.simplePlan()
@@ -262,32 +291,38 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 // assignKeys gives every field its wire key: the declared ones first, so that
 // the derived ones can probe past them.
 //
-// The order matters and is the contract. A field that says `cb:"5"` gets 5
+// The order matters and is the contract. A field that says `cb:"5"` gets key 4
 // whatever else is in the type, and a field that says nothing takes fnv8 of its
 // name and then the next free slot upward. Doing it the other way round would
 // let a hash squat on a number somebody had asked for.
+//
+// This is the one place the one-based id becomes the zero-based key, and it is
+// the only subtraction in the package. Everything downstream — the clash map,
+// the plan, the schema section, the generated code — is keys, so nothing else
+// has to remember which of the two numbers it is holding. The errors are the
+// exception and speak in ids, because an id is what the tag says.
 func (plan *typePlan) assignKeys(structType reflect.Type, hashNames, fieldNames []string, declared []int) error {
 	taken := make(map[uint8]string, len(declared))
 	for index, id := range declared {
-		if id < 0 {
+		if id == noFieldID {
 			continue
 		}
-		key := uint8(id)
+		key := uint8(id - 1)
 		if other, clash := taken[key]; clash {
 			return fmt.Errorf(
 				"colbin: the format field id %d is on both %s.%s and %s.%s",
-				key, typeName(structType), other, typeName(structType), fieldNames[index])
+				id, typeName(structType), other, typeName(structType), fieldNames[index])
 		}
 		taken[key] = fieldNames[index]
 		plan.fields[index].key = key
-		if id >= wire.MaxFields {
-			// Past fifteen the message has to use eight-bit keys, which costs a
-			// byte per present field and buys 256 of them.
+		if id > wire.MaxFields {
+			// Past the sixteenth id the message has to use eight-bit keys, which
+			// costs a byte per present field and buys 256 of them.
 			plan.anyKeyPastNarrow = true
 		}
 	}
 	for index, id := range declared {
-		if id >= 0 {
+		if id != noFieldID {
 			continue
 		}
 		key := probeFieldID(fnv8(hashNames[index]), taken)
@@ -326,9 +361,28 @@ func opFor(fieldType reflect.Type) (fieldOp, error) {
 		return opString, nil
 	case reflect.Slice:
 		return sliceOp(fieldType.Elem())
+	case reflect.Interface:
+		if err := dynamicInterface(fieldType); err != nil {
+			return 0, err
+		}
+		return opAny, nil
 	}
 	return 0, fmt.Errorf(
-		"the format carries scalars, strings, slices of those, nested structs, slices of structs and maps, not %s", fieldType)
+		"the format carries scalars, strings, slices of those, nested structs, slices of structs, maps and `any`, not %s", fieldType)
+}
+
+// dynamicInterface refuses an interface that is not the empty one.
+//
+// A dynamic value is decoded into whatever the wire says it is, and there is no
+// way to promise that will satisfy a method set. `any` is the shape this carries
+// and saying so at plan time is better than a type assertion failing per value.
+func dynamicInterface(fieldType reflect.Type) error {
+	if fieldType.NumMethod() != 0 {
+		return fmt.Errorf(
+			"a dynamic value has to be `any`, and %s has %d method(s)",
+			fieldType, fieldType.NumMethod())
+	}
+	return nil
 }
 
 func sliceOp(elementType reflect.Type) (fieldOp, error) {
@@ -351,9 +405,14 @@ func sliceOp(elementType reflect.Type) (fieldOp, error) {
 		return opUint64s, nil
 	case reflect.String:
 		return opStrings, nil
+	case reflect.Interface:
+		if err := dynamicInterface(elementType); err != nil {
+			return 0, err
+		}
+		return opAnys, nil
 	}
 	return 0, fmt.Errorf(
-		"the format carries slices of integers and strings, not []%s", elementType)
+		"the format carries slices of integers, strings and `any`, not []%s", elementType)
 }
 
 // Append encodes v onto dst, which may be nil.
@@ -366,7 +425,26 @@ func Append(dst []byte, v any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return appendPlan(dst, plan, unsafe.Pointer(value.UnsafeAddr())), nil
+	record := unsafe.Pointer(value.UnsafeAddr())
+	if plan.hasDynamic {
+		return appendPlanChecked(dst, plan, record)
+	}
+	return appendPlan(dst, plan, record), nil
+}
+
+// appendPlanChecked is appendPlan for a type whose encode can fail.
+//
+// Only a dynamic value can: everything else was resolved at plan time, which is
+// the whole reason the writers below take no error path. An `any` is resolved
+// per value, so it can hold a Go type with no form on the wire, or hold itself.
+// A type with no `any` in it does not pay for this.
+func appendPlanChecked(dst []byte, plan *typePlan, record unsafe.Pointer) ([]byte, error) {
+	root := rootStructNarrow
+	if plan.isWide {
+		root = rootStructWide
+	}
+	var buf scratch
+	return appendRunInto(append(dst, root), plan, record, &buf)
 }
 
 // addressable resolves v to a plan and to a value the plan can read fields out
@@ -524,7 +602,11 @@ func Marshal(v any) ([]byte, error) {
 	// One plan lookup, not two: sizing the buffer and writing it need the same
 	// plan, and resolving it twice cost about 12 ns of a 95 ns Marshal.
 	dst := make([]byte, 0, plan.sizeHint)
-	return appendPlan(dst, plan, unsafe.Pointer(value.UnsafeAddr())), nil
+	record := unsafe.Pointer(value.UnsafeAddr())
+	if plan.hasDynamic {
+		return appendPlanChecked(dst, plan, record)
+	}
+	return appendPlan(dst, plan, record), nil
 }
 
 // Unmarshal decodes a colbin message into dst, a non-nil pointer to a
@@ -546,12 +628,12 @@ func Unmarshal(data []byte, dst any) error {
 	value.SetZero()
 
 	record := unsafe.Pointer(value.UnsafeAddr())
-	body, wide, ok := rootOf(data)
+	section, body, wide, ok := rootParts(data)
 	if !ok {
 		return errBadRoot(data, value.Type())
 	}
 	if wide {
-		return unmarshalWide(body, plan, record, value.Type())
+		return unmarshalWide(body, section, plan, record, value.Type())
 	}
 	return unmarshalNarrow(body, plan, record, value.Type())
 }
@@ -562,7 +644,7 @@ func Unmarshal(data []byte, dst any) error {
 // room for a class, so the same bits mean different things under different keys
 // and nothing can size a field it cannot classify — which is the trade the
 // narrow width makes for its byte. A type that needs to evolve past its readers
-// should carry an id above fifteen, which puts the message on the wide path.
+// should carry an id above sixteen, which puts the message on the wide path.
 func unmarshalNarrow(body []byte, plan *typePlan, record unsafe.Pointer, what reflect.Type) error {
 	reader := wire.NewReader(body)
 	if plan.simple {
@@ -775,6 +857,13 @@ func MustCodec[T any]() *Codec[T] {
 }
 
 // Append encodes value onto dst, which may be nil.
+//
+// It cannot fail, and for every type but one that is a fact rather than a
+// promise: the shape was resolved when the handle was built, so there is nothing
+// left to go wrong per record. The exception is a T holding an `any`, whose
+// shape is resolved per *value* — it can hold a Go type the format has no form
+// for, or hold itself. Append writes a null in place of such a value and has
+// nowhere to say so; AppendChecked is the same encode with the error.
 func (codec *Codec[T]) Append(dst []byte, value *T) []byte {
 	record := unsafe.Pointer(value)
 	if codec.plan.isWide {
@@ -803,17 +892,29 @@ func (codec *Codec[T]) Encode(value *T) []byte {
 	return codec.Append(nil, value)
 }
 
+// AppendChecked is Append with the failure a dynamic value can have.
+//
+// For a T with no `any` in it the error is always nil and Append is the same
+// call without the check. For one with an `any`, this is the way to hear that a
+// value could not be carried rather than to find a null where it was.
+func (codec *Codec[T]) AppendChecked(dst []byte, value *T) ([]byte, error) {
+	if !codec.plan.hasDynamic {
+		return codec.Append(dst, value), nil
+	}
+	return appendPlanChecked(dst, codec.plan, unsafe.Pointer(value))
+}
+
 // Unmarshal decodes a message into value, zeroing it first: a key the message
 // omits means the field was zero.
 func (codec *Codec[T]) Unmarshal(data []byte, value *T) error {
 	*value = *new(T)
 	record := unsafe.Pointer(value)
-	body, wide, ok := rootOf(data)
+	section, body, wide, ok := rootParts(data)
 	if !ok {
 		return errBadRoot(data, codec.what)
 	}
 	if wide {
-		return unmarshalWide(body, codec.plan, record, codec.what)
+		return unmarshalWide(body, section, codec.plan, record, codec.what)
 	}
 	return unmarshalNarrow(body, codec.plan, record, codec.what)
 }

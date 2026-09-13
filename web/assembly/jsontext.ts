@@ -112,6 +112,22 @@ export class JSONSink {
     this.afterKey = true
   }
 
+  /**
+   * A key whose quotes, escaping and colon were all rendered once, ahead of the
+   * walk — so a field costs one `memory.copy` per row instead of an encode, two
+   * allocations and a byte-at-a-time escape.
+   *
+   * The names are fixed by the plan and every row repeats them, which is what
+   * makes this worth precomputing: on a thousand seven-field records the old
+   * path escaped seven distinct strings seven thousand times. `plan.ts` records
+   * the same lesson being learned on the encoding side.
+   */
+  keyRun(run: Uint8Array): void {
+    this.beforeValue()
+    this.out.writeBytes(run, 0, run.length)
+    this.afterKey = true
+  }
+
   null(): void {
     this.beforeValue()
     this.ascii('null')
@@ -124,12 +140,12 @@ export class JSONSink {
 
   signed(value: i64): void {
     this.beforeValue()
-    this.ascii(value.toString())
+    this.out.writeDecimalI64(value)
   }
 
   unsigned(value: u64): void {
     this.beforeValue()
-    this.ascii(value.toString())
+    this.out.writeDecimalU64(value)
   }
 
   /**
@@ -279,6 +295,18 @@ export class JSONSink {
   take(): Uint8Array {
     return this.out.take()
   }
+}
+
+/**
+ * `"name":` — quoted, escaped and punctuated — for `JSONSink#keyRun`.
+ *
+ * Rendered through a throwaway sink rather than a second copy of the escaper, so
+ * a precomputed key cannot drift from the one the walker would have written.
+ */
+export function renderKeyRun(name: Uint8Array): Uint8Array {
+  const sink = new JSONSink()
+  sink.keyBytes(name)
+  return sink.take()
 }
 
 /** Whether a byte may go into a string as it stands. */

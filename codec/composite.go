@@ -5,7 +5,7 @@ package codec
 // A composite carries a byte length, and a byte length is a wide-key idea: four
 // descriptor bits have no room for a class, so nothing narrow can size a field
 // it cannot classify. A type with a nested struct therefore goes wide, the same
-// way a type with a field id past fifteen does — it is not a mode, it is the
+// way a type with a field id past sixteen does — it is not a mode, it is the
 // width the type needs.
 //
 // # Recursion

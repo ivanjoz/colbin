@@ -142,9 +142,10 @@ export class Walker {
    * A document whose top level was not an object was wrapped in a one-field
    * struct, because the root of a colbin message is a struct and nothing else.
    * The section says so (REFACTOR_PLAN.md §5.1), so unwrapping it is reading a
-   * fact rather than guessing at a field name — and a reader that does not know
-   * the flag, Go included, renders `{"rows":[…]}` and is not wrong, only more
-   * literal.
+   * fact rather than guessing at a field name. Go builds the same wrapper round
+   * a slice or map root and unwraps it the same way, so the two render the same
+   * document; a reader that does not know the flag renders `{"rows":[…]}` and is
+   * not wrong, only more literal.
    */
   root(plan: Plan | null, body: Uint8Array, wide: bool): void {
     if (plan == null || !plan.isEnvelope || plan.fields.length != 1) {
@@ -199,7 +200,7 @@ export class Walker {
         return
       }
       unchecked((seen[index] = true))
-      this.to.key(unchecked(plan.names[index]))
+      this.to.keyRun(unchecked(plan.keyRuns[index]))
       this.narrowValue(reader, unchecked(plan.fields[index]))
     }
     if (!reader.ok) this.failWire(reader.err)
@@ -226,7 +227,7 @@ export class Walker {
         continue
       }
       unchecked((seen[index] = true))
-      this.to.key(unchecked(plan.names[index]))
+      this.to.keyRun(unchecked(plan.keyRuns[index]))
       this.wideValue(reader, unchecked(plan.fields[index]))
     }
     if (!reader.ok) this.failWire(reader.err)
@@ -249,7 +250,7 @@ export class Walker {
   private absent(plan: Plan, seen: StaticArray<bool>): void {
     for (let index = 0; index < plan.fields.length; index++) {
       if (unchecked(seen[index])) continue
-      this.to.key(unchecked(plan.names[index]))
+      this.to.keyRun(unchecked(plan.keyRuns[index]))
       this.zero(unchecked(plan.fields[index]))
     }
   }
@@ -663,7 +664,7 @@ export class Walker {
       this.to.beginObject()
       for (let index = 0; index < sub.fields.length; index++) {
         const field = unchecked(sub.fields[index])
-        this.to.key(unchecked(sub.names[index]))
+        this.to.keyRun(unchecked(sub.keyRuns[index]))
         if (!unchecked(gathered.present[index])) {
           // A column whose every value was zero is not written at all, and its
           // absence is the whole of what says so.

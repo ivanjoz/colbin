@@ -37,7 +37,8 @@ package wire
 //	class 4 LIST     [homog:1][-:1][lw:2] [bytelen: lw][count: lw] then elements
 //	class 5 STRUCT   reserved for a nested key run
 //	class 6 MAP      reserved
-//	class 7 SPECIAL  [detail:4]          null, true, false, NaN, ...
+//	class 7 SPECIAL  [detail:4]          null, true, false, and the self-
+//	                                     describing values in dynamic.go
 //
 // `lw` names the width of the length that follows: 0 → 1 byte, 1 → 2, 2 → 4,
 // 3 → 8. There is no varint anywhere, so reading a length is a branch and one
@@ -75,6 +76,10 @@ const (
 
 // SPECIAL details. Details 0..7 are the reserved door; detail bit 3 is the
 // varint integer, which takes the upper half of the nibble.
+//
+// These three are the values a descriptor can be on its own. The rest of the
+// door — 3, 4, 5 and 7 — is spent in dynamic.go on the forms a value needs when
+// there is no schema to say what it is; 6 is still unassigned.
 const (
 	specialNull  uint8 = 0
 	specialTrue  uint8 = 1
@@ -154,13 +159,22 @@ func appendVarint(buffer []byte, key uint8, value uint64) []byte {
 
 // readVarint reads the form back, returning the byte length of the whole field.
 func readVarint(field []byte, detail uint8) (value uint64, length int, ok bool) {
+	value, length, ok = readVarintAt(field, 1, detail)
+	return value, length + 1, ok // the key byte this form does not read
+}
+
+// readVarintAt is readVarint anchored on the descriptor rather than on the key,
+// which is what a key-less element needs: `at` is where the descriptor sits and
+// the continuation bytes follow it. The length it returns counts from the
+// descriptor, not from the start of the field.
+func readVarintAt(buffer []byte, at int, detail uint8) (value uint64, length int, ok bool) {
 	value = uint64(detail & 0b111)
 	shift := uint(varintBits)
-	for at := 2; at < len(field); at++ {
-		b := field[at]
+	for cursor := at + 1; cursor < len(buffer); cursor++ {
+		b := buffer[cursor]
 		value |= uint64(b&0x7F) << shift
 		if b < 0x80 {
-			return value, at + 1, true
+			return value, cursor + 1 - at, true
 		}
 		shift += 7
 		if shift > 63+varintBits {
@@ -604,33 +618,12 @@ func (r *Reader8) String() string { return string(r.Bytes()) }
 // the offset just past it. It also checks the class, so a reader asking for a
 // string and finding an array is told rather than handed nonsense.
 func (r *Reader8) lengthOf(want uint8) (length, start int, ok bool) {
-	if r.at+2 > len(r.buffer) {
-		r.fail(ErrTruncated)
+	length, start, err := declaredLength(r.buffer, r.at+1, want)
+	if err != nil {
+		r.fail(err)
 		return 0, 0, false
 	}
-	desc := r.buffer[r.at+1]
-	if desc < descExplicit || (desc>>4)&0b111 != want {
-		r.fail(ErrBadDescriptor)
-		return 0, 0, false
-	}
-	width := lengthWidth[desc&0b11]
-	if want == classVec {
-		width = 1
-		if desc&1 != 0 {
-			width = 4
-		}
-	}
-	rest := r.buffer[r.at+2:]
-	if len(rest) < width {
-		r.fail(ErrTruncated)
-		return 0, 0, false
-	}
-	value := leUint(rest, width)
-	if value > uint64(maxInt) {
-		r.fail(ErrSizeTooLarge)
-		return 0, 0, false
-	}
-	return int(value), r.at + 2 + width, true
+	return length, start, true
 }
 
 // Array readers, the mirror of the writers.
@@ -808,53 +801,86 @@ func (r *Reader8) Skip() bool {
 }
 
 // fieldSize is the whole of the skip: every class either carries a byte length
-// or has one derivable from its descriptor.
+// or has one derivable from its descriptor. The key is one byte and the value is
+// valueSize's business, so that a key-less element — a list's, a map's, a
+// dynamic value's — is sized by the same code rather than by a second copy of
+// it that could disagree.
 func (r *Reader8) fieldSize() (int, bool) {
-	if r.at+2 > len(r.buffer) {
-		r.fail(ErrTruncated)
+	size, err := valueSize(r.buffer, r.at+1)
+	if err != nil {
+		r.fail(err)
 		return 0, false
 	}
-	desc := r.buffer[r.at+1]
+	return 1 + size, true
+}
+
+// valueSize reports how many bytes the value whose descriptor sits at `at`
+// occupies, that descriptor included.
+//
+// It takes the buffer rather than the reader because it is used from both
+// conventions — a keyed field, where the descriptor is one past the cursor, and
+// a key-less element, where it is the cursor — and because sizing a value must
+// not move one.
+func valueSize(buffer []byte, at int) (int, error) {
+	if at >= len(buffer) {
+		return 0, ErrTruncated
+	}
+	desc := buffer[at]
 	if desc < descExplicit {
-		return 2, true // the descriptor is the value
+		return 1, nil // the descriptor is the value
 	}
 	switch (desc >> 4) & 0b111 {
 	case classInt:
 		width := magnitudeWidth[desc&0b111]
-		if len(r.buffer)-(r.at+2) < width {
-			r.fail(ErrTruncated)
-			return 0, false
+		if len(buffer)-(at+1) < width {
+			return 0, ErrTruncated
 		}
-		return 2 + width, true
+		return 1 + width, nil
 	case classSpecial:
-		if desc&specialVarint == 0 {
-			return 2, true
-		}
-		// A varint is self-delimiting, so a reader that does not know the key can
-		// still step over it: walk the continuation bits to their end.
-		_, length, ok := readVarint(r.buffer[r.at:], desc)
-		if !ok {
-			r.fail(ErrTruncated)
-			return 0, false
-		}
-		return length, true
+		return specialSize(buffer, at, desc)
 	case classBlob, classVec, classList, classStruct, classMap, classCol:
 		// Every one of these declares a byte length covering the whole of its
 		// payload, which is the property that makes an unknown field skippable
 		// without its sub-schema.
-		length, start, ok := r.lengthOf((desc >> 4) & 0b111)
-		if !ok {
-			return 0, false
+		length, start, err := declaredLength(buffer, at, (desc>>4)&0b111)
+		if err != nil {
+			return 0, err
 		}
-		if length > len(r.buffer)-start {
-			r.fail(ErrTruncated)
-			return 0, false
+		if length > len(buffer)-start {
+			return 0, ErrTruncated
 		}
-		return start + length - r.at, true
+		return start + length - at, nil
 	default:
-		r.fail(ErrBadDescriptor)
-		return 0, false
+		return 0, ErrBadDescriptor
 	}
+}
+
+// declaredLength is lengthOf without a cursor: the length a length-carrying
+// class declares, and the offset just past it.
+func declaredLength(buffer []byte, at int, want uint8) (length, start int, err error) {
+	if at+1 > len(buffer) {
+		return 0, 0, ErrTruncated
+	}
+	desc := buffer[at]
+	if desc < descExplicit || (desc>>4)&0b111 != want {
+		return 0, 0, ErrBadDescriptor
+	}
+	width := lengthWidth[desc&0b11]
+	if want == classVec {
+		width = 1
+		if desc&1 != 0 {
+			width = 4
+		}
+	}
+	rest := buffer[at+1:]
+	if len(rest) < width {
+		return 0, 0, ErrTruncated
+	}
+	value := leUint(rest, width)
+	if value > uint64(maxInt) {
+		return 0, 0, ErrSizeTooLarge
+	}
+	return int(value), at + 1 + width, nil
 }
 
 // Fail records an error from a sub-reader on its parent, which is what a caller

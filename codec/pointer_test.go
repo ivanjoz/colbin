@@ -5,21 +5,21 @@ import (
 )
 
 type pointers struct {
-	Count *int32   `cb:"0"`
-	Name  *string  `cb:"1"`
-	Ratio *float64 `cb:"2"`
-	Flag  *bool    `cb:"3"`
-	Tag   int32    `cb:"4"`
+	Count *int32   `cb:"1"`
+	Name  *string  `cb:"2"`
+	Ratio *float64 `cb:"3"`
+	Flag  *bool    `cb:"4"`
+	Tag   int32    `cb:"5"`
 }
 
-// widePointers has an id past fifteen, which is what puts it on the eight-bit
+// widePointers has an id past sixteen, which is what puts it on the eight-bit
 // key path — the same fields, the other half of the code.
 type widePointers struct {
-	Count *int32   `cb:"0"`
-	Name  *string  `cb:"1"`
-	Ratio *float64 `cb:"2"`
-	Flag  *bool    `cb:"3"`
-	Far   int32    `cb:"20"`
+	Count *int32   `cb:"1"`
+	Name  *string  `cb:"2"`
+	Ratio *float64 `cb:"3"`
+	Flag  *bool    `cb:"4"`
+	Far   int32    `cb:"21"`
 }
 
 func ptr[T any](value T) *T { return &value }
@@ -154,10 +154,10 @@ func TestPointerTruncated(t *testing.T) {
 
 func TestPointerToCompositeIsRefused(t *testing.T) {
 	type inner struct {
-		A int32 `cb:"0"`
+		A int32 `cb:"1"`
 	}
 	type holder struct {
-		Sub *inner `cb:"0"`
+		Sub *inner `cb:"1"`
 	}
 	if _, err := Marshal(&holder{}); err == nil {
 		t.Fatal("a pointer to a struct was accepted; it has no form on the wire yet")

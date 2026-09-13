@@ -68,12 +68,12 @@ const SCHEMA_WIDE_KEYS: u8 = 0x01
  * refused outright by Go, which is a worse outcome than a cosmetic difference.
  * A structDef's flags byte has seven spare bits and `parseStructDef` reads only
  * bit 0, ignoring the rest, which is exactly the room the section was designed
- * to have. So Go renders an enveloped document as `{"rows":[…]}` — the cost
- * §5.1 documented — and this module unwraps it, and neither has to be told
- * anything the other does not already carry.
+ * to have.
  *
- * It is a claim on a shared format made from one side. It belongs in the Go
- * schema.go comment too, and until it is there it is written down here.
+ * It began as a claim on a shared format made from one side, with the cost that
+ * Go rendered an enveloped document as `{"rows":[…]}`. Go now writes the flag
+ * and unwraps it (`codec/schema.go`, `schemaEnvelope`), so the three ports agree
+ * and that cost is gone.
  */
 const SCHEMA_ENVELOPE: u8 = 0x02
 
