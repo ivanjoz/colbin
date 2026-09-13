@@ -289,7 +289,10 @@ pub fn write_structs<T: Colbin>(w: &mut Writer<'_>, key: u8, values: &[T]) {
         // narrow list of small structs is smaller than a wide one.
         let element = w.open_element();
         value.colbin_write_run(w.buf);
-        w.close(element);
+        // close_element, not close: an element has no descriptor in front of its
+        // length placeholder, so widening it the way a keyed composite widens
+        // corrupts the byte before it. See Writer::close_element.
+        w.close_element(element);
     }
     w.close(list);
 }

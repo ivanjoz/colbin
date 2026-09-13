@@ -463,6 +463,42 @@ impl<'a> Writer<'a> {
         widen_length(self.buf, mark, body);
     }
 
+    /// Patches a narrow list element's length.
+    ///
+    /// It is not [`Writer::close`], and the difference is the whole reason it
+    /// exists. `close` widens by setting the `lw` bits of the descriptor
+    /// *before* the placeholder — and a list element has no descriptor before
+    /// it, which is exactly what makes a narrow list of small structs cheaper
+    /// than a wide one. Calling `close` on an element therefore OR-ed 2 into
+    /// whatever byte happened to precede it, which is the element count for the
+    /// first element and the tail of the previous element's body for every one
+    /// after it, and then wrote a bare four-byte length where [`Reader::element`]
+    /// expects the 0xFF escape.
+    ///
+    /// The result was a message the encoder produced and the decoder refused,
+    /// for any narrow list whose element body reached 255 bytes — a `Vec<T>`
+    /// under the table threshold holding a string of a couple of hundred
+    /// characters, which is an ordinary record rather than a corner.
+    ///
+    /// Mirrors `Writer.CloseElement` in wire/narrow_composite.go, which is the
+    /// specification; the Rust port had `close` here and disagreed with Go about
+    /// both the bytes and their length.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn close_element(&mut self, mark: Mark) {
+        let body = self.buf.len() - (mark.at + 1);
+        if body <= INLINE_ELEMENT_SIZE {
+            self.buf[mark.at] = body as u8;
+            return;
+        }
+        // The escape `element` reads: 0xFF and then four bytes, so the body
+        // shifts up by the four the placeholder does not already hold.
+        self.buf.extend_from_slice(&[0, 0, 0, 0]);
+        let end = self.buf.len() - 4;
+        self.buf.copy_within(mark.at + 1..end, mark.at + 5);
+        self.buf[mark.at] = ELEMENT_SIZE_ESCAPE;
+        self.buf[mark.at + 1..mark.at + 5].copy_from_slice(&(body as u32).to_le_bytes());
+    }
+
     // Element writers, the key-less values a narrow map's entries are made of. A
     // narrow list's elements are whole key runs and go through open_element.
 
