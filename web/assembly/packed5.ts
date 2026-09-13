@@ -1,580 +1,238 @@
-// Port of github.com/ivanjoz/colbin/packed5.
+// Port of github.com/ivanjoz/colbin/packed5: the Packed-5 string codec.
 //
-// Operates on UTF-8 bytes throughout, which is what the Go version does too —
-// its input is a Go string, and every classifier indexes it by byte. That is
-// what makes the codec byte-exact for input that is not valid UTF-8, and it is
-// why the module takes bytes rather than a host string (PLAN.md §2.1).
+// This replaces the first port wholesale rather than amending it. The codec it
+// ported had a bit accumulator, a three-bit pad prefix inside the payload, and a
+// planning pass that priced two behavioural header flags before writing a bit.
+// None of those survive: the alphabet is now 32 five-bit codes and **every token
+// is a whole number of them**, which is the property everything else follows
+// from.
+//
+// # Units, and why eight at a time
+//
+// Eight units are forty bits are five bytes exactly. So a group needs no padding
+// and no accumulator that survives it: the reader takes one unaligned 64-bit
+// load, shifts out eight units with constant shifts, and advances five bytes.
+// That is the shape AssemblyScript is *better* at than the accumulator was —
+// native u64 with Go's shift semantics is what the language was chosen for.
+//
+// # Wire format
+//
+// A standalone frame is a header byte and a payload:
+//
+//	bit  0     PACKED_5     0 = raw payload, 1 = packed unit stream
+//	bit  1     UPPERCASE    the stream starts in uppercase mode
+//	bit  2     reserved     must be zero
+//	bits 3-7   length code  payload byte length, or 31 = an LEB128 uvarint follows
+//
+// Embedded in a colbin BLOB it has **no header at all**: the descriptor already
+// says the encoding and the size, so all three of those are duplicates. The
+// module only ever meets the embedded form, so only the payload reader is here.
+//
+// There is no pad prefix and no pad count. The unit count follows from the
+// payload length alone — `units = size * 8 / 5` — because the encoder pads the
+// stream to the grid with a trailing CASE_TOGGLE_SIMPLE, which applies to the
+// next letter and so decodes to nothing when there is no letter after it.
+//
+// # Opcodes
+//
+//	0..25   letter a..z, cased by the current case mode
+//	26      space
+//	27      CASE_TOGGLE_SIMPLE   invert the case of the next letter only
+//	28      CASE_TOGGLE_LONG     invert the case mode until the next 28
+//	29      + 1 unit: index into SYM_TABLE  (digits and common punctuation)
+//	30      + 1 unit: index into EXT_TABLE  (accents and rare punctuation),
+//	                  or 31 to start a raw-byte escape
+//	31      + 2 units: integer 0..1023, low five bits first
 
-import { Reader, Writer, ERR_CORRUPT, ERR_TRUNCATED } from './bytes'
-import { BitReader, BitWriter } from './bitstream'
+import { Writer, gather8 } from './bytes'
 
-// Header flag bits, in byte 0 of every frame.
-const FLAG_PACKED5: u8 = 1 << 0
-const FLAG_UPPERCASE: u8 = 1 << 1
-const FLAG_NUMBER: u8 = 1 << 2
-const LEN_SHIFT: u8 = 3
-const LEN_INLINE: i32 = 30
-const LEN_ESCAPE: i32 = 31
+/** The alphabet. Every code is one unit; the operands below are units too. */
+const OP_SPACE: u8 = 26
+const OP_CASE_SIMPLE: u8 = 27
+const OP_CASE_LONG: u8 = 28
+const OP_SYMBOL: u8 = 29
+const OP_EXT: u8 = 30
+const OP_NUMBER: u8 = 31
 
-// Base alphabet opcodes above the 26 letters.
-const OP_SPACE: u32 = 26
-const OP_CASE_SIMPLE: u32 = 27
-const OP_CASE_LONG: u32 = 28
-const OP_SYMBOL: u32 = 29
-const OP_SIMPLE: u32 = 30
-const OP_NUMBER: u32 = 31
+/** The EXT_TABLE operand that introduces a run of raw bytes. */
+const EXT_ESCAPE: u8 = 31
 
-const ESCAPE_CODE: u32 = 15
+/** The first unassigned EXT_TABLE index. Rejected rather than guessed at, so
+ * claiming one later is a clean format change and not a reinterpretation. */
+const EXT_RESERVED: u8 = 28
+
+/** How many raw bytes one escape can carry. The count occupies a unit but only
+ * 1..4 are legal, so the three-unit header stays worth amortising. */
 const MAX_ESCAPE_RUN: i32 = 4
-const NUMBER_MAX: i32 = 1023
-const NUMBER_MAX_DIGITS: i32 = 4
-const SYM_RESERVED: u32 = 30
-const PAD_BITS_WIDTH: u8 = 3
 
-// Token bit costs.
-const COST_LETTER: i32 = 5
-const COST_LETTER_CASED: i32 = 10
-const COST_SPACE: i32 = 5
-const COST_TOGGLE_LONG: i32 = 5
-const COST_SYMBOL: i32 = 10
-const COST_SIMPLE: i32 = 9
-const COST_DASH: i32 = 5
-const COST_NUMBER: i32 = 15
-const COST_ESCAPE_BASE: i32 = 11
-const COST_ESCAPE_BYTE: i32 = 8
+/** The most units one token spans: a four-byte escape, at 3 + 2n. */
+const MAX_TOKEN_UNITS: i32 = 3 + 2 * MAX_ESCAPE_RUN
 
-// symTable, flattened. Entries 15 (€) and 24-29 (ñ á é í ó ú) are multi-byte,
-// so the table is a byte blob plus a start offset per index rather than an
-// array of characters.
-const SYM_BYTES: StaticArray<u8> = [
-  0x3c, 0x3e, 0x2f, 0x22, 0x27, 0x25, 0x23, 0x7c, 0x28, 0x29, 0x21, 0x3f, 0x24, 0x7e, 0x60,
-  0xe2, 0x82, 0xac, // €
-  0x40, 0x5c, 0x5b, 0x5d, 0x5e, 0x7b, 0x7d, 0x5f,
+/** How many units the reader keeps in hand. A token spans at most eleven, so
+ * the loop can read a whole one without a bounds test while this many are
+ * buffered, and the window refills a group at a time above it. */
+const WINDOW_UNITS: i32 = 32
+
+/** Failure codes. The decoder never throws: a packed string arrives from a wire
+ * like everything else here. */
+export const P5_OK: i32 = 0
+export const P5_TRUNCATED: i32 = 1
+export const P5_RESERVED_SYMBOL: i32 = 2
+export const P5_BAD_ESCAPE: i32 = 3
+
+export function packed5ErrorText(code: i32): string {
+  if (code == P5_TRUNCATED) return 'a packed string ends inside a token'
+  if (code == P5_RESERVED_SYMBOL) return 'a packed string names a reserved symbol index'
+  if (code == P5_BAD_ESCAPE) return 'a packed string holds a malformed raw escape'
+  return ''
+}
+
+/**
+ * The opcode 29 operand table: what a short record is made of once letters and
+ * spaces are accounted for. All 32 entries are assigned, so no operand of this
+ * opcode can be invalid.
+ */
+// @ts-ignore: decorator
+@lazy
+const SYM_TABLE: StaticArray<u8> = [
+  0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, // 0-9
+  0x2e, 0x2c, 0x2d, 0x2f, 0x3a, 0x3b, 0x5f, 0x28, 0x29, 0x25, // . , - / : ; _ ( ) %
+  0x23, 0x22, 0x27, 0x21, 0x3f, 0x40, 0x3d, 0x2b, 0x2a, 0x26, 0x3c, 0x3e, // # " ' ! ? @ = + * & < >
+]
+
+/**
+ * The opcode 30 operand table: everything else worth a token, as UTF-8.
+ *
+ * Held flattened — one byte blob and a start offset per index — because eleven
+ * of the entries are multi-byte and an array of strings would cost a header per
+ * entry for no gain. The accented characters are literals: the case mode does
+ * not apply to them, which is why both cases appear.
+ */
+// @ts-ignore: decorator
+@lazy
+const EXT_BYTES: StaticArray<u8> = [
   0xc3, 0xb1, // ñ
   0xc3, 0xa1, // á
   0xc3, 0xa9, // é
   0xc3, 0xad, // í
   0xc3, 0xb3, // ó
   0xc3, 0xba, // ú
+  0xc3, 0xbc, // ü
+  0xc3, 0x91, // Ñ
+  0xc3, 0x81, // Á
+  0xc3, 0x89, // É
+  0xc3, 0x8d, // Í
+  0xc3, 0x93, // Ó
+  0xc3, 0x9a, // Ú
+  0xe2, 0x82, 0xac, // €
+  0x24, // $
+  0x7e, // ~
+  0x60, // `
+  0x5c, // \
+  0x5b, // [
+  0x5d, // ]
+  0x5e, // ^
+  0x7b, // {
+  0x7d, // }
+  0x7c, // |
+  0x0a, // \n
+  0x09, // \t
+  0x0d, // \r
+  0xc2, 0xbf, // ¿
 ]
-const SYM_OFFSET: StaticArray<i32> = [
-  0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 19, 20, 21, 22, 23, 24, 25, 26, 28,
-  30, 32, 34, 36, 38,
+
+/** Where each EXT_TABLE entry starts in EXT_BYTES, with a final sentinel so a
+ * length is the difference between two of them. */
+// @ts-ignore: decorator
+@lazy
+const EXT_AT: StaticArray<i32> = [
+  0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+  41, 42, 44,
 ]
 
-// simpleTable. Index 15 is not a character; it is ESCAPE_CODE.
-const SIMPLE_TABLE: StaticArray<u8> = [
-  0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x2e, 0x2d, 0x2b, 0x2a, 0x3d, 0,
-]
-
-// Inverse tables for the single-byte entries. -1 means "no operand in that
-// table". The multi-byte symTable entries are matched by symbolRune instead.
-const asciiSym = new StaticArray<i8>(128)
-const asciiSimple = new StaticArray<i8>(128)
-
-function initTables(): void {
-  for (let i = 0; i < 128; i++) {
-    unchecked((asciiSym[i] = -1))
-    unchecked((asciiSimple[i] = -1))
-  }
-  for (let i: i32 = 0; i < <i32>SYM_RESERVED; i++) {
-    const start = unchecked(SYM_OFFSET[i])
-    if (unchecked(SYM_OFFSET[i + 1]) - start == 1) {
-      unchecked((asciiSym[unchecked(SYM_BYTES[start])] = <i8>i))
-    }
-  }
-  for (let i = 0; i < 16; i++) {
-    if (<u32>i != ESCAPE_CODE) unchecked((asciiSimple[unchecked(SIMPLE_TABLE[i])] = <i8>i))
-  }
+/** How many units a payload of `size` bytes holds. */
+@inline
+export function payloadUnits(size: i32): i32 {
+  return (size * 8) / 5
 }
-initTables()
+
+/** The decoder's last failure, so the caller can name it. */
+export let packed5Error: i32 = P5_OK
 
 /**
- * symTable index for a multi-byte sequence at i, or -1, with the byte width in
- * symWidth.
+ * Appends the string held by a bare payload — a unit stream with no frame
+ * header, which is the only form colbin embeds.
  *
- * Go decodes a rune here and looks it up. Matching the seven byte sequences
- * directly is exactly equivalent: each is a valid UTF-8 encoding, so Go's
- * decoder accepts precisely these and rejects everything else with w == 1.
- */
-let symWidth: i32 = 0
-
-function symbolRune(s: Uint8Array, i: i32): i32 {
-  const n = s.length
-  const c = unchecked(s[i])
-  if (c == 0xe2 && i + 2 < n && unchecked(s[i + 1]) == 0x82 && unchecked(s[i + 2]) == 0xac) {
-    symWidth = 3
-    return 15
-  }
-  if (c == 0xc3 && i + 1 < n) {
-    const d = unchecked(s[i + 1])
-    symWidth = 2
-    if (d == 0xb1) return 24
-    if (d == 0xa1) return 25
-    if (d == 0xa9) return 26
-    if (d == 0xad) return 27
-    if (d == 0xb3) return 28
-    if (d == 0xba) return 29
-  }
-  symWidth = 1
-  return -1
-}
-
-@inline function isLetter(c: u8): bool {
-  return <u8>((c | 0x20) - 0x61) < 26
-}
-
-@inline function isDigit(c: u8): bool {
-  return <u8>(c - 0x30) < 10
-}
-
-@inline function isUpper(c: u8): bool {
-  return (c & 0x20) == 0
-}
-
-@inline function letterIndex(c: u8): u32 {
-  return <u32>(c | 0x20) - 0x61
-}
-
-// symbolAt's multi-value return, as module state: it runs on every input byte in
-// both passes and a per-call allocation would dominate the encoder.
-const SYM_KIND_DASH: u8 = 0
-const SYM_KIND_SYMBOL: u8 = 1
-const SYM_KIND_SIMPLE: u8 = 2
-
-let symKind: u8 = 0
-let symPay: u32 = 0
-let symByteWidth: i32 = 0
-let symCost: i32 = 0
-
-/** Non-letter, non-space token for the byte at i. False when it must be escaped. */
-function symbolAt(s: Uint8Array, i: i32, number: bool): bool {
-  const c = unchecked(s[i])
-  if (c < 0x80) {
-    // With number mode off, opcode 31 carries '-' for 5 bits rather than the 9
-    // the simple table would charge.
-    if (!number && c == 0x2d) {
-      symKind = SYM_KIND_DASH
-      symByteWidth = 1
-      symCost = COST_DASH
-      return true
-    }
-    const sym = unchecked(asciiSym[c])
-    if (sym >= 0) {
-      symKind = SYM_KIND_SYMBOL
-      symPay = <u32>sym
-      symByteWidth = 1
-      symCost = COST_SYMBOL
-      return true
-    }
-    const simple = unchecked(asciiSimple[c])
-    if (simple >= 0) {
-      symKind = SYM_KIND_SIMPLE
-      symPay = <u32>simple
-      symByteWidth = 1
-      symCost = COST_SIMPLE
-      return true
-    }
-    return false
-  }
-  const idx = symbolRune(s, i)
-  if (idx >= 0) {
-    symKind = SYM_KIND_SYMBOL
-    symPay = <u32>idx
-    symByteWidth = symWidth
-    symCost = COST_SYMBOL
-    return true
-  }
-  return false
-}
-
-/** Whether the byte at i has no token of its own. */
-function mustEscape(s: Uint8Array, i: i32, number: bool): bool {
-  const c = unchecked(s[i])
-  if (isLetter(c) || c == 0x20) return false
-  return !symbolAt(s, i, number)
-}
-
-/** The greedy walk, emitting each token as bits at the point it is decided. */
-function writeStream(bw: BitWriter, s: Uint8Array, upper: bool, number: bool): void {
-  const n = s.length
-  let cur = upper
-  let i = 0
-  while (i < n) {
-    const c = unchecked(s[i])
-
-    if (isLetter(c)) {
-      const isUp = isUpper(c)
-      const idx = letterIndex(c)
-      if (isUp == cur) {
-        bw.writeBits(idx, 5)
-        i++
-        continue
-      }
-      // Two simple toggles cost what a pair of long ones does, so the long form
-      // only wins from three.
-      let run = 0
-      for (let j = i; j < n && isLetter(unchecked(s[j])) && isUpper(unchecked(s[j])) != cur; j++) {
-        run++
-      }
-      if (run >= 3) {
-        bw.writeBits(OP_CASE_LONG, 5)
-        cur = !cur
-        continue // re-read the letter, now in the matching mode
-      }
-      bw.writeBits(OP_CASE_SIMPLE, 5)
-      bw.writeBits(idx, 5)
-      i++
-      continue
-    }
-
-    if (c == 0x20) {
-      bw.writeBits(OP_SPACE, 5)
-      i++
-      continue
-    }
-
-    if (number && isDigit(c)) {
-      // The longest prefix that fits in ten bits. A token may not carry a
-      // leading zero: it decodes as a plain decimal integer, so "00123" must not
-      // come back as "123". A lone "0" is fine.
-      let v = 0
-      let best = 0
-      let bestLen = 0
-      for (let l = 1; l <= NUMBER_MAX_DIGITS && i + l <= n; l++) {
-        const d = unchecked(s[i + l - 1])
-        if (!isDigit(d) || (l > 1 && unchecked(s[i]) == 0x30)) break
-        v = v * 10 + <i32>(d - 0x30)
-        if (v > NUMBER_MAX) break
-        best = v
-        bestLen = l
-      }
-      if (bestLen == 1) {
-        bw.writeBits(OP_SIMPLE, 5)
-        bw.writeBits(<u32>unchecked(asciiSimple[c]), 4)
-      } else {
-        bw.writeBits(OP_NUMBER, 5)
-        bw.writeBits(<u32>best, 10)
-      }
-      i += bestLen
-      continue
-    }
-
-    if (symbolAt(s, i, number)) {
-      const kind = symKind
-      const pay = symPay
-      const width = symByteWidth
-      if (kind == SYM_KIND_DASH) {
-        bw.writeBits(OP_NUMBER, 5)
-      } else if (kind == SYM_KIND_SYMBOL) {
-        bw.writeBits(OP_SYMBOL, 5)
-        bw.writeBits(pay, 5)
-      } else {
-        bw.writeBits(OP_SIMPLE, 5)
-        bw.writeBits(pay, 4)
-      }
-      i += width
-      continue
-    }
-
-    let run = 1
-    while (run < MAX_ESCAPE_RUN && i + run < n && mustEscape(s, i + run, number)) run++
-    bw.writeBits(OP_SIMPLE, 5)
-    bw.writeBits(ESCAPE_CODE, 4)
-    bw.writeBits(<u32>run - 1, 2)
-    for (let k = 0; k < run; k++) bw.writeBits(<u32>unchecked(s[i + k]), 8)
-    i += run
-  }
-}
-
-// plan's three results, as module state for the same reason symbolAt's are.
-let planBits: i32 = 0
-let planUpper: bool = false
-let planNumber: bool = false
-
-/**
- * Exact greedy-scan cost for all four flag settings in one pass.
+ * `src` must begin at the payload and may run past it; whatever follows is free
+ * slack for the group loader. `size` is the payload's byte length, which the
+ * BLOB descriptor around it already carries. `upper` is the case mode the stream
+ * opens in, which the descriptor's `enc` code says.
  *
- * The flags are not guessed: UPPERCASE_DOMINANT and ENABLE_NUMBER_0_1023 change
- * what the scan emits. Counting letters to pick the dominant case is the obvious
- * shortcut and it is wrong often enough to matter — what decides it is the
- * number of case *runs*.
+ * Returns false with packed5Error set. It never traps: the group loader reads
+ * through gather8, which stops at the end of the buffer rather than past it, so
+ * a truncated payload is short units rather than adjacent memory.
  */
-function plan(s: Uint8Array): void {
-  const n = s.length
-  let lowerCaseBits = 0
-  let upperCaseBits = 0
-  let lowerMode = false
-  let upperMode = true
-  let plainBits = 0
-  let numberBits = 0
-
-  let i = 0
-  while (i < n) {
-    const c = unchecked(s[i])
-
-    if (isLetter(c)) {
-      const runUpper = isUpper(c)
-      let j = i + 1
-      while (j < n && isLetter(unchecked(s[j])) && isUpper(unchecked(s[j])) == runUpper) j++
-      const run = j - i
-
-      if (runUpper == lowerMode) {
-        lowerCaseBits += COST_LETTER * run
-      } else if (run >= 3) {
-        lowerCaseBits += COST_TOGGLE_LONG + COST_LETTER * run
-        lowerMode = runUpper
-      } else {
-        lowerCaseBits += COST_LETTER_CASED * run
-      }
-
-      if (runUpper == upperMode) {
-        upperCaseBits += COST_LETTER * run
-      } else if (run >= 3) {
-        upperCaseBits += COST_TOGGLE_LONG + COST_LETTER * run
-        upperMode = runUpper
-      } else {
-        upperCaseBits += COST_LETTER_CASED * run
-      }
-      i = j
-      continue
-    }
-
-    if (c == 0x20) {
-      plainBits += COST_SPACE
-      numberBits += COST_SPACE
-      i++
-      continue
-    }
-
-    if (isDigit(c)) {
-      let j = i + 1
-      while (j < n && isDigit(unchecked(s[j]))) j++
-      plainBits += COST_SIMPLE * (j - i)
-      while (i < j) {
-        let v = 0
-        let bestLen = 0
-        for (let l = 1; l <= NUMBER_MAX_DIGITS && i + l <= j; l++) {
-          if (l > 1 && unchecked(s[i]) == 0x30) break
-          v = v * 10 + <i32>(unchecked(s[i + l - 1]) - 0x30)
-          if (v > NUMBER_MAX) break
-          bestLen = l
-        }
-        if (bestLen == 1) numberBits += COST_SIMPLE
-        else numberBits += COST_NUMBER
-        i += bestLen
-      }
-      continue
-    }
-
-    if (symbolAt(s, i, false)) {
-      plainBits += symCost
-      if (c == 0x2d) numberBits += COST_SIMPLE
-      else numberBits += symCost
-      i += symByteWidth
-      continue
-    }
-
-    let run = 1
-    while (run < MAX_ESCAPE_RUN && i + run < n && mustEscape(s, i + run, false)) run++
-    const cost = COST_ESCAPE_BASE + COST_ESCAPE_BYTE * run
-    plainBits += cost
-    numberBits += cost
-    i += run
-  }
-
-  planBits = lowerCaseBits + plainBits
-  planUpper = false
-  planNumber = false
-  let candidate = upperCaseBits + plainBits
-  if (candidate < planBits) {
-    planBits = candidate
-    planUpper = true
-  }
-  candidate = lowerCaseBits + numberBits
-  if (candidate < planBits) {
-    planBits = candidate
-    planUpper = false
-    planNumber = true
-  }
-  candidate = upperCaseBits + numberBits
-  if (candidate < planBits) {
-    planBits = candidate
-    planUpper = true
-    planNumber = true
-  }
-}
-
-@inline function payloadBytes(bits: i32): i32 {
-  return (<i32>PAD_BITS_WIDTH + bits + 7) / 8
-}
-
-@inline function uvarintLen(v: i32): i32 {
-  let n = 1
-  while (v >= 0x80) {
-    v >>= 7
-    n++
-  }
-  return n
-}
-
-function appendUvarint(w: Writer, v: i32): void {
-  while (v >= 0x80) {
-    w.writeByte(<u8>(v | 0x80))
-    v >>= 7
-  }
-  w.writeByte(<u8>v)
-}
-
-@inline function frameOverhead(n: i32): i32 {
-  return n <= LEN_INLINE ? 1 : 1 + uvarintLen(n)
-}
-
-function appendHeader(w: Writer, flags: u8, payloadLen: i32): void {
-  if (payloadLen <= LEN_INLINE) {
-    w.writeByte(flags | (<u8>payloadLen << LEN_SHIFT))
-    return
-  }
-  w.writeByte(flags | (<u8>LEN_ESCAPE << LEN_SHIFT))
-  appendUvarint(w, payloadLen)
-}
-
-/**
- * Encodes s as one self-delimiting frame appended to w.
- *
- * The packed form is used only when its frame is strictly smaller than the raw
- * one, so this never inflates: the result is never longer than s plus framing.
- */
-export function append(w: Writer, s: Uint8Array): void {
-  if (s.length == 0) {
-    w.writeByte(0) // raw, empty payload
-    return
-  }
-  plan(s)
-  const payload = payloadBytes(planBits)
-  if (frameOverhead(payload) + payload >= frameOverhead(s.length) + s.length) {
-    appendHeader(w, 0, s.length)
-    w.writeBytes(s, 0, s.length)
-    return
-  }
-
-  let flags = FLAG_PACKED5
-  if (planUpper) flags |= FLAG_UPPERCASE
-  if (planNumber) flags |= FLAG_NUMBER
-  appendHeader(w, flags, payload)
-
-  const bw = new BitWriter(w)
-  bw.writeBits(<u32>(payload * 8 - <i32>PAD_BITS_WIDTH - planBits), PAD_BITS_WIDTH)
-  writeStream(bw, s, planUpper, planNumber)
-  bw.flush()
-}
-
-/** Bytes append() would add for s, without encoding it. */
-export function size(s: Uint8Array): i32 {
-  if (s.length == 0) return 1
-  plan(s)
-  const payload = payloadBytes(planBits)
-  const raw = frameOverhead(s.length) + s.length
-  const packed = frameOverhead(payload) + payload
-  return packed < raw ? packed : raw
-}
-
-/** Reads an LEB128 length, rejecting overlong forms and impossible values. */
-function readUvarint(r: Reader): i32 {
-  let v: u64 = 0
-  let shift: u32 = 0
-  for (let i = 0; i < 9; i++) {
-    const b = r.readByte()
-    if (!r.ok) return -1
-    v |= (<u64>(b & 0x7f)) << shift
-    if (b < 0x80) {
-      if (v > <u64>0x7fffffff) {
-        r.fail(ERR_CORRUPT)
-        return -1
-      }
-      return <i32>v
-    }
-    shift += 7
-  }
-  r.fail(ERR_CORRUPT)
-  return -1
-}
-
-/**
- * Decodes one frame from r, appending the decoded bytes to out.
- * Returns false with r.err set on failure.
- */
-export function decode(r: Reader, out: Writer): bool {
-  const hdr = r.readByte()
-  if (!r.ok) return false
-
-  let length = <i32>(hdr >> LEN_SHIFT)
-  if (length == LEN_ESCAPE) {
-    const v = readUvarint(r)
-    if (v < 0) return false
-    // The escape must not re-encode a length the header could have held: one
-    // length has one encoding, so a frame has one byte representation.
-    if (v <= LEN_INLINE) {
-      r.fail(ERR_CORRUPT)
-      return false
-    }
-    length = v
-  }
-  if (!r.has(length)) return false
-
-  const start = r.pos
-  r.pos += length
-
-  if ((hdr & FLAG_PACKED5) == 0) {
-    out.writeBytes(r.buf, start, length)
-    return true
-  }
-  return decodeStream(r, out, start, length, (hdr & FLAG_UPPERCASE) != 0, (hdr & FLAG_NUMBER) != 0)
-}
-
-/**
- * Walks the packed bitstream.
- *
- * A pending simple toggle is cleared only by a letter, and a long toggle leaves
- * it alone. The encoder emits CASE_TOGGLE_SIMPLE only immediately before the
- * letter it applies to, so neither case arises in a frame this codec wrote; they
- * are defined so a hand-built or corrupt stream decodes deterministically rather
- * than by accident.
- */
-function decodeStream(
-  r: Reader,
+export function appendString(
   out: Writer,
-  start: i32,
-  length: i32,
+  src: Uint8Array,
+  from: i32,
+  size: i32,
   upper: bool,
-  number: bool
 ): bool {
-  const br = new BitReader(r.buf, start, length)
-  const pad = br.read(PAD_BITS_WIDTH)
-  if (!br.ok) {
-    r.fail(ERR_TRUNCATED)
+  packed5Error = P5_OK
+  if (from < 0 || size < 0 || from + size > src.length) {
+    packed5Error = P5_TRUNCATED
     return false
   }
-  if (<i32>pad > br.remaining) {
-    r.fail(ERR_CORRUPT)
-    return false
-  }
-  br.limit -= <i32>pad
+
+  const units = payloadUnits(size)
+  const win = new StaticArray<u8>(WINDOW_UNITS + 8)
+  let pos = 0
+  let have = 0
+  let got = 0
+  let at = from
 
   let cur = upper
   let pending = false
 
-  while (br.remaining >= 5) {
-    const op = br.read(5)
-    if (!br.ok) {
-      r.fail(ERR_TRUNCATED)
-      return false
+  while (true) {
+    if (have - pos < MAX_TOKEN_UNITS && got < units) {
+      // Compact what is left of the window down, then refill a group at a time.
+      let kept = 0
+      for (let index = pos; index < have; index++) {
+        unchecked((win[kept++] = unchecked(win[index])))
+      }
+      have = kept
+      pos = 0
+      while (have + 8 <= WINDOW_UNITS + 8 && got < units) {
+        const word = gather8(src, at)
+        unchecked((win[have + 0] = <u8>word & 31))
+        unchecked((win[have + 1] = <u8>(word >> 5) & 31))
+        unchecked((win[have + 2] = <u8>(word >> 10) & 31))
+        unchecked((win[have + 3] = <u8>(word >> 15) & 31))
+        unchecked((win[have + 4] = <u8>(word >> 20) & 31))
+        unchecked((win[have + 5] = <u8>(word >> 25) & 31))
+        unchecked((win[have + 6] = <u8>(word >> 30) & 31))
+        unchecked((win[have + 7] = <u8>(word >> 35) & 31))
+        have += 8
+        got += 8
+        at += 5
+      }
+      if (got > units) {
+        // The final group overshoots the payload; those units are not real.
+        have -= got - units
+        got = units
+      }
     }
+    if (pos >= have) break
+
+    const op = unchecked(win[pos])
+    pos++
 
     if (op < OP_SPACE) {
-      // Uppercase exactly when the mode and a pending toggle disagree.
-      const base: u8 = cur != pending ? 0x41 : 0x61
-      out.writeByte(base + <u8>op)
+      // Uppercase exactly when the two disagree: a simple toggle inverts the
+      // mode for this letter only, and a letter is what clears it.
+      out.writeByte(cur != pending ? 0x41 + op : 0x61 + op)
       pending = false
       continue
     }
@@ -591,72 +249,77 @@ function decodeStream(
       continue
     }
     if (op == OP_SYMBOL) {
-      const idx = br.read(5)
-      if (!br.ok) {
-        r.fail(ERR_TRUNCATED)
+      if (pos >= have) {
+        packed5Error = P5_TRUNCATED
         return false
       }
-      if (idx >= SYM_RESERVED) {
-        r.fail(ERR_CORRUPT)
-        return false
-      }
-      const from = unchecked(SYM_OFFSET[idx])
-      const to = unchecked(SYM_OFFSET[idx + 1])
-      for (let k = from; k < to; k++) out.writeByte(unchecked(SYM_BYTES[k]))
+      out.writeByte(unchecked(SYM_TABLE[unchecked(win[pos])]))
+      pos++
       continue
     }
-    if (op == OP_SIMPLE) {
-      const v = br.read(4)
-      if (!br.ok) {
-        r.fail(ERR_TRUNCATED)
+    if (op == OP_EXT) {
+      if (pos >= have) {
+        packed5Error = P5_TRUNCATED
         return false
       }
-      if (v != ESCAPE_CODE) {
-        out.writeByte(unchecked(SIMPLE_TABLE[v]))
-        continue
-      }
-      const cnt = br.read(2)
-      if (!br.ok) {
-        r.fail(ERR_TRUNCATED)
-        return false
-      }
-      for (let k: u32 = 0; k <= cnt; k++) {
-        const b = br.read(8)
-        if (!br.ok) {
-          r.fail(ERR_TRUNCATED)
+      const index = unchecked(win[pos])
+      pos++
+      if (index != EXT_ESCAPE) {
+        if (index >= EXT_RESERVED) {
+          packed5Error = P5_RESERVED_SYMBOL
           return false
         }
-        out.writeByte(<u8>b)
+        const start = unchecked(EXT_AT[index])
+        const end = unchecked(EXT_AT[index + 1])
+        for (let byte = start; byte < end; byte++) out.writeByte(unchecked(EXT_BYTES[byte]))
+        continue
+      }
+      // A raw-byte escape: a count, then two units per byte. It carries bytes
+      // rather than runes, which is what makes the codec byte-exact for input
+      // that is not valid UTF-8.
+      if (pos >= have) {
+        packed5Error = P5_TRUNCATED
+        return false
+      }
+      const count = <i32>unchecked(win[pos]) + 1
+      pos++
+      if (count > MAX_ESCAPE_RUN) {
+        packed5Error = P5_BAD_ESCAPE
+        return false
+      }
+      if (pos + 2 * count > have) {
+        packed5Error = P5_TRUNCATED
+        return false
+      }
+      for (let index = 0; index < count; index++) {
+        const low = unchecked(win[pos])
+        const high = unchecked(win[pos + 1])
+        if (high > 7) {
+          // A byte is eight bits: five and three.
+          packed5Error = P5_BAD_ESCAPE
+          return false
+        }
+        out.writeByte(low | (high << 5))
+        pos += 2
       }
       continue
     }
-
-    // OP_NUMBER
-    if (!number) {
-      out.writeByte(0x2d)
-      continue
-    }
-    const v = br.read(10)
-    if (!br.ok) {
-      r.fail(ERR_TRUNCATED)
+    // OP_NUMBER: two units, low five bits first, 0..1023 as decimal.
+    if (pos + 2 > have) {
+      packed5Error = P5_TRUNCATED
       return false
     }
-    writeDecimal(out, v)
-  }
-
-  // Fewer than 5 bits left is the stream's end. Anything else is a token the
-  // pad count did not account for, which the encoder cannot produce.
-  if (br.remaining != 0) {
-    r.fail(ERR_TRUNCATED)
-    return false
+    const value = <u32>unchecked(win[pos]) | (<u32>unchecked(win[pos + 1]) << 5)
+    pos += 2
+    writeDecimal(out, value)
   }
   return true
 }
 
-/** v as decimal digits, v <= 1023. */
-function writeDecimal(out: Writer, v: u32): void {
-  if (v >= 1000) out.writeByte(<u8>(0x30 + v / 1000))
-  if (v >= 100) out.writeByte(<u8>(0x30 + (v / 100) % 10))
-  if (v >= 10) out.writeByte(<u8>(0x30 + (v / 10) % 10))
-  out.writeByte(<u8>(0x30 + (v % 10)))
+/** `value` as decimal digits, value <= 1023. */
+function writeDecimal(out: Writer, value: u32): void {
+  if (value >= 1000) out.writeByte(0x30 + <u8>(value / 1000))
+  if (value >= 100) out.writeByte(0x30 + <u8>((value / 100) % 10))
+  if (value >= 10) out.writeByte(0x30 + <u8>((value / 10) % 10))
+  out.writeByte(0x30 + <u8>(value % 10))
 }

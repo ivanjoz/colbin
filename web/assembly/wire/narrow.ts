@@ -24,6 +24,7 @@
 
 import { Reader, Writer } from '../bytes'
 import { decodeArray } from '../column'
+import { appendString } from '../packed5'
 import {
   ARRAY_POSITIVE_FLAG,
   ARRAY_WIDTH_SHIFT,
@@ -31,6 +32,10 @@ import {
   ESCAPE_2_BYTES,
   ESCAPE_4_BYTES,
   ESCAPE_8_BYTES,
+  ESCAPE_PACKED_1_LO,
+  ESCAPE_PACKED_1_UP,
+  ESCAPE_PACKED_4_LO,
+  ESCAPE_PACKED_4_UP,
   INT_POSITIVE_FLAG,
   LENGTH_WIDTH,
   MAGNITUDE_WIDTH,
@@ -43,6 +48,7 @@ import {
   UINT_WIDTH_BASE,
   W_BAD_COLUMN,
   W_BAD_ESCAPE,
+  W_BAD_PACKED,
   W_NO_SKIP,
   W_OK,
   W_SIZE_TOO_LARGE,
@@ -234,6 +240,110 @@ export class NarrowReader {
   }
 
   // ---- blobs ----------------------------------------------------------------
+
+  /**
+   * A string field, packed or raw — the header's escape code says which, so a
+   * reader needs no configuration and cannot be wrong about it.
+   *
+   * Returns the bytes directly when they are raw, which is the overwhelmingly
+   * common case and costs nothing beyond `bytes()`. A packed payload is expanded
+   * into `out` and the caller takes it from there, because there is nothing in
+   * the message to hand back a view of.
+   */
+  packedString(out: Writer): Uint8Array {
+    this.packedIntoOut = false
+    const size = this.stringSpan()
+    if (!this.ok) return new Uint8Array(0)
+    const start = this.blobStart
+    this.at = start + size
+    if (!this.stringIsPacked) return this.buf.subarray(start, start + size)
+
+    const from = out.len
+    if (!appendString(out, this.buf, start, size, this.stringIsUpper)) {
+      this.fail(W_BAD_PACKED)
+      return new Uint8Array(0)
+    }
+    this.packedIntoOut = true
+    this.packedFrom = from
+    return new Uint8Array(0)
+  }
+
+  /**
+   * Steps over a string field of either encoding without expanding it, which is
+   * what a walk that wants the *span* rather than the characters needs.
+   *
+   * It exists because the alternative was the bug this port found in Go's own
+   * schema walk: reading a string with `bytes()` works right up until the string
+   * is packed, and then refuses a message the writer produced.
+   */
+  skipString(): void {
+    const size = this.stringSpan()
+    if (!this.ok) return
+    this.at = this.blobStart + size
+  }
+
+  /**
+   * A string field's header, of either encoding, leaving the payload's size and
+   * `blobStart` behind it.
+   *
+   * A packed string names itself through the blob header's escape codes, because
+   * a narrow descriptor has no `enc` field — under four key bits the schema says
+   * what a field is, not the wire. The one thing the schema cannot know is the
+   * case mode the unit stream opens in, so the escape carries that.
+   */
+  private stringSpan(): i32 {
+    this.stringIsPacked = false
+    this.stringIsUpper = false
+    const header = this.header()
+    if (!this.ok) return 0
+
+    const code = header & 0b111
+    const narrowSize = code == ESCAPE_PACKED_1_LO || code == ESCAPE_PACKED_1_UP
+    const wideSize = code == ESCAPE_PACKED_4_LO || code == ESCAPE_PACKED_4_UP
+    if ((header & MORE_SIZE_FLAG) == 0 || (!narrowSize && !wideSize)) {
+      // A raw blob. blobSize leaves the size unchecked against the buffer,
+      // because bytes() is what checks it — so this has to, or a truncated
+      // message would hand back a span running past the end of itself.
+      const size = this.blobSize()
+      if (!this.ok) return 0
+      if (size > this.buf.length - this.blobStart) {
+        this.fail(W_TRUNCATED)
+        return 0
+      }
+      return size
+    }
+
+    const width = narrowSize ? 1 : 4
+    if (this.at + 1 + width > this.buf.length) {
+      this.fail(W_TRUNCATED)
+      return 0
+    }
+    const size = <i32>leUintAt(this.buf, this.at + 1, width)
+    // One size has one encoding: a four-byte length that would have fitted in
+    // one byte is a frame this writer cannot produce, so it is refused rather
+    // than read.
+    if (wideSize && size <= 0xff) {
+      this.fail(W_BAD_ESCAPE)
+      return 0
+    }
+    const start = this.at + 1 + width
+    if (size > this.buf.length - start) {
+      this.fail(W_TRUNCATED)
+      return 0
+    }
+    this.blobStart = start
+    this.stringIsPacked = true
+    this.stringIsUpper = code == ESCAPE_PACKED_1_UP || code == ESCAPE_PACKED_4_UP
+    return size
+  }
+
+  private stringIsPacked: bool = false
+  private stringIsUpper: bool = false
+
+  /** Whether the last packedString expanded into the writer rather than
+   * returning a view, and where in it the expansion began. */
+  packedIntoOut: bool = false
+  packedFrom: i32 = 0
 
   /** The field's bytes, as a view onto the message rather than a copy. */
   bytes(): Uint8Array {

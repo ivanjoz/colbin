@@ -26,6 +26,7 @@
 // could run the stack out. The bound is the same 128 Go uses — far past anything
 // a real record nests and far short of anything that hurts.
 
+import { Writer } from './bytes'
 import { JSONSink } from './jsontext'
 import {
   MAP_BOOL,
@@ -92,6 +93,9 @@ export class Walker {
   to: JSONSink
   error: string = ''
   private depth: i32 = 0
+  /** Where a packed string is expanded to. One buffer for the whole walk,
+   * rewound after every field. */
+  private scratch: Writer = new Writer(256)
 
   constructor(to: JSONSink) {
     this.to = to
@@ -329,7 +333,7 @@ export class Walker {
     } else if (op == OP_FLOAT64) {
       this.to.float(reader.f64(), 64)
     } else if (op == OP_STRING) {
-      this.to.textBytes(reader.bytes())
+      this.narrowText(reader)
     } else if (op == OP_BYTES) {
       this.to.blob(reader.bytes())
     } else if (op == OP_STRINGS) {
@@ -340,6 +344,38 @@ export class Walker {
       this.unwalkable(op)
     }
     if (!reader.ok) this.failWire(reader.err)
+  }
+
+  /**
+   * A string field, packed or raw, at either key width.
+   *
+   * Which one it is comes off the wire — an escape code under four-bit keys, the
+   * descriptor's `enc` under eight — so packed5 costs this path no setting and
+   * cannot be got wrong. A packed payload has no bytes in the message to hand
+   * back a view of, because the characters only exist once the unit stream is
+   * expanded, so it goes into the walk's scratch and is read back from there.
+   *
+   * The scratch is rewound after every field rather than reallocated: a column
+   * of packed names would otherwise keep every value it had already rendered.
+   */
+  private narrowText(reader: NarrowReader): void {
+    const from = this.scratch.len
+    const raw = reader.packedString(this.scratch)
+    if (reader.ok) {
+      if (reader.packedIntoOut) this.to.textScratch(this.scratch, reader.packedFrom)
+      else this.to.textBytes(raw)
+    }
+    this.scratch.len = from
+  }
+
+  private wideText(reader: WideReader): void {
+    const from = this.scratch.len
+    const raw = reader.packedString(this.scratch)
+    if (reader.ok) {
+      if (reader.packedIntoOut) this.to.textScratch(this.scratch, reader.packedFrom)
+      else this.to.textBytes(raw)
+    }
+    this.scratch.len = from
   }
 
   wideValue(reader: WideReader, field: PlanField): void {
@@ -375,14 +411,7 @@ export class Walker {
     } else if (op == OP_FLOAT64) {
       this.to.float(reader.f64(), 64)
     } else if (op == OP_STRING) {
-      // packed5 is on its way out (REFACTOR_PLAN.md §4), so a packed blob is
-      // named rather than decoded: a wrong string is worse than a clear refusal,
-      // and Packed5 is off by default in Go so nothing ordinary reaches this.
-      if (reader.blobEncoding() != 0) {
-        this.fail('colbin: this build does not read packed strings; encode with Packed5 off')
-        return
-      }
-      this.to.textBytes(reader.bytes())
+      this.wideText(reader)
     } else if (op == OP_BYTES) {
       this.to.blob(reader.bytes())
     } else if (op == OP_STRINGS) {

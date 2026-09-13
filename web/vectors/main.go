@@ -141,6 +141,30 @@ type Wide struct {
 	Far   int64  `cb:"200"`
 }
 
+// Packed is what the opt-in string encoding is for: short strings of letters,
+// digits and Spanish accents. Every id is under sixteen, so the run is narrow —
+// packed5 no longer forces the wide key, which is what makes the narrow blob
+// header's escape codes worth having.
+type Packed struct {
+	Name    string `cb:"0"`
+	SKU     string `cb:"1"`
+	City    string `cb:"2"`
+	Note    string `cb:"3"`
+	Mixed   string `cb:"4"`
+	Raw     string `cb:"5"`
+	Upper   string `cb:"6"`
+	Numbers string `cb:"7"`
+}
+
+// PackedWide is Packed with an id past fifteen, so the same strings travel under
+// eight-bit keys and through the descriptor's enc field rather than the blob
+// header's escape codes.
+type PackedWide struct {
+	Name string `cb:"0"`
+	SKU  string `cb:"1"`
+	Far  string `cb:"200"`
+}
+
 // Nested is a struct inside a struct, which stays a key run rather than
 // becoming anything columnar.
 type Nested struct {
@@ -249,8 +273,12 @@ type vectors struct {
 	Strings []stringFrame `json:"strings"`
 	Columns []columnCase  `json:"columns"`
 	Types   []typeCase    `json:"types"`
-	Numbers []numberCase  `json:"numbers"`
-	Texts   []textCase    `json:"texts"`
+	// Packed is types() again with the opt-in string encoding on. Separate
+	// because Packed5 is a process-wide writer setting: one list cannot hold
+	// both, and the ordinary one must be what an ordinary service sends.
+	Packed  []typeCase   `json:"packed"`
+	Numbers []numberCase `json:"numbers"`
+	Texts   []textCase   `json:"texts"`
 }
 
 func main() {
@@ -279,6 +307,7 @@ func build() vectors {
 		Strings: stringFrames(),
 		Columns: columns(),
 		Types:   types(),
+		Packed:  packedTypes(),
 		Numbers: numberCases(),
 		Texts:   textCases(),
 	}
@@ -584,6 +613,50 @@ func types() []typeCase {
 		describe("corpus-sale-list", "a sale whose detail is under the table threshold", shortSale),
 		describe("corpus-sale-table", "a sale whose detail is transposed into columns", longSale),
 	}
+}
+
+// packedTypes is the same shape as types(), with the opt-in string encoding on.
+//
+// It is a separate list because Packed5 is a *writer* setting and a process-wide
+// one: turning it on changes what every string field in the corpus would encode
+// to, so the ordinary cases are generated with it off — which is Go's default
+// and what an ordinary service sends — and these are generated with it on.
+//
+// The decoder needs no setting either way. The encoding is in each string's own
+// descriptor, which is the whole point of choosing it per field.
+func packedTypes() []typeCase {
+	colbin.SetPacked5(true)
+	defer colbin.SetPacked5(false)
+
+	out := []typeCase{
+		describe("packed-narrow", "the opt-in encoding under four-bit keys, through the blob header's escapes", &Packed{
+			Name:    "Tin Light",
+			SKU:     "SKU-00042",
+			City:    "Arequipa",
+			Note:    "el niño comió jamón",
+			Mixed:   "Order #128: 3 items, 45% off",
+			Raw:     "\x00\x01\xff\xfe",
+			Upper:   "MEXICO CITY",
+			Numbers: "1023 512 7",
+		}),
+		describe("packed-wide", "the same strings under eight-bit keys, through the descriptor's enc", &PackedWide{
+			Name: "Steel Lamp",
+			SKU:  "SKU-99999",
+			Far:  "a string under a key past fifteen",
+		}),
+		describe("packed-long", "a payload past the one-byte size, so the four-byte escape is used", &Packed{
+			Name: strings.Repeat("the quick brown fox jumps over the lazy dog ", 12),
+			SKU:  strings.Repeat("ABCDEFGH", 40),
+		}),
+		describe("packed-unpackable", "strings the packed form would not shrink, written raw beside packed ones", &Packed{
+			Name: "\x00\x01\x02\x03\x04\x05\x06\x07",
+			SKU:  "Tin Light",
+		}),
+		describe("packed-empty", "an empty string is not written at all, packed or not", &Packed{SKU: "a"}),
+		describe("packed-corpus-user", "a real record with the encoding on", &corpus.Generate(corpus.Seed, corpus.Small).Users[0]),
+		describe("packed-corpus-product", "strings and an array of them, with the encoding on", &corpus.Generate(corpus.Seed, corpus.Small).Products[0]),
+	}
+	return out
 }
 
 // describe runs one value through everything a reader without the Go type

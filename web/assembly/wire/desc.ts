@@ -25,6 +25,8 @@ export const W_BAD_ESCAPE: i32 = 3
 export const W_BAD_DESCRIPTOR: i32 = 4
 export const W_NO_SKIP: i32 = 5
 export const W_BAD_COLUMN: i32 = 6
+export const W_BAD_PACKED: i32 = 7
+export const W_UNSUPPORTED_ENC: i32 = 8
 
 export function wireErrorText(code: i32): string {
   if (code == W_TRUNCATED) return 'the message ends inside a field'
@@ -33,6 +35,8 @@ export function wireErrorText(code: i32): string {
   if (code == W_BAD_DESCRIPTOR) return 'unassigned or mismatched descriptor'
   if (code == W_NO_SKIP) return 'a four-bit-keyed field cannot be skipped without knowing its type'
   if (code == W_BAD_COLUMN) return 'a column is corrupt'
+  if (code == W_BAD_PACKED) return 'a packed string is corrupt'
+  if (code == W_UNSUPPORTED_ENC) return 'a string encoding this version does not assign'
   return ''
 }
 
@@ -106,6 +110,29 @@ export const UINT_WIDTH_BASE: u8 = 8
 export const ESCAPE_2_BYTES: u8 = 0
 export const ESCAPE_4_BYTES: u8 = 1
 export const ESCAPE_8_BYTES: u8 = 2
+
+/**
+ * The packed5 escapes.
+ *
+ * A narrow blob header has no `enc` field — under four-bit keys the schema says
+ * what a field is, not the wire — so a packed string names itself here instead,
+ * and carries the one bit the schema cannot know: the case mode its unit stream
+ * opens in. Spending four codes on it buys a two-byte header, the same as a raw
+ * blob's, where a separate flag byte would have cost three.
+ */
+export const ESCAPE_PACKED_1_LO: u8 = 3
+export const ESCAPE_PACKED_1_UP: u8 = 4
+export const ESCAPE_PACKED_4_LO: u8 = 5
+export const ESCAPE_PACKED_4_UP: u8 = 6
+
+/**
+ * The BLOB descriptor's `enc` codes, in bits 3-2 of an eight-bit-keyed
+ * descriptor. Code 2 is reserved for a column dictionary and is never written.
+ */
+export const ENC_RAW: u8 = 0
+export const ENC_PACKED5: u8 = 1
+export const ENC_DICTIONARY: u8 = 2
+export const ENC_PACKED5_UP: u8 = 3
 
 /** The largest element length a list writes in one byte; 0xFF escapes to four. */
 export const INLINE_ELEMENT_SIZE: i32 = 0xfe

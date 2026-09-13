@@ -319,7 +319,7 @@ Two hazards are worth naming because each was found rather than foreseen:
 |---|---|---|
 | integers, bool | yes | int64 / uint64 / bool |
 | floats | yes | float64 |
-| strings | yes | raw; see §10 |
+| strings | yes | raw. The module *reads* the packed encoding but does not write it — §10 |
 | nested structs | yes | |
 | slices of structs | yes | list or table, decided per field on the row count |
 | integer and string arrays | yes | |
@@ -475,13 +475,18 @@ less dependency and one less config file.
 
 ## 10. What is still open
 
-**Strings.** `packed5/` is being replaced by `experiments/stringpack`'s `u5b`,
-and that reaches past the codec into the blob descriptor, so nothing about string
-packing is ported: `packed5.ts` and `bitstream.ts` sit in the tree unimported,
-which costs nothing in the `.wasm`. The encoder writes raw strings; the decoder
-refuses a packed blob by name rather than guessing. Packed5 is off by default in
-Go, so nothing an ordinary service sends is affected. `REFACTOR_PLAN.md` §4 has
-the detail and phase 7 is the work.
+**The packed string writer.** The module reads the opt-in encoding at both key
+widths — which encoding a field used comes off the wire, so nothing is
+configured — and writes raw.
+
+That asymmetry is the right way round rather than an unfinished edge. `Packed5()`
+is off by default in Go, so nothing an ordinary service sends is packed and a
+module that writes raw interoperates with everything; the *reader* is what a
+caller cannot do without, because a service that turned the encoding on to save
+bytes would otherwise be unreadable. The writer is the larger half — a greedy
+tokeniser over five operand tables, a case-mode hoist, a number opcode, a raw
+escape and a never-inflate fallback — and buys the module nothing it can use
+today. `REFACTOR_PLAN.md` §4.5 is the longer version.
 
 **The npm package.** `@ivanjoz/colbin`, which is the point of the port: a
 JavaScript client of a Go service answering in colbin currently has no way to

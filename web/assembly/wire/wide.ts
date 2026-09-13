@@ -21,6 +21,7 @@
 
 import { Reader, Writer } from '../bytes'
 import { decodeArray } from '../column'
+import { appendString } from '../packed5'
 import {
   CLASS_BLOB,
   CLASS_COL,
@@ -32,6 +33,9 @@ import {
   CLASS_VEC,
   DESC_EXPLICIT,
   ELEMENT_SIZE_ESCAPE,
+  ENC_DICTIONARY,
+  ENC_PACKED5_UP,
+  ENC_RAW,
   INT_POSITIVE_FLAG,
   LENGTH_WIDTH,
   MAGNITUDE_WIDTH,
@@ -42,6 +46,8 @@ import {
   VARINT_BITS,
   W_BAD_COLUMN,
   W_BAD_DESCRIPTOR,
+  W_BAD_PACKED,
+  W_UNSUPPORTED_ENC,
   W_OK,
   W_SIZE_TOO_LARGE,
   W_TRUNCATED,
@@ -252,6 +258,50 @@ export class WideReader {
     const desc = this.desc()
     if (!this.ok) return 0
     return (desc >> 2) & 0b11
+  }
+
+  /**
+   * A string field, packed or raw. The descriptor's `enc` code says which — and
+   * says the case mode the unit stream opens in, which is the one thing the
+   * schema cannot know.
+   *
+   * Embedded in a BLOB the frame has no header of its own: the descriptor
+   * already carries the encoding and the size, so all three of a standalone
+   * frame's header fields are duplicates and the payload is the bare unit
+   * stream.
+   */
+  packedString(out: Writer): Uint8Array {
+    this.packedIntoOut = false
+    const enc = this.blobEncoding()
+    if (!this.ok) return new Uint8Array(0)
+    if (enc == ENC_RAW) return this.bytes()
+    if (enc == ENC_DICTIONARY) {
+      // Reserved for a column dictionary and never written. Refused rather than
+      // guessed at, so claiming it later is a clean format change.
+      this.fail(W_UNSUPPORTED_ENC)
+      return new Uint8Array(0)
+    }
+    const payload = this.bytes()
+    if (!this.ok) return new Uint8Array(0)
+    const from = out.len
+    if (!appendString(out, payload, 0, payload.length, enc == ENC_PACKED5_UP)) {
+      this.fail(W_BAD_PACKED)
+      return new Uint8Array(0)
+    }
+    this.packedIntoOut = true
+    this.packedFrom = from
+    return new Uint8Array(0)
+  }
+
+  /** Whether the last packedString expanded into the writer rather than
+   * returning a view, and where in it the expansion began. */
+  packedIntoOut: bool = false
+  packedFrom: i32 = 0
+
+  /** Steps over a string field of either encoding without expanding it. The
+   * wide descriptor sizes every class on its own, so this is `skip`. */
+  skipString(): void {
+    this.skip()
   }
 
   bytes(): Uint8Array {
