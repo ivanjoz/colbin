@@ -289,20 +289,35 @@ func TestNeverInflates(t *testing.T) {
 	}
 }
 
-// TestNoAllocations pins the encoder's stack-only path for short strings: with
-// room in the output slice, Append must not touch the heap.
+// TestNoAllocations pins the encoder's heap-free path: with room in the output
+// slice, Append must not touch the heap at any length. It has no scratch of its
+// own — the walk is fused with the packer and writes straight into the caller's
+// slice — so there is no length past which it starts allocating.
 func TestNoAllocations(t *testing.T) {
 	for _, s := range []string{"hello", "helloWorld", "product123", "el niño comió jamón",
-		strings.Repeat("ab", stackLimit/2)} {
-		out := make([]byte, 0, 1024)
+		strings.Repeat("ab", 200), strings.Repeat("Lima norte ", 400)} {
+		out := make([]byte, 0, 16<<10)
 		got := testing.AllocsPerRun(100, func() {
 			out = Append(out[:0], s)
 		})
 		if got != 0 {
-			t.Errorf("Append(%q): %.1f allocs, want 0", s, got)
+			t.Errorf("Append(%q...): %.1f allocs, want 0", s[:min(len(s), 12)], got)
 		}
 		if _, _, err := Decode(out); err != nil {
 			t.Fatalf("%q: %v", s, err)
+		}
+	}
+}
+
+// TestSizeNoAllocations pins Size's scratch on the stack for the strings this
+// codec targets. Size has to run the encoding to know its length, so it packs
+// into a fixed buffer and keeps only the count; past that buffer it allocates
+// once, which is why AppendPayload exists for callers that want both.
+func TestSizeNoAllocations(t *testing.T) {
+	for _, s := range []string{"hello", "el niño comió jamón",
+		strings.Repeat("ab", sizeScratchBytes/2-8)} {
+		if got := testing.AllocsPerRun(100, func() { _ = Size(s) }); got != 0 {
+			t.Errorf("Size(%d bytes): %.1f allocs, want 0", len(s), got)
 		}
 	}
 }
@@ -378,9 +393,6 @@ func TestSizeReport(t *testing.T) {
 			flags = "p5"
 			if buf[0]&flagUppercase != 0 {
 				flags += "+U"
-			}
-			if buf[0]&flagNumber != 0 {
-				flags += "+N"
 			}
 		}
 		t.Log(fmt.Sprintf("%4d %4d  %.2f  %-6s %q", len(s), len(buf),

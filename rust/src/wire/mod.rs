@@ -134,6 +134,16 @@ pub(crate) const ESCAPE_2BYTES: u8 = 0;
 pub(crate) const ESCAPE_4BYTES: u8 = 1;
 pub(crate) const ESCAPE_8BYTES: u8 = 2;
 
+/// The packed5 escapes. A narrow blob header has no `enc` field — under narrow
+/// keys the schema says what a field is, not the wire — so a packed string names
+/// itself here, and carries the one bit the schema cannot know: the case mode
+/// its unit stream opens in. Spending four codes buys a two-byte header, the
+/// same as a raw blob's. Code 7 is still free.
+pub(crate) const ESCAPE_PACKED1_LO: u8 = 3;
+pub(crate) const ESCAPE_PACKED1_UP: u8 = 4;
+pub(crate) const ESCAPE_PACKED4_LO: u8 = 5;
+pub(crate) const ESCAPE_PACKED4_UP: u8 = 6;
+
 // What each header carries before an escape is needed.
 pub(crate) const INLINE_BLOB_SIZE: usize = (1 << 11) - 1;
 pub(crate) const INLINE_ARRAY_COUNT: usize = (1 << 8) - 1;

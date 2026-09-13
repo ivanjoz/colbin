@@ -267,12 +267,19 @@ func TestEveryMessageStartsInTheReservedRange(t *testing.T) {
 	for index := range built.Metrics {
 		check("metrics", encode(&built.Metrics[index]))
 	}
-	// packed5 puts a type on the wide path, which is the other root byte.
+	// packed5 is still worth encoding here, even though it no longer decides the
+	// key width: it takes a different path through the blob header under each.
 	colbin.SetPacked5(true)
 	for index := range built.Products {
 		check("products+packed5", encode(&built.Products[index]))
 	}
 	colbin.SetPacked5(false)
+
+	// A key past fifteen is what puts a type on the wide path, and so what
+	// reaches the other root byte. packed5 used to force it and no longer does,
+	// which is the point of that change — so the wide root has to come from a
+	// type that genuinely needs wide keys.
+	check("wide keys", encode(&wideKeyed{Name: "ACME", Code: 42}))
 
 	for root, table := range seen {
 		t.Logf("root %#02x written by %s", root, table)
@@ -281,6 +288,13 @@ func TestEveryMessageStartsInTheReservedRange(t *testing.T) {
 		t.Fatalf("only %d distinct root bytes: the corpus is not reaching both "+
 			"key widths, so this proves less than it looks", len(seen))
 	}
+}
+
+// wideKeyed exists only to reach the wide root byte: its second key is past the
+// fifteen a narrow key run can hold.
+type wideKeyed struct {
+	Name string `cb:"1"`
+	Code int32  `cb:"20"`
 }
 
 // TestNonColbinFirstBytesAreRejected is the other half: a byte an application

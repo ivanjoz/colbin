@@ -30,7 +30,7 @@
 //! #[cb(skip)]                 // not encoded, as Go's `cb:"-"`
 //!
 //! #[cb(wide)]                 // on the struct: eight-bit keys even when four fit
-//! #[cb(packed5)]              // on the struct: pack string fields (implies wide)
+//! #[cb(packed5)]              // on the struct: pack string fields
 //! ```
 //!
 //! A Rust field is `snake_case` where the Go field it mirrors is not, and an
@@ -128,7 +128,9 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let past_narrow = fields
         .iter()
         .any(|field| field.id.is_some_and(|id| id > MAX_NARROW_KEY));
-    let wide = derived || past_narrow || options.wide || options.packed5;
+    // packed5 no longer decides the key width: a narrow blob header says
+    // "packed" in its escape code, so the encoding costs what it weighs.
+    let wide = derived || past_narrow || options.wide;
 
     let keys = KeyConstants::build(name, &fields);
     let key_items = keys.items();
@@ -829,8 +831,9 @@ impl Shape {
             // encoding is there, so a message written with packing on reads back
             // with it off. A narrow descriptor has no room for that code, so a
             // narrow string is always raw.
-            Self::Str if wide => quote!(r.packed_string()),
-            Self::Str => quote!(r.string()),
+            // packed_string reads a raw blob too — the header says which — so
+            // the reader needs no setting and cannot be wrong about it.
+            Self::Str => quote!(r.packed_string()),
             Self::Bytes => quote!(r.bytes().to_vec()),
             Self::Ints => quote!(r.ints()),
             Self::Strings => quote!(r.strings()),

@@ -47,11 +47,14 @@ const (
 )
 
 // wide reports whether a plan must use eight-bit keys.
+//
+// packed5 used to force it. A narrow blob header has no enc field, so a packed
+// string had nowhere on the wire to say it was packed, and the whole message
+// paid a byte per key to get one. It says so in the blob header's escape code
+// now (wire.Writer.PackedString), so the encoding costs what it weighs and
+// nothing else.
 func (plan *typePlan) wide() bool {
-	if plan.anyKeyPastNarrow || plan.derivedKeys {
-		return true
-	}
-	return plan.hasStrings && Packed5()
+	return plan.anyKeyPastNarrow || plan.derivedKeys
 }
 
 // appendWide is writePlan for the wide key width. It is a separate function

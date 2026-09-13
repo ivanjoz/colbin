@@ -48,14 +48,16 @@ pub enum Packed5Error {
     /// A frame ends before its declared payload, or a token's operand runs past
     /// the end of the bitstream.
     Truncated,
-    /// Symbol indices 30 and 31 of opcode 29, which the current table leaves
-    /// unassigned.
+    /// An extension table index the current table leaves unassigned.
     ReservedSymbol,
     /// The length prefix is malformed, overlong, or describes a payload larger
     /// than the buffer.
     BadLength,
-    /// The pad count exceeds the bits actually present in the payload.
-    BadPadding,
+    /// A raw escape whose count or byte halves fall outside the ranges the
+    /// encoder can produce.
+    BadEscape,
+    /// A reserved header bit is set.
+    BadHeader,
 }
 
 impl fmt::Display for Error {
@@ -92,7 +94,8 @@ impl fmt::Display for Packed5Error {
             Self::Truncated => "string truncated",
             Self::ReservedSymbol => "reserved symbol index",
             Self::BadLength => "bad length prefix",
-            Self::BadPadding => "bad stream padding",
+            Self::BadEscape => "bad raw escape",
+            Self::BadHeader => "reserved header bit set",
         })
     }
 }
