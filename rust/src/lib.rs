@@ -59,12 +59,26 @@
 // feature gates.
 extern crate alloc;
 
+/// The plan-driven encode: a schema and a document in, a message out.
+#[cfg(feature = "encode")]
+pub mod build;
 pub mod codec;
 pub mod column;
+/// Structured failure for the encode side, which has offsets and paths to report
+/// that [`Error`] has no room for.
+#[cfg(feature = "encode")]
+pub mod diag;
+/// Type inference: a JSON document in, a schema out.
+#[cfg(feature = "encode")]
+pub mod infer;
 pub mod json;
 pub mod packed5;
 pub mod plan;
 pub mod section;
+/// The encode self-check: decode what was just written and walk it against the
+/// input, so a disagreement reaches the caller as an error rather than as data.
+#[cfg(feature = "encode")]
+pub mod verify;
 pub mod walk;
 pub mod wire;
 

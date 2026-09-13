@@ -14,6 +14,11 @@
 
 use alloc::vec::Vec;
 
+/// The other direction: JSON text in, a value tree out. Only the encoder needs
+/// it, so only the encoder links it.
+#[cfg(feature = "encode")]
+pub mod parse;
+
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 /// The two runes that are a line break in JavaScript and not in JSON. They are

@@ -17,13 +17,18 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/ivanjoz/colbin"
 	"github.com/ivanjoz/colbin/column"
@@ -217,6 +222,34 @@ type walkCase struct {
 	JSON string `json:"json"`
 }
 
+// numberCase pins how one JSON number literal must be read. The rule is
+// `web/PLAN.md` §3.2: a literal with no '.' and no exponent is an integer and
+// must land in int64 or uint64 with every digit intact; anything else is a real
+// number and becomes a float64, which must be finite.
+//
+// This tier is not about the wire at all. It pins the JSON scanner, which exists
+// because a host's `JSON.parse` turns 7295013456321098765 into
+// 7295013456321098800 — the failure colbin exists to prevent — and because a
+// scanner that is merely close is one that writes a different message from the
+// one the caller typed.
+type numberCase struct {
+	Name    string `json:"name"`
+	Literal string `json:"literal"`
+	Kind    string `json:"kind"`  // int | uint | float | error
+	Value   string `json:"value"` // decimal for int/uint; "" for float
+	Bits    string `json:"bits"`  // float64 bits as hex; "" for int/uint
+}
+
+// textCase pins how one JSON string literal decodes. encoding/json is the
+// reference for the escape rules, including the lone surrogate that
+// `web/PLAN.md` §4.5 defines as U+FFFD — so that what reaches the encoder is
+// always valid UTF-8.
+type textCase struct {
+	Name    string `json:"name"`
+	Literal string `json:"literal"` // the JSON text, quotes included
+	Decoded string `json:"decoded"` // base64 of the decoded bytes
+}
+
 type corpus struct {
 	// The ids every type resolved to, so that the two ports' hash-and-probe
 	// agree on a number rather than on a description of one.
@@ -224,6 +257,10 @@ type corpus struct {
 	Columns  []columnCase `json:"columns"`
 	Cases    []caseOut    `json:"cases"`
 	Walks    []walkCase   `json:"walks"`
+	// The JSON scanner's two tiers. Nothing below the encoder reads them, and
+	// the encoder is what the browser module does that no other consumer does.
+	Numbers []numberCase `json:"numbers"`
+	Texts   []textCase   `json:"texts"`
 }
 
 func main() {
@@ -250,7 +287,158 @@ func build() corpus {
 		Columns:  columns(),
 		Cases:    cases(),
 		Walks:    walks(),
+		Numbers:  numberCases(),
+		Texts:    textCases(),
 	}
+}
+
+// --- the JSON scanner --------------------------------------------------------
+
+func classifyNumber(literal string) numberCase {
+	one := numberCase{Literal: literal}
+	if !strings.ContainsAny(literal, ".eE") {
+		if value, err := strconv.ParseInt(literal, 10, 64); err == nil {
+			one.Kind, one.Value = "int", strconv.FormatInt(value, 10)
+			return one
+		}
+		if value, err := strconv.ParseUint(literal, 10, 64); err == nil {
+			one.Kind, one.Value = "uint", strconv.FormatUint(value, 10)
+			return one
+		}
+		one.Kind = "error"
+		return one
+	}
+	value, err := strconv.ParseFloat(literal, 64)
+	if err != nil || math.IsInf(value, 0) || math.IsNaN(value) {
+		one.Kind = "error"
+		return one
+	}
+	one.Kind = "float"
+	one.Bits = fmt.Sprintf("%016x", math.Float64bits(value))
+	return one
+}
+
+func numberCases() []numberCase {
+	literals := []struct{ name, literal string }{
+		{"zero", "0"},
+		{"neg-zero", "-0"},
+		{"one", "1"},
+		{"neg-one", "-1"},
+		{"small", "42"},
+		{"int64-max", "9223372036854775807"},
+		{"int64-min", "-9223372036854775808"},
+		{"uint64-just-past-int64", "9223372036854775808"},
+		{"uint64-max", "18446744073709551615"},
+		{"past-uint64", "18446744073709551616"},
+		{"way-past-uint64", "123456789012345678901234567890"},
+		// The case JSON.parse gets wrong, and the reason there is a scanner.
+		{"snowflake", "7295013456321098765"},
+		{"beyond-2p53", "9007199254740993"},
+		{"float-simple", "1.5"},
+		{"float-tenth", "0.1"},
+		{"float-third", "0.3333333333333333"},
+		{"float-neg", "-2.25"},
+		{"float-exp", "1e10"},
+		{"float-exp-plus", "1E+10"},
+		{"float-exp-neg", "1e-10"},
+		{"float-big-exp", "1e30"},
+		{"float-tiny", "5e-324"},
+		{"float-max", "1.7976931348623157e308"},
+		{"float-overflow", "1e400"},
+		{"float-underflow", "1e-400"},
+		{"float-many-digits", "3.141592653589793238462643383279"},
+		{"float-19-digits", "1234567890123456789.0"},
+		{"float-leading-zeros", "0.000001"},
+		{"float-trailing-zeros", "1.100000"},
+		{"float-exp-boundary-22", "1e22"},
+		{"float-exp-boundary-23", "1e23"},
+		{"float-neg-exp-22", "1e-22"},
+		{"float-neg-exp-23", "1e-23"},
+		{"float-mant-2p53", "9007199254740992.0"},
+		{"float-mant-past-2p53", "9007199254740993.0"},
+		{"float-hard-rounding", "2.2250738585072011e-308"},
+		{"float-half-even", "1.0000000000000002"},
+	}
+	out := make([]numberCase, 0, len(literals)+600)
+	for _, one := range literals {
+		held := classifyNumber(one.literal)
+		held.Name = one.name
+		out = append(out, held)
+	}
+
+	// The literals above test the boundaries someone thought of. These test the
+	// ones nobody did: random float64s rendered several ways, each of which must
+	// read back to the identical bit pattern. 'e' at 17 and 20 digits is past
+	// shortest-round-trip, so it exercises the exact path rather than the fast
+	// one.
+	random := rand.New(rand.NewSource(20260826))
+	for index := 0; index < 150; index++ {
+		value := math.Float64frombits(random.Uint64())
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			continue
+		}
+		for _, format := range []struct{ tag, text string }{
+			{"shortest", strconv.FormatFloat(value, 'g', -1, 64)},
+			{"e17", strconv.FormatFloat(value, 'e', 17, 64)},
+			{"e20", strconv.FormatFloat(value, 'e', 20, 64)},
+		} {
+			// A rendering with no '.' and no exponent is read as an integer by
+			// the rule above, which is a different test.
+			if !strings.ContainsAny(format.text, ".eE") {
+				continue
+			}
+			held := classifyNumber(format.text)
+			held.Name = fmt.Sprintf("random-%s-%d", format.tag, index)
+			out = append(out, held)
+		}
+	}
+
+	// Subnormals and the boundaries around them, where a doubly rounded
+	// conversion goes wrong and nothing else notices.
+	for index := 0; index < 40; index++ {
+		value := math.Float64frombits(random.Uint64() % (1 << 52))
+		held := classifyNumber(strconv.FormatFloat(value, 'e', 20, 64))
+		held.Name = fmt.Sprintf("subnormal-%d", index)
+		out = append(out, held)
+	}
+	return out
+}
+
+func textCases() []textCase {
+	literals := []struct{ name, literal string }{
+		{"empty", `""`},
+		{"plain", `"hello"`},
+		{"spaces", `"hello world"`},
+		{"quote", `"say \"hi\""`},
+		{"backslash", `"a\\b"`},
+		{"slash", `"a\/b"`},
+		{"control-escapes", `"\b\f\n\r\t"`},
+		{"unicode-basic", "\"\\u0041\\u0042\""},
+		{"unicode-accent", "\"ni\\u00f1o\""},
+		{"unicode-euro", "\"\\u20ac\""},
+		{"surrogate-pair", "\"\\ud83c\\udf89\""},
+		{"lone-high-surrogate", `"\ud800"`},
+		{"lone-low-surrogate", `"\udc00"`},
+		{"high-then-plain", `"\ud800a"`},
+		{"raw-utf8", `"el niño comió jamón"`},
+		{"raw-emoji", `"party 🎉 time"`},
+		{"raw-cjk", `"日本語"`},
+		{"nul-escape", "\"a\\u0000b\""},
+		{"mixed", `"SKU-00123 — Ñandú"`},
+	}
+	out := make([]textCase, 0, len(literals))
+	for _, one := range literals {
+		var decoded string
+		if err := json.Unmarshal([]byte(one.literal), &decoded); err != nil {
+			panic(fmt.Sprintf("%s: %v", one.name, err))
+		}
+		out = append(out, textCase{
+			Name:    one.name,
+			Literal: one.literal,
+			Decoded: base64.StdEncoding.EncodeToString([]byte(decoded)),
+		})
+	}
+	return out
 }
 
 // Doc is the shape a service answers a browser with: a `map[string]any` whose
@@ -284,6 +472,255 @@ type Holder struct {
 	Label string `cb:"1"`
 	One   any    `cb:"2"`
 	Many  []any  `cb:"3"`
+}
+
+// --- the reader corpus -------------------------------------------------------
+//
+// The shapes `web/tests/documents.mjs` drives the browser encoder over, written
+// here as Go types with the same field names and the same ids.
+//
+// They exist because `rust/tests/{section,walk}.rs` read
+// `web/vectors/web_encoded.json`, which only the AssemblyScript module writes —
+// so the Rust port's decoder tests could not run without building a module in
+// another language first. Go is the specification for everything those tests
+// check, and Go can write every one of these shapes, so it may as well be the
+// one that does.
+//
+// Coverage is what is being kept, not the bytes: narrow keys and wide, a table
+// and a list of the same record, a nested struct four deep, scalar and string
+// arrays, the integer extremes at both ends, the float extremes, strings that
+// need escaping and strings past the one-byte length, and the envelope a
+// non-object root is wrapped in. Each one appears twice, raw and with the
+// opt-in string packing on.
+
+// FlatObject is the smallest interesting message: four narrow keys, one of each
+// of the three shapes a scalar field takes.
+type FlatObject struct {
+	ID     int64  `cb:"id,1"`
+	Name   string `cb:"name,2"`
+	Price  int64  `cb:"price,3"`
+	Active bool   `cb:"active,4"`
+}
+
+// Product is the record an array of records is made of. Every field is
+// columnable, so twelve of them transpose.
+type Product struct {
+	ID     int64  `cb:"id,1"`
+	SKU    string `cb:"sku,2"`
+	Name   string `cb:"name,3"`
+	Price  int64  `cb:"price,4"`
+	Stock  int64  `cb:"stock,5"`
+	Active bool   `cb:"active,6"`
+}
+
+func productsOf(count int) []Product {
+	names := [3]string{"Tin Light", "Steel Lamp", "Copper Wire"}
+	out := make([]Product, count)
+	for index := range out {
+		out[index] = Product{
+			ID:     int64(100000 + index*7),
+			SKU:    fmt.Sprintf("SKU-%05d", index),
+			Name:   names[index%3],
+			Price:  int64(599 + index*13),
+			Stock:  int64(index % 97),
+			Active: index%3 != 0,
+		}
+	}
+	return out
+}
+
+// Tally is all integers, which is the element a table is cheapest for.
+type Tally struct {
+	ID    int64 `cb:"id,1"`
+	Qty   int64 `cb:"qty,2"`
+	Cents int64 `cb:"cents,3"`
+}
+
+// TallyRows holds them under a name, so the table is a field rather than the
+// whole message.
+type TallyRows struct {
+	Rows []Tally `cb:"rows,1"`
+}
+
+func talliesOf(count int) []Tally {
+	out := make([]Tally, count)
+	for index := range out {
+		out[index] = Tally{
+			ID:    int64(index),
+			Qty:   int64(index % 7),
+			Cents: int64(499 + index*13),
+		}
+	}
+	return out
+}
+
+// Inner and Nested are a struct inside a struct, with a field on either side of
+// it so the walk has to step over a composite rather than end on one.
+type Inner struct {
+	SKU   string `cb:"sku,1"`
+	Qty   int64  `cb:"qty,2"`
+	Cents int64  `cb:"cents,3"`
+}
+
+type Nested struct {
+	ID    int64  `cb:"id,1"`
+	Inner Inner  `cb:"inner,2"`
+	Note  string `cb:"note,3"`
+}
+
+// Four levels, which is what hoists three structs into the section's table.
+type DeepLeaf struct {
+	D int64  `cb:"d,1"`
+	E string `cb:"e,2"`
+}
+
+type DeepC struct {
+	C DeepLeaf `cb:"c,1"`
+}
+
+type DeepB struct {
+	B DeepC `cb:"b,1"`
+}
+
+type Deep struct {
+	A DeepB `cb:"a,1"`
+}
+
+// ScalarArrays covers the three array ops a document reaches: an integer array,
+// a string array, and an integer array holding a value past 2^53 — the one a
+// JSON reader that goes through a double would have rounded.
+type ScalarArrays struct {
+	Ints    []int64  `cb:"ints,1"`
+	Strings []string `cb:"strings,2"`
+	Big     []int64  `cb:"big,3"`
+}
+
+// Noted is the dense-column property made visible: `note` is empty in some rows
+// and a column carries a value for every row regardless.
+type Noted struct {
+	ID   int64  `cb:"id,1"`
+	Note string `cb:"note,2"`
+}
+
+// Measured is a float column, which is the transform the column codec does not
+// apply — floats are stored as they are.
+type Measured struct {
+	V float64 `cb:"v,1"`
+}
+
+// BigIntegers walks up to the int64 maximum, which is where a signed field runs
+// out and the next case takes over.
+type BigIntegers struct {
+	Small     int64 `cb:"small,1"`
+	Snowflake int64 `cb:"snowflake,2"`
+	Max       int64 `cb:"max,3"`
+}
+
+// Unsigned is the value only the unsigned op can hold, and the one that tells a
+// reader rendering through a double apart from one that is not.
+type Unsigned struct {
+	V uint64 `cb:"v,1"`
+}
+
+// Floats is every float a reader has to print back exactly: the subnormal
+// minimum, the maximum, and a tenth, which has no finite binary form.
+type Floats struct {
+	One   float64 `cb:"one,1"`
+	Tenth float64 `cb:"tenth,2"`
+	Neg   float64 `cb:"neg,3"`
+	Tiny  float64 `cb:"tiny,4"`
+	Huge  float64 `cb:"huge,5"`
+	Zero  float64 `cb:"zero,6"`
+}
+
+// Texts is the string cases a UTF-8 writer has to get right, including the one
+// that is stored as nothing at all.
+type Texts struct {
+	Plain    string `cb:"plain,1"`
+	Accented string `cb:"accented,2"`
+	CJK      string `cb:"cjk,3"`
+	Emoji    string `cb:"emoji,4"`
+	Empty    string `cb:"empty,5"`
+}
+
+// Escapes is what a JSON writer has to escape rather than copy.
+type Escapes struct {
+	Quote   string `cb:"quote,1"`
+	Slash   string `cb:"slash,2"`
+	Control string `cb:"control,3"`
+	Tab     string `cb:"tab,4"`
+}
+
+// A narrow list element past 255 bytes, which is the shape that found a bug in
+// the Go writer once already.
+type LongLine struct {
+	Note string `cb:"note,1"`
+	Qty  int64  `cb:"qty,2"`
+}
+
+type LongLines struct {
+	Lines []LongLine `cb:"lines,1"`
+}
+
+// One field past what four key bits hold, which is what puts a message on the
+// wide path — and the same message one field shorter, which does not.
+type Seventeen struct {
+	F0  int64 `cb:"f0,1"`
+	F1  int64 `cb:"f1,2"`
+	F2  int64 `cb:"f2,3"`
+	F3  int64 `cb:"f3,4"`
+	F4  int64 `cb:"f4,5"`
+	F5  int64 `cb:"f5,6"`
+	F6  int64 `cb:"f6,7"`
+	F7  int64 `cb:"f7,8"`
+	F8  int64 `cb:"f8,9"`
+	F9  int64 `cb:"f9,10"`
+	F10 int64 `cb:"f10,11"`
+	F11 int64 `cb:"f11,12"`
+	F12 int64 `cb:"f12,13"`
+	F13 int64 `cb:"f13,14"`
+	F14 int64 `cb:"f14,15"`
+	F15 int64 `cb:"f15,16"`
+	F16 int64 `cb:"f16,17"`
+}
+
+type Sixteen struct {
+	F0  int64 `cb:"f0,1"`
+	F1  int64 `cb:"f1,2"`
+	F2  int64 `cb:"f2,3"`
+	F3  int64 `cb:"f3,4"`
+	F4  int64 `cb:"f4,5"`
+	F5  int64 `cb:"f5,6"`
+	F6  int64 `cb:"f6,7"`
+	F7  int64 `cb:"f7,8"`
+	F8  int64 `cb:"f8,9"`
+	F9  int64 `cb:"f9,10"`
+	F10 int64 `cb:"f10,11"`
+	F11 int64 `cb:"f11,12"`
+	F12 int64 `cb:"f12,13"`
+	F13 int64 `cb:"f13,14"`
+	F14 int64 `cb:"f14,15"`
+	F15 int64 `cb:"f15,16"`
+}
+
+func seventeen() Seventeen {
+	return Seventeen{
+		F0: 1, F1: 2, F2: 3, F3: 4, F4: 5, F5: 6, F6: 7, F7: 8, F8: 9,
+		F9: 10, F10: 11, F11: 12, F12: 13, F13: 14, F14: 15, F15: 16, F16: 17,
+	}
+}
+
+func sixteen() Sixteen {
+	return Sixteen{
+		F0: 1, F1: 2, F2: 3, F3: 4, F4: 5, F5: 6, F6: 7, F7: 8, F8: 9,
+		F9: 10, F10: 11, F11: 12, F12: 13, F13: 14, F14: 15, F15: 16,
+	}
+}
+
+// Every field its zero value, so the message is a root byte and nothing else.
+type EmptyPair struct {
+	A string `cb:"a,1"`
+	B int64  `cb:"b,2"`
 }
 
 func walks() []walkCase {
@@ -362,6 +799,79 @@ func walks() []walkCase {
 		Label: "bare",
 	})
 	add("dynamic.map.empty", "a dynamic map with no entries at all", Doc{})
+
+	// The reader corpus. See the types above for what it is covering and why it
+	// is here rather than in web/vectors.
+	readers := []struct {
+		name  string
+		about string
+		value any
+	}{
+		{"flat-object", "four narrow keys: an integer, a string, an integer and a bool",
+			FlatObject{ID: 1, Name: "Tin Light", Price: 599, Active: true}},
+		{"records", "an array of records at the root, past the threshold, so an enveloped table",
+			productsOf(12)},
+		{"records-past-the-table-threshold", "forty all-integer records under a name, transposed",
+			TallyRows{Rows: talliesOf(40)}},
+		{"records-under-the-table-threshold", "the same record seven times, which stays a list",
+			TallyRows{Rows: talliesOf(7)}},
+		{"nested-objects", "a struct between two scalar fields",
+			Nested{ID: 9, Inner: Inner{SKU: "ABC-1", Qty: 2, Cents: 1999}, Note: "pickup"}},
+		{"four-deep", "three structs hoisted into the section's table",
+			Deep{A: DeepB{B: DeepC{C: DeepLeaf{D: 1, E: "deep"}}}}},
+		{"scalar-arrays", "an integer array, a string array, and an integer past 2^53",
+			ScalarArrays{
+				Ints:    []int64{1, 2, 3, -4},
+				Strings: []string{"a", "", "ccc"},
+				Big:     []int64{9007199254740993, 1},
+			}},
+		{"nulls-and-missing-keys", "a string column with empty entries, which a table still carries densely",
+			[]Noted{
+				{ID: 1, Note: "hi"}, {ID: 2}, {ID: 3}, {ID: 4, Note: "there"},
+				{ID: 5}, {ID: 6, Note: "again"}, {ID: 7}, {ID: 8}, {ID: 9, Note: "last"},
+			}},
+		{"mixed-numbers", "a float column, which the column codec stores as it finds",
+			[]Measured{
+				{V: 1}, {V: 2.5}, {V: 3}, {V: -0.25}, {V: 0},
+				{V: 1e300}, {V: 0.1}, {V: -7}, {V: 42.5},
+			}},
+		{"big-integers", "up to the int64 maximum, which is where a signed field runs out",
+			BigIntegers{Small: 1, Snowflake: 7295013456321098765, Max: 9223372036854775807}},
+		{"unsigned-past-int64", "the value only the unsigned op can hold",
+			Unsigned{V: 18446744073709551615}},
+		{"floats", "the subnormal minimum, the maximum, and a tenth",
+			Floats{One: 1, Tenth: 0.1, Neg: -2.25, Tiny: 5e-324, Huge: 1.7976931348623157e308}},
+		{"strings", "accents, CJK, an astral plane emoji, and one stored as nothing at all",
+			Texts{Plain: "hello", Accented: "el niño comió jamón", CJK: "日本語", Emoji: "party 🎉"}},
+		{"escapes", "what a JSON writer has to escape rather than copy",
+			Escapes{Quote: `say "hi"`, Slash: `a\b`, Control: "\x01\x1f", Tab: "a\tb"}},
+		{"long-strings", "a narrow list element past 255 bytes",
+			LongLines{Lines: []LongLine{
+				{Note: repeat("x", 300), Qty: 0},
+				{Note: repeat("x", 301), Qty: 1},
+				{Note: repeat("x", 302), Qty: 2},
+			}}},
+		{"seventeen-fields", "one field past what four key bits hold, so eight-bit keys", seventeen()},
+		{"sixteen-fields", "the same message one field shorter, which stays narrow", sixteen()},
+		{"scalar-array", "an integer array at the root, so the one-field envelope",
+			[]int64{1, 2, 3, 4, 5}},
+		{"string-array", "a string array at the root", []string{"a", "b", "c"}},
+		{"empty-strings-everywhere", "records whose every field is its zero value",
+			[]EmptyPair{{}, {}}},
+	}
+
+	for _, one := range readers {
+		add("doc."+one.name, one.about, one.value)
+	}
+	// Every one of them again with the opt-in string packing on. It is a writer
+	// setting a reader has to follow either way — the field's descriptor says
+	// which form it took — and no other corpus on this side covers the packed
+	// half of a table's string column.
+	colbin.SetPacked5(true)
+	for _, one := range readers {
+		add("doc."+one.name+" (packed)", one.about+", with strings packed", one.value)
+	}
+	colbin.SetPacked5(false)
 
 	return out
 }

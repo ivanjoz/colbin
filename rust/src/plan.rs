@@ -171,7 +171,33 @@ pub struct Plan {
     by_key: Vec<i16>,
 }
 
+/// Above this many fields a run takes eight-bit keys, because four bits hold
+/// sixteen. The one thing an *encoder* decides about key width, and the reason
+/// [`Plan::assembled`] exists beside [`Plan::finish`]: a plan that came off the
+/// wire was told its width by the section and must not re-derive one.
+#[cfg(feature = "encode")]
+pub const NARROW_KEY_FIELDS: usize = 16;
+
 impl Plan {
+    /// A plan an encoder has just resolved.
+    ///
+    /// Takes the key width from the field count and then derives everything
+    /// [`Plan::finish`] does, so an inferred plan cannot reach a section half
+    /// built. `by_key` stays private, which is what this is for.
+    #[cfg(feature = "encode")]
+    #[must_use]
+    pub fn assembled(fields: Vec<PlanField>, names: Vec<String>, is_envelope: bool) -> Self {
+        let mut plan = Self {
+            is_wide: fields.len() > NARROW_KEY_FIELDS,
+            fields,
+            names,
+            is_envelope,
+            ..Self::default()
+        };
+        plan.finish();
+        plan
+    }
+
     /// Derives what the section does not carry: the key index, and whether a
     /// slice of this struct could be transposed.
     pub fn finish(&mut self) {

@@ -33,8 +33,20 @@ fn corpus() -> serde_json::Value {
     serde_json::from_str(&text).expect("vectors.json is not JSON")
 }
 
-fn walks(corpus: &serde_json::Value) -> &Vec<serde_json::Value> {
-    corpus["walks"].as_array().expect("walks")
+/// The dynamic half of the walk corpus. The `doc.` half has a declared type at
+/// the root and no `any` anywhere in it, so it is `walk.rs`'s subject; running
+/// it here too would only make both files slower.
+fn walks(corpus: &serde_json::Value) -> Vec<&serde_json::Value> {
+    corpus["walks"]
+        .as_array()
+        .expect("walks")
+        .iter()
+        .filter(|case| {
+            case["name"]
+                .as_str()
+                .is_some_and(|n| n.starts_with("dynamic."))
+        })
+        .collect()
 }
 
 /// Splits a self-describing message: the root byte, then a length-prefixed
@@ -68,7 +80,7 @@ fn every_dynamic_case_renders_what_go_renders() {
     let cases = walks(&corpus);
     assert!(cases.len() >= 8, "corpus shrank: {} cases", cases.len());
 
-    for case in cases {
+    for case in &cases {
         let name = case["name"].as_str().expect("name");
         let want = case["json"].as_str().expect("json");
         let wide = case["wide"].as_bool().expect("wide");
@@ -107,7 +119,7 @@ fn every_dynamic_case_renders_what_go_renders() {
 fn a_tagged_array_of_records_is_smaller_than_a_named_one() {
     let corpus = corpus();
     let case = walks(&corpus)
-        .iter()
+        .into_iter()
         .find(|case| case["name"] == "dynamic.records.table")
         .expect("dynamic.records.table");
 
@@ -140,7 +152,7 @@ fn a_truncated_dynamic_message_is_refused_rather_than_panicking() {
 fn a_corrupted_dynamic_byte_is_refused_or_renders_well_formed_json() {
     let corpus = corpus();
     let case = walks(&corpus)
-        .iter()
+        .into_iter()
         .find(|case| case["name"] == "dynamic.scalars")
         .expect("dynamic.scalars");
     let standalone = unhex(case["selfDescribing"].as_str().unwrap());
