@@ -601,3 +601,43 @@ fn a_message_that_is_not_one_is_refused() {
         assert_eq!(Charge::decode(&[root]), Err(Error::BadRoot(root)));
     }
 }
+
+/// A list element is the one composite with no descriptor in front of it, so it cannot widen the
+/// way every other one does — there is nothing to put an `lw` code in. Closing it like a keyed
+/// composite wrote a bare four-byte length where the reader expects the 0xFF escape, and OR-ed 2
+/// into whatever byte preceded the placeholder: a message this crate produced and refused, for any
+/// element body reaching 255 bytes.
+///
+/// That is an ordinary record — a `Vec<T>` under the table threshold holding a couple of hundred
+/// characters of text — not a corner. Go's `TestNarrowListElementWidths` pins the same sizes.
+#[test]
+fn a_list_element_past_the_inline_length_round_trips() {
+    #[derive(Colbin, Clone, Debug, Default, PartialEq)]
+    struct Row {
+        #[cb(0)]
+        id: i32,
+        #[cb(1)]
+        text: String,
+    }
+
+    #[derive(Colbin, Clone, Debug, Default, PartialEq)]
+    struct Document {
+        #[cb(0)]
+        rows: Vec<Row>,
+    }
+
+    for size in [0_usize, 1, 200, 250, 251, 253, 254, 255, 256, 1_000, 70_000] {
+        let document = Document {
+            rows: vec![Row {
+                id: 1,
+                text: "x".repeat(size),
+            }],
+        };
+        let encoded = document.encode();
+        assert_eq!(
+            Document::decode(&encoded).unwrap(),
+            document,
+            "an element body of {size} bytes did not survive the round trip"
+        );
+    }
+}
