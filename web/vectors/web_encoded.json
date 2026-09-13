@@ -8,7 +8,21 @@
       "json": "{\"id\":1,\"name\":\"Tin Light\",\"price\":599,\"active\":true}"
     },
     {
+      "name": "flat-object (packed)",
+      "input": "{\"id\":1,\"name\":\"Tin Light\",\"price\":599,\"active\":true}",
+      "section": "20010004000269640401046e616d650b0205707269636504030661637469766500",
+      "message": "d0081c0873a3ddf4e2c89c092a570231",
+      "json": "{\"id\":1,\"name\":\"Tin Light\",\"price\":599,\"active\":true}"
+    },
+    {
       "name": "records",
+      "input": "[{\"id\":100000,\"sku\":\"SKU-00000\",\"name\":\"Tin Light\",\"price\":599,\"stock\":0,\"active\":false},{\"id\":100007,\"sku\":\"SKU-00001\",\"name\":\"Steel Lamp\",\"price\":612,\"stock\":1,\"active\":true},{\"id\":100014,\"sku\":\"SKU-00002\",\"name\":\"Copper Wire\",\"price\":625,\"stock\":2,\"active\":true},{\"id\":100021,\"sku\":\"SKU-00003\",\"name\":\"Tin Light\",\"price\":638,\"stock\":3,\"active\":false},{\"id\":100028,\"sku\":\"SKU-00004\",\"name\":\"Steel Lamp\",\"price\":651,\"stock\":4,\"active\":true},{\"id\":100035,\"sku\":\"SKU-00005\",\"name\":\"Copper Wire\",\"price\":664,\"stock\":5,\"active\":true},{\"id\":100042,\"sku\":\"SKU-00006\",\"name\":\"Tin Light\",\"price\":677,\"stock\":6,\"active\":false},{\"id\":100049,\"sku\":\"SKU-00007\",\"name\":\"Steel Lamp\",\"price\":690,\"stock\":7,\"active\":true},{\"id\":100056,\"sku\":\"SKU-00008\",\"name\":\"Copper Wire\",\"price\":703,\"stock\":8,\"active\":true},{\"id\":100063,\"sku\":\"SKU-00009\",\"name\":\"Tin Light\",\"price\":716,\"stock\":9,\"active\":false},{\"id\":100070,\"sku\":\"SKU-00010\",\"name\":\"Steel Lamp\",\"price\":729,\"stock\":10,\"active\":true},{\"id\":100077,\"sku\":\"SKU-00011\",\"name\":\"Copper Wire\",\"price\":742,\"stock\":11,\"active\":true}]",
+      "section": "380202010004726f77731601000600026964040103736b750b02046e616d650b0305707269636504040573746f636b04050661637469766500",
+      "message": "d00a360100000c001005400d03000000000004eeeeeeeeee0e100c09534b552d303030303009534b552d303030303109534b552d303030303209534b552d303030303309534b552d303030303409534b552d303030303509534b552d303030303609534b552d303030303709534b552d303030303809534b552d303030303909534b552d303030313009534b552d3030303131200c0954696e204c696768740a537465656c204c616d700b436f7070657220576972650954696e204c696768740a537465656c204c616d700b436f7070657220576972650954696e204c696768740a537465656c204c616d700b436f7070657220576972650954696e204c696768740a537465656c204c616d700b436f7070657220576972653011000a579219a79f8b625aaaacbf329badb9400800041032547698ba50040001b60d",
+      "json": "[{\"id\":100000,\"sku\":\"SKU-00000\",\"name\":\"Tin Light\",\"price\":599,\"stock\":0,\"active\":false},{\"id\":100007,\"sku\":\"SKU-00001\",\"name\":\"Steel Lamp\",\"price\":612,\"stock\":1,\"active\":true},{\"id\":100014,\"sku\":\"SKU-00002\",\"name\":\"Copper Wire\",\"price\":625,\"stock\":2,\"active\":true},{\"id\":100021,\"sku\":\"SKU-00003\",\"name\":\"Tin Light\",\"price\":638,\"stock\":3,\"active\":false},{\"id\":100028,\"sku\":\"SKU-00004\",\"name\":\"Steel Lamp\",\"price\":651,\"stock\":4,\"active\":true},{\"id\":100035,\"sku\":\"SKU-00005\",\"name\":\"Copper Wire\",\"price\":664,\"stock\":5,\"active\":true},{\"id\":100042,\"sku\":\"SKU-00006\",\"name\":\"Tin Light\",\"price\":677,\"stock\":6,\"active\":false},{\"id\":100049,\"sku\":\"SKU-00007\",\"name\":\"Steel Lamp\",\"price\":690,\"stock\":7,\"active\":true},{\"id\":100056,\"sku\":\"SKU-00008\",\"name\":\"Copper Wire\",\"price\":703,\"stock\":8,\"active\":true},{\"id\":100063,\"sku\":\"SKU-00009\",\"name\":\"Tin Light\",\"price\":716,\"stock\":9,\"active\":false},{\"id\":100070,\"sku\":\"SKU-00010\",\"name\":\"Steel Lamp\",\"price\":729,\"stock\":10,\"active\":true},{\"id\":100077,\"sku\":\"SKU-00011\",\"name\":\"Copper Wire\",\"price\":742,\"stock\":11,\"active\":true}]"
+    },
+    {
+      "name": "records (packed)",
       "input": "[{\"id\":100000,\"sku\":\"SKU-00000\",\"name\":\"Tin Light\",\"price\":599,\"stock\":0,\"active\":false},{\"id\":100007,\"sku\":\"SKU-00001\",\"name\":\"Steel Lamp\",\"price\":612,\"stock\":1,\"active\":true},{\"id\":100014,\"sku\":\"SKU-00002\",\"name\":\"Copper Wire\",\"price\":625,\"stock\":2,\"active\":true},{\"id\":100021,\"sku\":\"SKU-00003\",\"name\":\"Tin Light\",\"price\":638,\"stock\":3,\"active\":false},{\"id\":100028,\"sku\":\"SKU-00004\",\"name\":\"Steel Lamp\",\"price\":651,\"stock\":4,\"active\":true},{\"id\":100035,\"sku\":\"SKU-00005\",\"name\":\"Copper Wire\",\"price\":664,\"stock\":5,\"active\":true},{\"id\":100042,\"sku\":\"SKU-00006\",\"name\":\"Tin Light\",\"price\":677,\"stock\":6,\"active\":false},{\"id\":100049,\"sku\":\"SKU-00007\",\"name\":\"Steel Lamp\",\"price\":690,\"stock\":7,\"active\":true},{\"id\":100056,\"sku\":\"SKU-00008\",\"name\":\"Copper Wire\",\"price\":703,\"stock\":8,\"active\":true},{\"id\":100063,\"sku\":\"SKU-00009\",\"name\":\"Tin Light\",\"price\":716,\"stock\":9,\"active\":false},{\"id\":100070,\"sku\":\"SKU-00010\",\"name\":\"Steel Lamp\",\"price\":729,\"stock\":10,\"active\":true},{\"id\":100077,\"sku\":\"SKU-00011\",\"name\":\"Copper Wire\",\"price\":742,\"stock\":11,\"active\":true}]",
       "section": "380202010004726f77731601000600026964040103736b750b02046e616d650b0305707269636504040573746f636b04050661637469766500",
       "message": "d00a360100000c001005400d03000000000004eeeeeeeeee0e100c09534b552d303030303009534b552d303030303109534b552d303030303209534b552d303030303309534b552d303030303409534b552d303030303509534b552d303030303609534b552d303030303709534b552d303030303809534b552d303030303909534b552d303030313009534b552d3030303131200c0954696e204c696768740a537465656c204c616d700b436f7070657220576972650954696e204c696768740a537465656c204c616d700b436f7070657220576972650954696e204c696768740a537465656c204c616d700b436f7070657220576972650954696e204c696768740a537465656c204c616d700b436f7070657220576972653011000a579219a79f8b625aaaacbf329badb9400800041032547698ba50040001b60d",
@@ -22,7 +36,21 @@
       "json": "{\"rows\":[{\"id\":0,\"qty\":0,\"cents\":499},{\"id\":1,\"qty\":1,\"cents\":512},{\"id\":2,\"qty\":2,\"cents\":525},{\"id\":3,\"qty\":3,\"cents\":538},{\"id\":4,\"qty\":4,\"cents\":551},{\"id\":5,\"qty\":5,\"cents\":564},{\"id\":6,\"qty\":6,\"cents\":577},{\"id\":7,\"qty\":0,\"cents\":590},{\"id\":8,\"qty\":1,\"cents\":603},{\"id\":9,\"qty\":2,\"cents\":616},{\"id\":10,\"qty\":3,\"cents\":629},{\"id\":11,\"qty\":4,\"cents\":642},{\"id\":12,\"qty\":5,\"cents\":655},{\"id\":13,\"qty\":6,\"cents\":668},{\"id\":14,\"qty\":0,\"cents\":681},{\"id\":15,\"qty\":1,\"cents\":694},{\"id\":16,\"qty\":2,\"cents\":707},{\"id\":17,\"qty\":3,\"cents\":720},{\"id\":18,\"qty\":4,\"cents\":733},{\"id\":19,\"qty\":5,\"cents\":746},{\"id\":20,\"qty\":6,\"cents\":759},{\"id\":21,\"qty\":0,\"cents\":772},{\"id\":22,\"qty\":1,\"cents\":785},{\"id\":23,\"qty\":2,\"cents\":798},{\"id\":24,\"qty\":3,\"cents\":811},{\"id\":25,\"qty\":4,\"cents\":824},{\"id\":26,\"qty\":5,\"cents\":837},{\"id\":27,\"qty\":6,\"cents\":850},{\"id\":28,\"qty\":0,\"cents\":863},{\"id\":29,\"qty\":1,\"cents\":876},{\"id\":30,\"qty\":2,\"cents\":889},{\"id\":31,\"qty\":3,\"cents\":902},{\"id\":32,\"qty\":4,\"cents\":915},{\"id\":33,\"qty\":5,\"cents\":928},{\"id\":34,\"qty\":6,\"cents\":941},{\"id\":35,\"qty\":0,\"cents\":954},{\"id\":36,\"qty\":1,\"cents\":967},{\"id\":37,\"qty\":2,\"cents\":980},{\"id\":38,\"qty\":3,\"cents\":993},{\"id\":39,\"qty\":4,\"cents\":1006}]}"
     },
     {
+      "name": "records-past-the-table-threshold (packed)",
+      "input": "{\"rows\":[{\"id\":0,\"qty\":0,\"cents\":499},{\"id\":1,\"qty\":1,\"cents\":512},{\"id\":2,\"qty\":2,\"cents\":525},{\"id\":3,\"qty\":3,\"cents\":538},{\"id\":4,\"qty\":4,\"cents\":551},{\"id\":5,\"qty\":5,\"cents\":564},{\"id\":6,\"qty\":6,\"cents\":577},{\"id\":7,\"qty\":0,\"cents\":590},{\"id\":8,\"qty\":1,\"cents\":603},{\"id\":9,\"qty\":2,\"cents\":616},{\"id\":10,\"qty\":3,\"cents\":629},{\"id\":11,\"qty\":4,\"cents\":642},{\"id\":12,\"qty\":5,\"cents\":655},{\"id\":13,\"qty\":6,\"cents\":668},{\"id\":14,\"qty\":0,\"cents\":681},{\"id\":15,\"qty\":1,\"cents\":694},{\"id\":16,\"qty\":2,\"cents\":707},{\"id\":17,\"qty\":3,\"cents\":720},{\"id\":18,\"qty\":4,\"cents\":733},{\"id\":19,\"qty\":5,\"cents\":746},{\"id\":20,\"qty\":6,\"cents\":759},{\"id\":21,\"qty\":0,\"cents\":772},{\"id\":22,\"qty\":1,\"cents\":785},{\"id\":23,\"qty\":2,\"cents\":798},{\"id\":24,\"qty\":3,\"cents\":811},{\"id\":25,\"qty\":4,\"cents\":824},{\"id\":26,\"qty\":5,\"cents\":837},{\"id\":27,\"qty\":6,\"cents\":850},{\"id\":28,\"qty\":0,\"cents\":863},{\"id\":29,\"qty\":1,\"cents\":876},{\"id\":30,\"qty\":2,\"cents\":889},{\"id\":31,\"qty\":3,\"cents\":902},{\"id\":32,\"qty\":4,\"cents\":915},{\"id\":33,\"qty\":5,\"cents\":928},{\"id\":34,\"qty\":6,\"cents\":941},{\"id\":35,\"qty\":0,\"cents\":954},{\"id\":36,\"qty\":1,\"cents\":967},{\"id\":37,\"qty\":2,\"cents\":980},{\"id\":38,\"qty\":3,\"cents\":993},{\"id\":39,\"qty\":4,\"cents\":1006}]}",
+      "section": "200200010004726f7773160100030002696404010371747904020563656e747304",
+      "message": "d0084f28001405000000000000000002aaaaaaaaaaaaaaaaaa2a1011000388c61ad158231a6b44638d68ac118d202305e603000000000000055a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb506",
+      "json": "{\"rows\":[{\"id\":0,\"qty\":0,\"cents\":499},{\"id\":1,\"qty\":1,\"cents\":512},{\"id\":2,\"qty\":2,\"cents\":525},{\"id\":3,\"qty\":3,\"cents\":538},{\"id\":4,\"qty\":4,\"cents\":551},{\"id\":5,\"qty\":5,\"cents\":564},{\"id\":6,\"qty\":6,\"cents\":577},{\"id\":7,\"qty\":0,\"cents\":590},{\"id\":8,\"qty\":1,\"cents\":603},{\"id\":9,\"qty\":2,\"cents\":616},{\"id\":10,\"qty\":3,\"cents\":629},{\"id\":11,\"qty\":4,\"cents\":642},{\"id\":12,\"qty\":5,\"cents\":655},{\"id\":13,\"qty\":6,\"cents\":668},{\"id\":14,\"qty\":0,\"cents\":681},{\"id\":15,\"qty\":1,\"cents\":694},{\"id\":16,\"qty\":2,\"cents\":707},{\"id\":17,\"qty\":3,\"cents\":720},{\"id\":18,\"qty\":4,\"cents\":733},{\"id\":19,\"qty\":5,\"cents\":746},{\"id\":20,\"qty\":6,\"cents\":759},{\"id\":21,\"qty\":0,\"cents\":772},{\"id\":22,\"qty\":1,\"cents\":785},{\"id\":23,\"qty\":2,\"cents\":798},{\"id\":24,\"qty\":3,\"cents\":811},{\"id\":25,\"qty\":4,\"cents\":824},{\"id\":26,\"qty\":5,\"cents\":837},{\"id\":27,\"qty\":6,\"cents\":850},{\"id\":28,\"qty\":0,\"cents\":863},{\"id\":29,\"qty\":1,\"cents\":876},{\"id\":30,\"qty\":2,\"cents\":889},{\"id\":31,\"qty\":3,\"cents\":902},{\"id\":32,\"qty\":4,\"cents\":915},{\"id\":33,\"qty\":5,\"cents\":928},{\"id\":34,\"qty\":6,\"cents\":941},{\"id\":35,\"qty\":0,\"cents\":954},{\"id\":36,\"qty\":1,\"cents\":967},{\"id\":37,\"qty\":2,\"cents\":980},{\"id\":38,\"qty\":3,\"cents\":993},{\"id\":39,\"qty\":4,\"cents\":1006}]}"
+    },
+    {
       "name": "records-under-the-table-threshold",
+      "input": "{\"rows\":[{\"id\":0,\"qty\":0,\"cents\":499},{\"id\":1,\"qty\":1,\"cents\":512},{\"id\":2,\"qty\":2,\"cents\":525},{\"id\":3,\"qty\":3,\"cents\":538},{\"id\":4,\"qty\":4,\"cents\":551},{\"id\":5,\"qty\":5,\"cents\":564},{\"id\":6,\"qty\":6,\"cents\":577}]}",
+      "section": "200200010004726f7773160100030002696404010371747904020563656e747304",
+      "message": "d0003307032af3010508182a000207090219022a0d0207090319032a1a0207090419042a270207090519052a340207090619062a4102",
+      "json": "{\"rows\":[{\"cents\":499,\"id\":0,\"qty\":0},{\"id\":1,\"qty\":1,\"cents\":512},{\"id\":2,\"qty\":2,\"cents\":525},{\"id\":3,\"qty\":3,\"cents\":538},{\"id\":4,\"qty\":4,\"cents\":551},{\"id\":5,\"qty\":5,\"cents\":564},{\"id\":6,\"qty\":6,\"cents\":577}]}"
+    },
+    {
+      "name": "records-under-the-table-threshold (packed)",
       "input": "{\"rows\":[{\"id\":0,\"qty\":0,\"cents\":499},{\"id\":1,\"qty\":1,\"cents\":512},{\"id\":2,\"qty\":2,\"cents\":525},{\"id\":3,\"qty\":3,\"cents\":538},{\"id\":4,\"qty\":4,\"cents\":551},{\"id\":5,\"qty\":5,\"cents\":564},{\"id\":6,\"qty\":6,\"cents\":577}]}",
       "section": "200200010004726f7773160100030002696404010371747904020563656e747304",
       "message": "d0003307032af3010508182a000207090219022a0d0207090319032a1a0207090419042a270207090519052a340207090619062a4102",
@@ -36,6 +64,13 @@
       "json": "{\"id\":9,\"inner\":{\"sku\":\"ABC-1\",\"qty\":2,\"cents\":1999},\"note\":\"pickup\"}"
     },
     {
+      "name": "nested-objects (packed)",
+      "input": "{\"id\":9,\"inner\":{\"sku\":\"ABC-1\",\"qty\":2,\"cents\":1999},\"note\":\"pickup\"}",
+      "section": "2e02000300026964040105696e6e6572150102046e6f74650b00030003736b750b010371747904020563656e747304",
+      "message": "d00909100c00054142432d3119022acf072b040f09451f",
+      "json": "{\"id\":9,\"inner\":{\"sku\":\"ABC-1\",\"qty\":2,\"cents\":1999},\"note\":\"pickup\"}"
+    },
+    {
       "name": "four-deep",
       "input": "{\"a\":{\"b\":{\"c\":{\"d\":1,\"e\":\"deep\"}}}}",
       "section": "20040001000161150100010001621502000100016315030002000164040101650b",
@@ -43,7 +78,21 @@
       "json": "{\"a\":{\"b\":{\"c\":{\"d\":1,\"e\":\"deep\"}}}}"
     },
     {
+      "name": "four-deep (packed)",
+      "input": "{\"a\":{\"b\":{\"c\":{\"d\":1,\"e\":\"deep\"}}}}",
+      "section": "20040001000161150100010001621502000100016315030002000164040101650b",
+      "message": "d0000a00080006081b03839007",
+      "json": "{\"a\":{\"b\":{\"c\":{\"d\":1,\"e\":\"deep\"}}}}"
+    },
+    {
       "name": "scalar-arrays",
+      "input": "{\"ints\":[1,2,3,-4],\"strings\":[\"a\",\"\",\"ccc\"],\"big\":[9007199254740992,1]}",
+      "section": "1a0100030004696e7473100107737472696e677314020362696710",
+      "message": "d00004010203fc1003016100036363632e0200000000000020000100000000000000",
+      "json": "{\"ints\":[1,2,3,-4],\"strings\":[\"a\",\"\",\"ccc\"],\"big\":[9007199254740992,1]}"
+    },
+    {
+      "name": "scalar-arrays (packed)",
       "input": "{\"ints\":[1,2,3,-4],\"strings\":[\"a\",\"\",\"ccc\"],\"big\":[9007199254740992,1]}",
       "section": "1a0100030004696e7473100107737472696e677314020362696710",
       "message": "d00004010203fc1003016100036363632e0200000000000020000100000000000000",
@@ -57,7 +106,21 @@
       "json": "[{\"id\":1,\"note\":\"hi\"},{\"id\":2,\"note\":null},{\"id\":3,\"note\":null}]"
     },
     {
+      "name": "nulls-and-missing-keys (packed)",
+      "input": "[{\"id\":1,\"note\":\"hi\"},{\"id\":2,\"note\":null},{\"id\":3}]",
+      "section": "1a0202010004726f777316010002000269640401046e6f7465180b",
+      "message": "d0000d03050810026869020902020903",
+      "json": "[{\"id\":1,\"note\":\"hi\"},{\"id\":2,\"note\":null},{\"id\":3,\"note\":null}]"
+    },
+    {
       "name": "mixed-numbers",
+      "input": "[{\"v\":1},{\"v\":2.5},{\"v\":3}]",
+      "section": "110202010004726f7773160100010001760a",
+      "message": "d0000d0303093ff00309400403094008",
+      "json": "[{\"v\":1},{\"v\":2.5},{\"v\":3}]"
+    },
+    {
+      "name": "mixed-numbers (packed)",
       "input": "[{\"v\":1},{\"v\":2.5},{\"v\":3}]",
       "section": "110202010004726f7773160100010001760a",
       "message": "d0000d0303093ff00309400403094008",
@@ -71,6 +134,13 @@
       "json": "{\"small\":1,\"snowflake\":{\"digits\":\"7295013456321098765\"},\"max\":{\"digits\":\"9223372036854775807\"}}"
     },
     {
+      "name": "big-integers (packed)",
+      "input": "{\"small\":1,\"snowflake\":{\"digits\":\"7295013456321098765\"},\"max\":{\"digits\":\"9223372036854775807\"}}",
+      "section": "350300030005736d616c6c040109736e6f77666c616b65150102036d61781502000100066469676974730b000100066469676974730b",
+      "message": "d008100f0b0d3fdb5fdfcfeae3f9dbf86cf702200f0b0d5ff31fd55fe6b7fabbfb44f603",
+      "json": "{\"small\":1,\"snowflake\":{\"digits\":\"7295013456321098765\"},\"max\":{\"digits\":\"9223372036854775807\"}}"
+    },
+    {
       "name": "unsigned-past-int64",
       "input": "{\"v\":{\"digits\":\"18446744073709551615\"}}",
       "section": "130200010001761501000100066469676974730b",
@@ -78,7 +148,21 @@
       "json": "{\"v\":{\"digits\":\"18446744073709551615\"}}"
     },
     {
+      "name": "unsigned-past-int64 (packed)",
+      "input": "{\"v\":{\"digits\":\"18446744073709551615\"}}",
+      "section": "130200010001761501000100066469676974730b",
+      "message": "d000100b0e1f973fddc7ed87dbc1dffd87d20b",
+      "json": "{\"v\":{\"digits\":\"18446744073709551615\"}}"
+    },
+    {
       "name": "floats",
+      "input": "{\"one\":1,\"tenth\":0.1,\"neg\":-2.25,\"tiny\":5e-324,\"huge\":1.7976931348623157e+308,\"zero\":0}",
+      "section": "2c01000600036f6e6504010574656e74680a02036e65670a030474696e790a0404687567650a05047a65726f04",
+      "message": "d0081f3fb999999999999a29c0023f00000000000000014f7fefffffffffffff",
+      "json": "{\"one\":1,\"tenth\":0.1,\"neg\":-2.25,\"tiny\":5e-324,\"huge\":1.7976931348623157e+308,\"zero\":0}"
+    },
+    {
+      "name": "floats (packed)",
       "input": "{\"one\":1,\"tenth\":0.1,\"neg\":-2.25,\"tiny\":5e-324,\"huge\":1.7976931348623157e+308,\"zero\":0}",
       "section": "2c01000600036f6e6504010574656e74680a02036e65670a030474696e790a0404687567650a05047a65726f04",
       "message": "d0081f3fb999999999999a29c0023f00000000000000014f7fefffffffffffff",
@@ -92,10 +176,24 @@
       "json": "{\"plain\":\"hello\",\"accented\":\"el niño comió jamón\",\"cjk\":\"日本語\",\"emoji\":\"party 🎉\",\"empty\":\"\"}"
     },
     {
+      "name": "strings (packed)",
+      "input": "{\"plain\":\"hello\",\"accented\":\"el niño comió jamón\",\"cjk\":\"日本語\",\"emoji\":\"party 🎉\",\"empty\":\"\"}",
+      "section": "2c0100050005706c61696e0b0108616363656e7465640b0203636a6b0b0305656d6f6a690b0405656d7074790b",
+      "message": "d00b0487ace5361b0e64e9863c705a38863cd109304f1a2009e697a5e69cace8aa9e300a706172747920f09f8e89",
+      "json": "{\"plain\":\"hello\",\"accented\":\"el niño comió jamón\",\"cjk\":\"日本語\",\"emoji\":\"party 🎉\",\"empty\":\"\"}"
+    },
+    {
       "name": "escapes",
       "input": "{\"quote\":\"say \\\"hi\\\"\",\"slash\":\"a\\\\b\",\"control\":\"\\u0001\\u001f\",\"tab\":\"a\\tb\"}",
       "section": "23010004000571756f74650b0105736c6173680b0207636f6e74726f6c0b03037461620b",
       "message": "d0000873617920226869221003615c622002011f3003610962",
+      "json": "{\"quote\":\"say \\\"hi\\\"\",\"slash\":\"a\\\\b\",\"control\":\"\\u0001\\u001f\",\"tab\":\"a\\tb\"}"
+    },
+    {
+      "name": "escapes (packed)",
+      "input": "{\"quote\":\"say \\\"hi\\\"\",\"slash\":\"a\\\\b\",\"control\":\"\\u0001\\u001f\",\"tab\":\"a\\tb\"}",
+      "section": "23010004000571756f74650b0105736c6173680b0207636f6e74726f6c0b03037461620b",
+      "message": "d00b071260ddeb41bd6e1003615c622002011f3003610962",
       "json": "{\"quote\":\"say \\\"hi\\\"\",\"slash\":\"a\\\\b\",\"control\":\"\\u0001\\u001f\",\"tab\":\"a\\tb\"}"
     },
     {
@@ -106,7 +204,21 @@
       "json": "{\"lines\":[{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":0},{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":1},{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":2}]}"
     },
     {
+      "name": "long-strings (packed)",
+      "input": "{\"lines\":[{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":0},{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":1},{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":2}]}",
+      "section": "1b02000100056c696e65731601000200046e6f74650b010371747904",
+      "message": "d0024302000003be0bbcf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de0bc00bbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7b3718c10bbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7befbdf7de7b2f1902",
+      "json": "{\"lines\":[{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":0},{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":1},{\"note\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"qty\":2}]}"
+    },
+    {
       "name": "seventeen-fields",
+      "input": "{\"f0\":1,\"f1\":2,\"f2\":3,\"f3\":4,\"f4\":5,\"f5\":6,\"f6\":7,\"f7\":8,\"f8\":9,\"f9\":10,\"f10\":11,\"f11\":12,\"f12\":13,\"f13\":14,\"f14\":15,\"f15\":16,\"f16\":17}",
+      "section": "5f01011100026630040102663104020266320403026633040402663404050266350406026636040702663704080266380409026639040a03663130040b03663131040c03663132040d03663133040e03663134040f0366313504100366313604",
+      "message": "d8000101020203030404050506060707080809090a0a0b0b0c0c0d0d0e0e0f0f101011",
+      "json": "{\"f0\":1,\"f1\":2,\"f2\":3,\"f3\":4,\"f4\":5,\"f5\":6,\"f6\":7,\"f7\":8,\"f8\":9,\"f9\":10,\"f10\":11,\"f11\":12,\"f12\":13,\"f13\":14,\"f14\":15,\"f15\":16,\"f16\":17}"
+    },
+    {
+      "name": "seventeen-fields (packed)",
       "input": "{\"f0\":1,\"f1\":2,\"f2\":3,\"f3\":4,\"f4\":5,\"f5\":6,\"f6\":7,\"f7\":8,\"f8\":9,\"f9\":10,\"f10\":11,\"f11\":12,\"f12\":13,\"f13\":14,\"f14\":15,\"f15\":16,\"f16\":17}",
       "section": "5f01011100026630040102663104020266320403026633040402663404050266350406026636040702663704080266380409026639040a03663130040b03663131040c03663132040d03663133040e03663134040f0366313504100366313604",
       "message": "d8000101020203030404050506060707080809090a0a0b0b0c0c0d0d0e0e0f0f101011",
@@ -120,7 +232,21 @@
       "json": "{\"f0\":1,\"f1\":2,\"f2\":3,\"f3\":4,\"f4\":5,\"f5\":6,\"f6\":7,\"f7\":8,\"f8\":9,\"f9\":10,\"f10\":11,\"f11\":12,\"f12\":13,\"f13\":14,\"f14\":15,\"f15\":16}"
     },
     {
+      "name": "sixteen-fields (packed)",
+      "input": "{\"f0\":1,\"f1\":2,\"f2\":3,\"f3\":4,\"f4\":5,\"f5\":6,\"f6\":7,\"f7\":8,\"f8\":9,\"f9\":10,\"f10\":11,\"f11\":12,\"f12\":13,\"f13\":14,\"f14\":15,\"f15\":16}",
+      "section": "5901001000026630040102663104020266320403026633040402663404050266350406026636040702663704080266380409026639040a03663130040b03663131040c03663132040d03663133040e03663134040f0366313504",
+      "message": "d00819022903390449055906690779088909990aa90bb90cc90dd90ee90ff910",
+      "json": "{\"f0\":1,\"f1\":2,\"f2\":3,\"f3\":4,\"f4\":5,\"f5\":6,\"f6\":7,\"f7\":8,\"f8\":9,\"f9\":10,\"f10\":11,\"f11\":12,\"f12\":13,\"f13\":14,\"f14\":15,\"f15\":16}"
+    },
+    {
       "name": "bare-scalar",
+      "input": "42",
+      "section": "0a0102010004726f777304",
+      "message": "d0092a",
+      "json": "42"
+    },
+    {
+      "name": "bare-scalar (packed)",
       "input": "42",
       "section": "0a0102010004726f777304",
       "message": "d0092a",
@@ -134,7 +260,21 @@
       "json": "\"hello\""
     },
     {
+      "name": "bare-string (packed)",
+      "input": "\"hello\"",
+      "section": "0a0102010004726f77730b",
+      "message": "d00b0487ace536",
+      "json": "\"hello\""
+    },
+    {
       "name": "scalar-array",
+      "input": "[1,2,3,4,5]",
+      "section": "0a0102010004726f777310",
+      "message": "d008050102030405",
+      "json": "[1,2,3,4,5]"
+    },
+    {
+      "name": "scalar-array (packed)",
       "input": "[1,2,3,4,5]",
       "section": "0a0102010004726f777310",
       "message": "d008050102030405",
@@ -148,6 +288,13 @@
       "json": "[\"a\",\"b\",\"c\"]"
     },
     {
+      "name": "string-array (packed)",
+      "input": "[\"a\",\"b\",\"c\"]",
+      "section": "0a0102010004726f777314",
+      "message": "d00003016101620163",
+      "json": "[\"a\",\"b\",\"c\"]"
+    },
+    {
       "name": "empty-strings-everywhere",
       "input": "[{\"a\":\"\",\"b\":0},{\"a\":\"\",\"b\":0}]",
       "section": "150202010004726f7773160100020001610b01016204",
@@ -155,7 +302,21 @@
       "json": "[{\"a\":\"\",\"b\":0},{\"a\":\"\",\"b\":0}]"
     },
     {
+      "name": "empty-strings-everywhere (packed)",
+      "input": "[{\"a\":\"\",\"b\":0},{\"a\":\"\",\"b\":0}]",
+      "section": "150202010004726f7773160100020001610b01016204",
+      "message": "d00003020000",
+      "json": "[{\"a\":\"\",\"b\":0},{\"a\":\"\",\"b\":0}]"
+    },
+    {
       "name": "duplicate-keys",
+      "input": "{\"a\":1,\"a\":2}",
+      "section": "0701000100016104",
+      "message": "d00902",
+      "json": "{\"a\":2}"
+    },
+    {
+      "name": "duplicate-keys (packed)",
       "input": "{\"a\":1,\"a\":2}",
       "section": "0701000100016104",
       "message": "d00902",

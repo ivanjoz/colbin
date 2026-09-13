@@ -10,8 +10,8 @@ Pre-alpha, so nothing here preserves compatibility with what the module writes
 today. Every message it has ever produced is unreadable by the current Go
 decoder and vice versa.
 
-Status: **phases 0–6 done**; 7 is half done — the module *reads* the new string
-encoding and does not yet write it, which §4.5 explains.
+Status: **all seven phases done.** `PLAN.md` is the module as it now stands;
+this is the record of getting there.
 
 `PLAN.md` is the module as it now stands. This document is the record of getting
 there: the decisions, the things that turned out differently from the plan, and
@@ -31,7 +31,7 @@ what each phase cost.
 | dense columns, nullable bitmaps, an `EMPTY_COLUMN` bit | a zero-valued field is simply not written, unconditionally, and there is no flag for it |
 | one key width | four bits or eight, **chosen per key run**, with the width in the descriptor that opens the run |
 | nothing on a field says its size | every composite carries a byte length, so every wide field is skippable |
-| packed5 strings, each with their own frame header | packed5 is on its way out: `experiments/stringpack`'s `u5b` replaces the codec, and the frame header's two live bits move into the descriptor — §4 |
+| packed5 strings, each with their own frame header | a different codec, and **no frame header at all** when embedded: the descriptor carries the encoding, the size and the case mode — §4 |
 
 Two consequences worth stating before the file list.
 
@@ -116,9 +116,9 @@ assembly/
   wire/narrowwrite.ts, wire/widewrite.ts   NEW   the two writers
   verify.ts      the self-check: decode, then walk against the input
 
-  packed5.ts     frozen, unimported — deleted in phase 7   §4
-  bitstream.ts   frozen, unimported — deleted in phase 7   §4
-  u5b.ts         phase 7   ← experiments/stringpack u5b_test.go, kernel_test.go
+  packed5.ts     the string codec, both ways   ← packed5/   (§4)
+                 bitstream.ts is deleted: the accumulator it held is replaced
+                 by eight units in one u64
 ```
 
 `plan.ts` is the hinge. Go's insight in `JSON_MODE_PLAN.md` §2 — that `typePlan`
@@ -130,16 +130,19 @@ is one type in the middle of the module and everything else points at it.
 
 ---
 
-## 4. Strings are frozen: `packed5` is on its way out
+## 4. Strings: the codec changed underneath the port
 
-`packed5/` is being replaced by `experiments/stringpack`'s `u5b`, so **nothing
-about string packing is ported in this pass**. `packed5.ts` and `bitstream.ts`
-stay in the tree, unimported — AssemblyScript reaches only what `index.ts`
-imports, so an orphaned file costs nothing in the `.wasm` — and they are deleted
-the day the Go side lands its replacement.
+`packed5/` was being replaced by `experiments/stringpack`'s `u5b` while this port
+was under way, so string packing was **frozen** for most of it: `packed5.ts` and
+`bitstream.ts` sat in the tree unimported — AssemblyScript reaches only what
+`index.ts` imports, so an orphaned file costs nothing in the `.wasm` — and the
+decoder refused a packed blob by name rather than implementing a codec that was
+about to be deleted.
 
-This is not only a swap of one codec for another, and the difference decides how
-the rest of the port is written.
+`94d4b32` landed it, and §4.3 onward is what happened then. The section is kept
+in the order it was written because the freeze is the decision worth reading:
+this was not only a swap of one codec for another, and the difference decided how
+the rest of the port was written.
 
 ### 4.1 What is actually changing
 
@@ -229,28 +232,40 @@ prevent. Fixed, and pinned by `TestPackedNarrowStringThroughEveryReader`.
 `bytes()` too. That one was caught by the tiling invariant rather than by a
 reader, which is the argument for having the invariant.
 
-### 4.5 Why the writer is deferred
+### 4.5 The writer, and why byte parity was the test
 
-The module reads packed strings and writes raw ones, and that asymmetry is the
-right way round rather than an unfinished edge.
+The reader landed first, because it is the half a caller cannot do without: a
+service that turned the encoding on to save bytes would otherwise be unreadable,
+and `Packed5()` being off by default means a module that only writes raw already
+interoperates with everything. The writer followed.
 
-`Packed5()` is **off by default in Go**, so nothing an ordinary service sends is
-packed, and a module that writes raw interoperates with everything. The reader is
-what a caller cannot do without: a service that has turned the encoding on to
-save bytes would otherwise be unreadable, and that is the whole point of the npm
-package.
+**It is checked by byte parity with Go rather than by a round trip**, which is
+the one place in this port where a round trip would have been actively
+misleading. The scan is greedy rather than size-optimal — it takes a
+`CASE_TOGGLE_LONG` from a run of three, the longest decimal prefix ten bits hold,
+and merges escaped bytes up to four — so a tie broken the other way is still a
+*legal* frame that decodes to the same string. A round-trip test would pass on an
+encoder that disagreed with Go about every string it touched, and two encoders
+that disagree produce two different messages for one record.
 
-The writer is the larger half of the codec — a greedy tokeniser over five
-operand tables, the case-mode hoist, the number opcode, the raw escape, and the
-never-inflate fallback that has to abandon a stream the moment it passes its own
-budget — and it buys the module nothing it can use today. The page has no toggle
-for it; the ratios on it are all raw.
+So the tier records what Go's `PackedString` writes for twenty-five strings at
+both key widths — the case-toggle threshold, the leading-zero rule, the raw
+escape's merging, the four-byte size escape, and the strings the packed form
+would not shrink — and the module must reproduce each one. It did, first run.
 
-So it is deferred rather than skipped, and what makes that safe is that the
-encoder does not *choose* to write raw. It has no other option: nothing in the
-encoder knows the encoding exists.
+Two things that fall out and are worth stating:
 
-### 4.6 One consequence worth naming early
+- **Turning it on cannot make a message larger.** The choice is per string and
+  the raw form wins ties, which the encoder discovers by writing into a buffer
+  bounded at the raw length and noticing when it runs out — a compare per group
+  rather than a pass of its own.
+- **It reaches a scalar string field, not a string column.** Past the table
+  threshold a `[]struct`'s strings are written as a string *array*, and neither
+  implementation packs that. So the page's string-heavy examples that cross into
+  a table save nothing, and `people`, which does not, saves 17.8%. Whether a
+  column should pack is a format question rather than this module's.
+
+### 4.6 One consequence worth naming early### 4.6 One consequence worth naming early
 
 packed5 was **one of the two things that force a type onto eight-bit keys**
 (`codec/wide.go`: `hasStrings && Packed5()`). With it out, the only thing left
@@ -598,7 +613,7 @@ difference between the two deliveries, priced, on the reader's own examples.
 | **4** ✅ | `infer.ts` + `build.ts` + `verify.ts` + the writers: **encode**, with the §5.1 envelope and §5.2 ids | every document round-trips with the self-check on, and **Go reads every message the module writes** |
 | **5** ✅ | `inspect.ts` and the page | the spans tile the body exactly, on both corpora; Chrome drives all eleven examples with no console errors |
 | **6** ✅ | re-measure against the 50 KB budget; rewrite `PLAN.md` | 42.9 KB gzipped; `PLAN.md` describes the module that exists, and re-measuring found a 40% encode regression and removed it |
-| **7** ◐ | **strings**: the new codec's *reader*, the §4.2 descriptors, `bitstream.ts` deleted, `packed5.ts` replaced | the packed tier renders the same bytes as `ToJSON` at both key widths. **The writer is deferred** — see §4.5 |
+| **7** ✅ | **strings**: the new codec both ways, the §4.2 descriptors, `bitstream.ts` deleted, `packed5.ts` replaced | the reader renders the same bytes as `ToJSON`; the writer produces **byte-identical frames to Go's** on 25 strings at both key widths, and Go reads every packed message the module writes |
 
 Phase 2 before phase 4 is a reversal of the original order, and deliberate. The
 decoder is now the fully specified half — `codec/json.go` is the specification

@@ -63,6 +63,21 @@ export class Builder {
   doc: Doc
   diag: Diag
   out: Writer = new Writer(1024)
+  /**
+   * Whether to offer each string to the packed encoding.
+   *
+   * A writer setting, exactly as Go's `SetPacked5` is, and off for the same
+   * reason: a raw blob is a sub-slice of the message on the way out and a memcpy
+   * on the way in, where a packed one is a pass over every character on both
+   * sides. The trade is a third of a short token against that pass, which is
+   * worth taking on a wire that is size-bound and not on one that is not.
+   *
+   * It is never a correctness question. The encoding is recorded in each
+   * string's own descriptor, so a decoder reads either form without being told —
+   * and the encoder tries the packed form and keeps it only when it is smaller,
+   * so turning this on cannot make a message larger.
+   */
+  packStrings: bool = false
   private depth: i32 = 0
   /** Reused across every column of every table, because a column is written out
    * before the next is gathered. */
@@ -201,6 +216,7 @@ export class Builder {
     if (op == OP_STRING) {
       const bytes = doc.kindOf(node) == K_STRING ? doc.strOf(node) : new Uint8Array(0)
       if (bytes.length == 0 && explicitZero) writer.emptyString(key)
+      else if (this.packStrings) writer.packedString(key, bytes)
       else writer.blob(key, bytes)
       return
     }
@@ -316,6 +332,7 @@ export class Builder {
     if (op == OP_STRING) {
       const bytes = doc.kindOf(node) == K_STRING ? doc.strOf(node) : new Uint8Array(0)
       if (bytes.length == 0 && explicitZero) writer.emptyString(key)
+      else if (this.packStrings) writer.packedString(key, bytes)
       else writer.blob(key, bytes)
       return
     }

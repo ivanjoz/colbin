@@ -36,10 +36,22 @@ function out(length) {
 
 const hex = (bytes) => Buffer.from(bytes).toString('hex')
 
+const PACK_STRINGS = 4
+
+// Every document twice: raw strings, which is what an ordinary encode writes,
+// and packed, which is what a size-bound caller asks for. Go has to read both,
+// and the packed half is the one no byte-for-byte corpus covers — there the
+// module is the encoder rather than the copy.
+const runs = [
+  { suffix: '', flags: VERIFY },
+  { suffix: ' (packed)', flags: VERIFY | PACK_STRINGS },
+]
+
 const cases = []
 for (const document of documents) {
+ for (const run of runs) {
   const text = textOf(document)
-  const length = wasm.exports.encodeJSON(feed(text), VERIFY)
+  const length = wasm.exports.encodeJSON(feed(text), run.flags)
   if (length < 0) {
     const why = decoder.decode(out(wasm.exports.lastMessage()))
     throw new Error(`${document.name}: ${why}`)
@@ -57,12 +69,13 @@ for (const document of documents) {
   if (decoded < 0) throw new Error(`${document.name}: the module cannot read its own message`)
 
   cases.push({
-    name: document.name,
+    name: document.name + run.suffix,
     input: text,
     section: hex(section),
     message: hex(message),
     json: decoder.decode(out(decoded)),
   })
+ }
 }
 
 const path = join(root, 'vectors/web_encoded.json')
