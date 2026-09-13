@@ -4223,13 +4223,13 @@
       "name": "packed5.string",
       "type": "main.PackedText",
       "about": "the opt-in string encoding, chosen per field by the descriptor",
-      "message": "d800941079274b37d4b1d3c231d4b94e8075de00"
+      "message": "d00b0e64e9863c705a38863cd109304f1a"
     },
     {
       "name": "packed5.does not pack",
       "type": "main.PackedText",
       "about": "a string the packed form would not shrink is written raw",
-      "message": "d800900b7b226964223a313032337d"
+      "message": "d00006000102030405"
     }
   ]
 }
