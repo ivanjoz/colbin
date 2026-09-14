@@ -1,6 +1,9 @@
 # One browser module, and it is the Rust one
 
-**Status: proposed.** Phase 1 aside, nothing here is built yet.
+**Status: done.** The demo site and the bun tests run on `rust/wasm`.
+`web/assembly/` is gone, the encoder's rules moved to `rust/ENCODER.md` rather
+than going with the documents that stated them, and §6 records what the module
+actually measures — which is not what the budget said.
 
 The goal, stated plainly: delete `web/assembly/` and have the demo site — and
 the npm package `PACKAGE_PLAN.md` describes — run on `rust/wasm`, which is the
@@ -94,6 +97,11 @@ module is its only implementation. A port that re-derives the rules from the
 prose will get something subtly different, and nothing downstream will notice
 until a message encodes differently.
 
+*Resolved by phase 8 carrying the rules over rather than deleting them with the
+documents that held them: `rust/ENCODER.md` is now where they live, and
+`rust/tests/{infer,build}.rs` pin them against the bytes the AssemblyScript
+module wrote, which the port reproduces exactly.*
+
 ---
 
 ## 4. Decisions taken
@@ -141,7 +149,7 @@ and the snake_case names stay.
 | **5** | `verify.rs`: decode what was just written and walk it against the parsed input | encode is trustworthy |
 | **6** | `inspect.rs`: the span walk, which stops at a table's column where the rendering walk descends into every row | the page's field tree and hex view |
 | **7** | The wasm ABI — `encode`, `section`, `inspect_message`, and the `SELF_DESCRIBING` / `VERIFY` / `PACK_STRINGS` flags; `src/lib/codec.ts` re-pointed; the nine `bun` test files driven against the Rust module; `web_encoded.json` regenerated from Rust | the site runs on Rust |
-| **8** | Delete `web/assembly/`, `asconfig.json`, the `asc` scripts and the `assemblyscript` devDependency; retire `web/PLAN.md` and `web/REFACTOR_PLAN.md`; update CI, the READMEs, `RATIONALE.md`, and `PACKAGE_PLAN.md` §3 | one implementation |
+| **8** | Delete `web/assembly/`, `asconfig.json`, the `asc` scripts and the `assemblyscript` devDependency; retire `web/PLAN.md` and `web/REFACTOR_PLAN.md` **into `rust/ENCODER.md`**, which is the only statement of §3's rules; update CI, the READMEs, `RATIONALE.md`, and `PACKAGE_PLAN.md` | one implementation |
 
 Phases 2–6 each end with a `cargo test` that compares against the AS module's
 output for the same input, which is what makes the oracle discipline real rather
@@ -149,22 +157,87 @@ than stated.
 
 ---
 
-## 6. The size budget
+## 6. The size budget, and what it actually cost
 
-34.8 KB gzipped today, and §2.6 found that **30.6% of it is `core::fmt`'s float
-formatter** — larger than the whole wire layer. The parser side adds `dec2flt`,
-which is the same machinery in reverse, and inference, build, verify and inspect
-add code that has no counterpart in the decoder.
+The budget was **55–65 KB gzipped**, reasoned from §2.6's 34.8 KB decoder plus
+`dec2flt`, inference, build, verify and inspect. It was missed, and the two
+halves of the miss are worth separating, because only one of them is this port's.
 
-A plausible landing zone is **55–65 KB gzipped**, against AssemblyScript's 46.4.
-That is a real regression on the one axis where AS currently wins, and it is why
-the `encode` feature exists: a consumer decoding a Go service's answers should
-link neither the parser nor the encoder, and LTO already drops what the ABI does
-not reach. The npm package can ship both builds and let the entry point choose —
-`PACKAGE_PLAN.md` §3 already commits to two entries for a different reason.
+Measured on the module the page ships — `cargo build --release`, `gzip -9`, no
+`wasm-opt` in the pipeline:
 
-Measure it at the end of phase 4, not at the end of phase 8. If the decode-only
-build has grown at all, something is reaching across the feature gate.
+| | raw | gzipped | code section |
+|---|---:|---:|---:|
+| decode-only, at the commit before this work | 119 828 B | 44 906 B | |
+| decode-only, today (`--no-default-features`) | 120 297 B | **44 967 B** | 108 647 B, 158 functions |
+| with the encoder, today (what the site loads) | 244 511 B | **91 220 B** | 213 883 B, 269 functions |
+
+**The feature gate holds.** Decode-only moved 61 bytes gzipped across the whole
+port, which is the one thing §6 said to watch: nothing reaches across the gate,
+and `colbin::inspect` — the largest ungated module — does not appear in that
+build's symbols at all, because LTO drops what the ABI does not reach. CI now
+asserts the two builds stay materially different rather than leaving it to a
+reading of the source.
+
+**The baseline was already wrong.** §2.6's 34.8 KB describes a decoder from
+before `map[string]any` and the root envelope landed; the same build measures
+44.9 KB gzipped at the commit this port started from. So the honest comparison is
+44.9 → 91.3, and the encoder half costs **46 KB gzipped** against the ~25 KB the
+budget assumed. `PACKAGE_PLAN.md` §2.6 has been corrected rather than left to be
+quoted again.
+
+Where the encode half goes, by owning module in the unstripped build:
+
+| | | |
+|---|---:|---|
+| `build` | 18.0 KB | the plan-driven write, both key widths |
+| `json::parse` + `core::dec2flt` | 14.3 KB | the scanner and the correctly-rounded float parse |
+| `inspect` | 11.0 KB | the span walk — the page's hex view, and nothing else |
+| `infer` | 10.5 KB | two passes over the document |
+| `verify` | 7.1 KB | the self-check |
+| the rest | | wider paths through `wire`, `column` and `packed5` that decode alone does not reach |
+
+`core::flt2dec`, the float *formatter* §2.6 named as 30.6% of the decoder, is
+15.8 KB and unchanged — it is the decoder's cost, not the encoder's.
+
+### 6.1 Both levers named above have since been pulled
+
+**`inspect` is a third feature now**, off by default, and the npm package ships
+the build without it. The reasoning above was right — a consumer that encodes
+has no hex view to feed — and the measurement that settled it is that the span
+walk is 15 KB of the optimised module, 6.6% of its code, in every download.
+`web/` imports `colbin/inspect`, which is a second `.wasm` carrying it;
+everything else gets the one that does not. `js/tests/package.test.mjs` asserts
+the published module has no `inspect_message` export, so the saving cannot
+quietly evaporate.
+
+**`wasm-opt -O3` is in the pipeline**, as a tool rather than a dependency:
+`js/scripts/optimize.mjs` uses `wasm-opt` from the PATH, warns when there is
+none, and CI installs binaryen from its release tarball and sets
+`COLBIN_REQUIRE_WASM_OPT=1` so the published module cannot ship unoptimised.
+The 10 MB devDependency the paragraph above declined turned out to be 104 MB
+(binaryen compiled to JavaScript) or 61 MB of platform binaries behind a
+postinstall — which is exactly what the `--ignore-scripts` install the package
+test asserts cannot run. `-O3` rather than `-Oz`: it wins on *gzipped* size
+(89 710 B against 89 790) and is the level that does not trade speed away, and
+an A/B of the two modules through `bench.mjs` found no throughput difference at
+all.
+
+Where that leaves the modules, optimised:
+
+| | raw | gzipped |
+|---|---:|---:|
+| decode + materialize (`--no-default-features --features materialize`) | 115 192 B | **45 335 B** |
+| encode + materialize — what npm publishes | 209 109 B | **84 195 B** |
+| the same with `inspect` — what `colbin/inspect` and the site carry | 224 199 B | 90 127 B |
+
+Against the 91 220 B the table above measured, the module a consumer downloads
+is now **84 195 B**: 8% off, without dropping anything a consumer calls.
+
+The lever still unpulled is the big one, and it is packaging rather than Rust:
+**the encoder is half the module.** A browser reading a Go service's answers
+wants the 45 KB build, and the package has no entry that hands it one. That is
+`PACKAGE_PLAN.md`'s decision to take, not this document's.
 
 ---
 

@@ -3,26 +3,23 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "asbuild": "asc assembly/index.ts --config asconfig.json --target release && cp build/colbin.wasm static/colbin.wasm",
-    "asbuild:debug": "asc assembly/index.ts --config asconfig.json --target debug",
-    "vectors": "go run ./vectors ./vectors/vectors.json",
-    "test": "bun run vectors && bun run asbuild:test && bun run asbuild && node --test tests/*.test.mjs && bun run emit",
-    "dev": "bun run asbuild && vite dev",
-    "build": "bun run asbuild && vite build",
+    "package": "bun run --cwd ../js build && cp ../js/build/colbin.wasm static/colbin.wasm",
+    "dev": "bun run package && vite dev",
+    "build": "bun run package && vite build",
     "preview": "vite preview",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --threshold error",
-    "asbuild:test": "asc assembly/test-exports.ts --outFile build/test.wasm --runtime incremental --exportRuntime --debug",
-    "browser": "bun run build && node tests/browser.mjs",
-    "emit": "node tests/emit.mjs"
+    "check": "bun run package && svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --threshold error",
+    "browser": "bun run build && node tests/browser.mjs"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.10",
     "@sveltejs/kit": "^2.55.0",
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
-    "assemblyscript": "^0.28.2",
     "svelte": "^5.46.0",
     "svelte-check": "^4.3.2",
     "typescript": "^5.9.2",
     "vite": "^8.0.0"
+  },
+  "dependencies": {
+    "colbin": "workspace:*"
   }
 }

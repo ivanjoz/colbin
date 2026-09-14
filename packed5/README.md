@@ -326,10 +326,5 @@ format change rather than a silent reinterpretation.
 `rust/` is ported and `cargo test --features derive` passes, including the
 cross-language vectors that hold the two implementations to the same bytes.
 
-**`web/assembly/packed5.ts` is not ported.** It still implements the previous
-format — the 3-bit pad prefix, the two behavioural flags, the 4-bit simple table
-— so it will mis-decode anything this package now writes. It was left alone
-deliberately: `web/` is being rebuilt at the moment and its test files are not
-in the tree, so editing it would be editing into a moving target. It needs the
-same treatment `rust/src/packed5.rs` got, plus the narrow blob escapes in its
-wire reader.
+The browser module is `rust/wasm`, which links `rust/src/packed5.rs` — the same
+codec the rest of the crate uses. There is no second packed5 implementation.

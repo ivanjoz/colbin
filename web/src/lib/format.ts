@@ -50,8 +50,8 @@ export function ratio(from: number, to: number): string {
 /**
  * gzip, through the browser's own compressor.
  *
- * Reported as a secondary number, not the headline (PLAN.md §2.0): what colbin
- * controls is the raw size, and gzip inflates anything under about 100 bytes.
+ * Reported as a secondary number, not the headline: what colbin controls is the
+ * raw size, and gzip inflates anything under about 100 bytes.
  * It is here because someone will ask, and because the bytes colbin removes are
  * bytes the compressor no longer has to walk.
  */

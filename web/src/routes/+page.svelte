@@ -5,6 +5,7 @@
     encode,
     inspect,
     preload,
+    unmarshal,
     type Encoded,
     type Field,
     type Diagnostic,
@@ -28,6 +29,12 @@
   let jsonGzip = $state(0)
   let messageGzip = $state(0)
   let encodeMs = $state(0)
+
+  // Which of `unmarshal`'s two paths this example's shape takes — a table at
+  // the root gets the materializer, anything else the JSON-text fallback.
+  // PACKAGE_PLAN.md §5.
+  let unmarshalPath = $state<'materialize' | 'json' | undefined>()
+  let unmarshalMs = $state(0)
 
   let hovered = $state<Field | undefined>()
   let showGzip = $state(false)
@@ -64,6 +71,7 @@
       warnings = []
       encoded = undefined
       report = undefined
+      unmarshalPath = undefined
       status = 'failed'
       return
     }
@@ -72,8 +80,19 @@
     warnings = result.warnings
     encoded = result.value
 
-    const inspected = await inspect(result.value.message, result.value.section)
+    // Run together rather than one after the other: both go through the one
+    // handle `$lib/codec` holds, and firing them at once is what shows that
+    // sharing a handle across concurrent callers is safe (PACKAGE_PLAN.md
+    // §6.1) — each call is a synchronous run of wasm calls with nothing in the
+    // middle for the other to interleave into.
+    const unmarshalStarted = performance.now()
+    const [inspected, unmarshaled] = await Promise.all([
+      inspect(result.value.message, result.value.section),
+      unmarshal(result.value.message, result.value.section),
+    ])
+    unmarshalMs = performance.now() - unmarshalStarted
     report = inspected.ok ? inspected.value : undefined
+    unmarshalPath = unmarshaled.ok ? unmarshaled.value.path : undefined
     status = 'ready'
     ;[jsonGzip, messageGzip] = await Promise.all([
       gzipSize(source),
@@ -192,6 +211,17 @@
               as one file {bytes(encoded.standalone.length)} ·
               {(jsonBytes / encoded.standalone.length).toFixed(2)}×
             </span>
+            {#if unmarshalPath}
+              <span
+                class="fact"
+                title={unmarshalPath === 'materialize'
+                  ? 'A table at the root: unmarshal reads columns straight into objects, no JSON text and no JSON.parse, past 2^53 exactly.'
+                  : 'Not a table at the root, so unmarshal falls back to the JSON-text path — still correct, just not the fast one.'}
+              >
+                unmarshal via {unmarshalPath === 'materialize' ? 'materializer' : 'JSON fallback'}
+                · {unmarshalMs.toFixed(2)} ms
+              </span>
+            {/if}
           </SizeBars>
 
           <div class="download-row">

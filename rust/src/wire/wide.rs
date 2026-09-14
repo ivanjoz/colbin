@@ -648,6 +648,21 @@ impl<'a> Reader8<'a> {
         self.at + 1 < self.buf.len()
     }
 
+    /// Where the cursor sits in the buffer this reader was given.
+    #[must_use]
+    #[inline]
+    pub fn cursor(&self) -> usize {
+        self.at
+    }
+
+    /// The buffer's length, so a span walk can turn a relative cursor into an
+    /// absolute offset without exposing the slice.
+    #[must_use]
+    #[inline]
+    pub fn buf_len(&self) -> usize {
+        self.buf.len()
+    }
+
     /// The field the cursor is on. It does not advance: the typed read does.
     pub fn key(&self) -> u8 {
         self.buf.get(self.at).copied().unwrap_or(0)

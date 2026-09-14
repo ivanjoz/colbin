@@ -76,10 +76,11 @@ implementation in the loop, which is what a feature whose bytes are new needs.
 Every case runs through both deliveries, since they are different bytes and one
 document.
 
-The AssemblyScript module is not ported, and refuses rather than guesses: its
-`OP_COUNT` and `MAP_KIND_COUNT` bounds make an unassigned op a named error, so a
-dynamic message fails loudly there instead of decoding as something else. That is
-the property those bounds were put in for.
+The browser module is `rust/wasm`, which reads a `map[string]any` the same way
+the crate's walk does. JSON→colbin still infers structs rather than maps — a
+document's keys become fields — so the encoder never produces the shape, and a
+Go-written narrow map is still `Error::Unsupported` (a four-bit descriptor has
+no room for a class).
 
 ## A slice or map at the root is wrapped, not given a root shape of its own
 
@@ -1366,7 +1367,7 @@ what it is describing. Tags and error messages are ids, because an id is what th
 author wrote. `FieldIDs` and the schema section are keys, because both describe a
 message that already exists — a decoder reading a section has bytes in front of
 it, not tags, and handing it a number one higher than the nibble it is about to
-match would be a trap in both ports and the AssemblyScript one. That is why
+match would be a trap in both implementations. That is why
 `FieldIDs` reports 0 for a field tagged `cb:"1"`, which is the one surprise in
 the change and is documented where it can be met.
 

@@ -35,6 +35,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Never publish an unoptimised module: `js/scripts/optimize.mjs` warns and
+      # carries on when `wasm-opt` is missing locally, and refuses here.
+      COLBIN_REQUIRE_WASM_OPT: '1'
     steps:
       - uses: actions/checkout@v7
 
@@ -44,12 +48,34 @@ jobs:
           # that generates the vectors here.
           go-version-file: go.mod
       - uses: oven-sh/setup-bun@v2
+      # Pinned rather than left to whatever the runner image ships, because the
+      # suite imports `js/src/*.ts` directly and runs on Node's own type
+      # stripping. That is unflagged from 22.18 and 23.6; an older runner would
+      # fail on an import rather than on a test.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # `wasm-opt` is not a devDependency on purpose: binaryen on npm is 104 MB
+      # of itself compiled to JavaScript, and the `wasm-opt` package fetches
+      # 61 MB of platform binaries from a postinstall, which is exactly what an
+      # `--ignore-scripts` install cannot do. So it is a tool, installed here
+      # from the release binaries. `COLBIN_REQUIRE_WASM_OPT` below turns the
+      # local "warn and carry on" into a hard failure, so the published module
+      # cannot quietly ship 12% larger than it needs to be.
+      - name: Install binaryen
+        run: |
+          version=version_132
+          curl -sSfL "https://github.com/WebAssembly/binaryen/releases/download/${version}/binaryen-${version}-x86_64-linux.tar.gz" \
+            | tar -xz
+          echo "$PWD/binaryen-${version}/bin" >> "$GITHUB_PATH"
+      - run: wasm-opt --version
 
       - name: Cache Bun packages
         uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('web/bun.lock') }}
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
           restore-keys: |
             ${{ runner.os }}-bun-
 
@@ -85,28 +111,32 @@ jobs:
             echo "not gofmt'd:"; echo "$unformatted"; exit 1
           fi
 
-      # The Rust decoder (rust/). Its corpus is generated from the Go codecs
+      # The Rust crate (rust/) and the wasm module (rust/wasm). The corpus is
+      # generated from the Go codecs
       # that just passed, so regenerating it here and failing on a diff is what
       # catches a Go-side format change nobody ported — the committed vectors
       # are only as good as the day they were written.
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
       - name: Cache Cargo
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+            rust/wasm/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'rust/wasm/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
       - name: Regenerate the Rust vectors from the Go codecs
         run: |
           go run ./rust/vectors
-          git diff --exit-code rust/vectors/vectors.json rust/vectors/composites.json
+          git diff --exit-code rust/vectors/vectors.json
       - run: cargo fmt --all -- --check
+      - run: cargo fmt --manifest-path rust/wasm/Cargo.toml -- --check
       # Both feature states: the crate has no dependencies by default, and the
       # derive is the one thing that adds any, so a warning that only appears in
       # one of the two is still a warning.
@@ -114,37 +144,91 @@ jobs:
       - run: cargo clippy --all-targets --features derive -- -D warnings
       - run: cargo test
       - run: cargo test --features derive
-
-      # The other direction: Rust writes a corpus and the Go decoder reads it.
-      # Byte equality only covers the cases where the two encoders agree exactly,
-      # and a string that packs smaller than raw is deliberately not one of them —
-      # so without this, those messages are never handed to Go at all.
-      - name: Verify the Rust encoder against the Go decoder
+      # And the state nothing else covers: no `std`, no `encode`. It is what the
+      # decode-only wasm module links, and `cargo test` never builds it because
+      # `encode` is on by default — so a `use std::` or an un-gated reference
+      # into the encoder compiles everywhere but there.
+      - run: cargo clippy --no-default-features -- -D warnings
+      - name: Clippy the wasm crate, every feature state
+        # `inspect` is off by default and the demo page is its only caller, so
+        # nothing else would compile it — which is how an un-gated reference
+        # into the span walk would reach main.
         run: |
-          cargo run --features derive --example emit_vectors
-          git diff --exit-code rust/vectors/rust_encoded.json
-          go test ./rust/vectors
+          cargo clippy --manifest-path rust/wasm/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
+          cargo clippy --manifest-path rust/wasm/Cargo.toml --target wasm32-unknown-unknown --no-default-features -- -D warnings
+          cargo clippy --manifest-path rust/wasm/Cargo.toml --target wasm32-unknown-unknown --features inspect -- -D warnings
+          cargo clippy --manifest-path rust/wasm/Cargo.toml --target wasm32-unknown-unknown --no-default-features --features inspect -- -D warnings
 
+      # RUST_WASM_PLAN.md §6: the encoder is behind a feature so that a consumer
+      # decoding a Go service's answers does not download it. That only stays
+      # true while something checks, and the check is that the decode-only module
+      # is materially smaller than the one the page ships.
+      - name: The feature gate holds
+        run: |
+          cargo build --release --target wasm32-unknown-unknown \
+            --manifest-path rust/wasm/Cargo.toml --no-default-features
+          decode=$(wc -c < rust/wasm/target/wasm32-unknown-unknown/release/colbin_wasm.wasm)
+          cargo build --release --target wasm32-unknown-unknown \
+            --manifest-path rust/wasm/Cargo.toml
+          encode=$(wc -c < rust/wasm/target/wasm32-unknown-unknown/release/colbin_wasm.wasm)
+          echo "decode-only $decode B, with the encoder $encode B"
+          # Measured at 115 KB against 209 KB, optimised. The bound is loose on
+          # purpose: it fails when the encoder stops being droppable, not when
+          # it grows. (These are the cargo artifacts, which carry a `name`
+          # section the shipped module does not — see the profile in
+          # rust/wasm/Cargo.toml.)
+          test "$decode" -lt $((encode * 2 / 3))
+
+      # The corpus reader, which also asserts the committed file is what the Go
+      # codecs produce today.
+      #
+      # This step used to do more: `cargo run --example emit_vectors` wrote a
+      # corpus from the *Rust* derive for the Go decoder to read, which is the
+      # only check of that direction — byte equality covers the cases where the
+      # two encoders agree exactly, and a string that packs smaller than raw is
+      # deliberately not one of them. The example and its corpus went in the
+      # byte-aligned refactor (8b2bd7d) and the step has been failing on a
+      # missing target ever since. Rebuilding it is worth doing; asserting it
+      # here while it does not exist is not.
+      - name: Read the Rust corpus back with Go
+        run: go test ./rust/vectors
+
+      # Installs both workspace members (js/, web/) from the one root lockfile.
       - name: Install
-        working-directory: web
         run: bun install --frozen-lockfile
 
       # The same discipline the Rust corpus gets, and for the same reason: the
       # module asserts against the committed file, so a Go-side format change
       # that nobody ported must fail on the Go side's own push rather than leave
       # the port passing against a corpus that no longer describes anything.
-      - name: Regenerate the web vectors from the Go codecs
+      - name: Regenerate the js vectors from the Go codecs
         run: |
-          go run ./web/vectors
-          git diff --exit-code web/vectors/vectors.json
+          go run ./js/vectors
+          git diff --exit-code js/vectors/vectors.json
 
-      # Compiles both WebAssembly modules and runs the suite against those
-      # vectors. They are what make this a comparison with colbin rather than
-      # with itself: a module that agrees with its own output would pass a
-      # round-trip test and fail here.
-      - name: Test the module against vectors generated from the Go codecs
-        working-directory: web
+      # Compiles the Rust WebAssembly module, builds the npm package around it,
+      # and runs the suite against those vectors. They are what make this a
+      # comparison with colbin rather than with itself: a module that agrees
+      # with its own output would pass a round-trip test and fail here.
+      #
+      # `bun run test` ends with `scripts/tarball.mjs` — `npm pack`, install the
+      # tarball into a temporary directory, and import every entry from a file
+      # that has never seen this checkout. Packaging is therefore checked on
+      # every pull request rather than discovered at a tag, which is the point
+      # of having it here rather than in the release job.
+      - name: Test the module, and the package a consumer would install
+        working-directory: js
         run: bun run test
+
+      # PACKAGE_PLAN.md §2 is the entire justification for the package's
+      # design, so letting it rot silently would be the obvious way to waste
+      # the work. The gate is a ratio against `JSON.parse` measured in the same
+      # process on the same corpus, never a millisecond figure: a shared runner
+      # varies by more than any regression worth catching, and the ratio does
+      # not.
+      - name: Benchmark, and fail on a regression
+        working-directory: js
+        run: bun run bench:check
 
       # And the other direction, which no byte-for-byte corpus can test: the
       # module encodes, Go decodes. Byte equality only covers the cases where
@@ -152,14 +236,21 @@ jobs:
       # JavaScript client writing for a Go service — is not one of them.
       - name: Verify the module's encoder against the Go decoder
         run: |
-          git diff --exit-code web/vectors/web_encoded.json
-          go test ./web/vectors
+          git diff --exit-code js/vectors/web_encoded.json
+          go test ./js/vectors
 
       - name: Type-check
         working-directory: web
         run: bun run check
 
-      - name: Build the site
+      # The site imports `colbin/asset` from the workspace, exactly as a
+      # stranger would from npm, which makes this the bundler integration test:
+      # it resolves the exports map through Vite and emits the `.wasm` from the
+      # entry's own `new URL('./colbin.wasm', import.meta.url)`. That is why
+      # the package moved out of `web/` (PACKAGE_PLAN.md §3 and §9) — please do
+      # not "simplify" it back to a relative import, which would leave nothing
+      # checking any of it.
+      - name: Build the site, which is the package's bundler test
         working-directory: web
         run: bun run build
 
@@ -180,14 +271,23 @@ jobs:
           test -f web/build-site/.nojekyll
           test -s web/build-site/colbin.wasm
 
-      # The module on its own, for anyone who wants it without the page. The
-      # site publishes the same bytes at https://colbin.un.pe/colbin.wasm; this
-      # is the copy that outlives the deploy it shipped in.
-      - name: Publish the module
+      # The modules on their own, for anyone who wants them without the page,
+      # and for the release job — which publishes to npm from these bytes
+      # rather than compiling again. Two of them: the module the package
+      # publishes, and the same build with the field-tree walk in it that
+      # `colbin/inspect` carries (`rust/wasm/Cargo.toml`, feature `inspect`).
+      # The site serves the first at https://colbin.un.pe/colbin.wasm.
+      - name: Stage the modules
+        run: |
+          mkdir -p modules
+          cp web/build-site/colbin.wasm modules/colbin.wasm
+          cp js/build/colbin.inspect.wasm modules/colbin.inspect.wasm
+          ls -l modules
+      - name: Publish the modules
         uses: actions/upload-artifact@v7
         with:
           name: colbin-wasm
-          path: web/build-site/colbin.wasm
+          path: modules/
           if-no-files-found: error
 
       # Anything that is not main stops here: everything above is a check, a
@@ -233,6 +333,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # For npm's trusted publishing: the job mints an OIDC token instead of
+      # holding an NPM_TOKEN secret, so there is no long-lived credential to
+      # leak and provenance is stamped automatically.
+      id-token: write
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -240,7 +344,43 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" colbin.wasm \
+          gh release create "${GITHUB_REF_NAME}" colbin.wasm colbin.inspect.wasm \
             --repo "${GITHUB_REPOSITORY}" \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes
+
+      # And the same bytes to npm — literally the same bytes: the module the
+      # package ships is the artifact downloaded above, the one the tests ran
+      # against, rather than a second compile of the same commit. That is why
+      # this job needs no Rust toolchain, and why the publish runs with
+      # `--ignore-scripts`: `prepack` would rebuild `dist/` from cargo and undo
+      # exactly the property this step is for.
+      #
+      # Trusted publishing (npm's OIDC flow) requires the package to exist
+      # already, so 0.1.0 is published by hand once and every tag after it is
+      # automatic. That manual step is deliberate, not an oversight.
+      - uses: actions/checkout@v7
+        with:
+          path: repo
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Publish to npm
+        working-directory: repo
+        run: |
+          # One tag drives all three implementations (PACKAGE_PLAN.md §8), so
+          # the version in js/package.json has to be the tag without its `v` —
+          # checked here rather than discovered as a published package nobody
+          # can match to a commit.
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p "require('./js/package.json').version")"
+          if [ "$tag" != "$version" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match js/package.json ${version}"; exit 1
+          fi
+          bun install --frozen-lockfile
+          mkdir -p js/build
+          cp ../colbin.wasm ../colbin.inspect.wasm js/build/
+          bun run --cwd js dist
+          cd js && npm publish --provenance --access public --ignore-scripts

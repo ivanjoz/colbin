@@ -377,11 +377,14 @@ is most of a REST payload. Phases 4–5 are where the real work is.
 
 ## 9. Out of scope
 
-- **Writing** colbin from JSON (`parseJSON` in `web/assembly/json.ts` did this).
-  A separate job, and harder: it needs type inference.
-- **Re-porting `web/assembly/`.** It targets the old version-byte format and is
-  stale in the same way the Rust port is. This plan is Go-only; the TypeScript
-  follows once the section is settled.
+- **Writing** colbin from JSON. A separate job, and harder: it needs type
+  inference. *(Since built, in Rust rather than in Go: `rust/ENCODER.md` states
+  the rules and `rust/src/{json,infer,build,verify}.rs` implement them. Go still
+  has no JSON encoder.)*
+- **The browser module.** It targets the old version-byte format and is stale in
+  the same way the Rust port is. This plan is Go-only; the port follows once the
+  section is settled. *(Since done twice: re-ported onto this format, then
+  replaced by `rust/wasm` — `RUST_WASM_PLAN.md`.)*
 - `interface{}` fields. They have no wire form yet, with or without a schema.
 
 ---

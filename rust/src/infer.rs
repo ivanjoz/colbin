@@ -1,15 +1,15 @@
-//! Inference (`web/PLAN.md` §3) and enforcement (§4), producing a schema.
+//! Inference (`rust/ENCODER.md` §1–§2) and enforcement (§4), producing a schema.
 //!
-//! Mirrors `web/assembly/infer.ts`. Two passes, and the split is load-bearing.
-//! The first observes every record without deciding anything; the second
-//! resolves each observation into an op and refuses the ones that contradict
-//! themselves. A schema decided from record 0 that record 500 contradicts is
-//! precisely how an encoder emits a body its own schema does not describe (§4.5,
-//! rule 1), so nothing here commits to a type until every record has been seen.
+//! Two passes, and the split is load-bearing. The first observes every record
+//! without deciding anything; the second resolves each observation into an op
+//! and refuses the ones that contradict themselves. A schema decided from record
+//! 0 that record 500 contradicts is precisely how an encoder emits a body its
+//! own schema does not describe (§5, rule 1), so nothing here commits to a type
+//! until every record has been seen.
 //!
 //! # Field ids are sequential, in first-seen order
 //!
-//! `web/REFACTOR_PLAN.md` §5.2. Go derives an untagged field's id from `fnv8` of
+//! `ENCODER.md` §3. Go derives an untagged field's id from `fnv8` of
 //! its name and probes past collisions, which lands anywhere in 0..255 and so
 //! puts every message on eight-bit keys. Numbering 0, 1, 2 instead puts any
 //! object of sixteen fields or fewer on the four-bit fast path, which is a byte
@@ -21,7 +21,7 @@
 //!
 //! # The root is a struct, and JSON's top level often is not
 //!
-//! `web/REFACTOR_PLAN.md` §5.1. A colbin message is a struct and nothing else,
+//! `ENCODER.md` §1. A colbin message is a struct and nothing else,
 //! so an array or a bare scalar at the top level is wrapped in a one-field
 //! envelope — the same one `codec/envelope.go` puts round a Go slice, down to
 //! the field being called `rows`. It is marked in the section rather than
@@ -595,7 +595,7 @@ impl<'a, 'd> Inferrer<'a, 'd> {
             field.op = op?;
 
             // A key absent from some record is indistinguishable from an
-            // explicit null on the wire (`web/PLAN.md` §6), and both make the
+            // explicit null on the wire (`ENCODER.md` §6), and both make the
             // column a pointer — where the format allows one.
             if present < objects && field.op != OP_POINTER && pointable(field.op) {
                 field.elem_op = field.op;

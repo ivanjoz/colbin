@@ -1,5 +1,5 @@
-// The phase-3 gate (PLAN.md 10): headless Chrome drives every example end to
-// end, and any console error fails the run.
+// The end-to-end gate: headless Chrome drives every example, and any console
+// error fails the run.
 //
 // Driven over the DevTools protocol with Node's own WebSocket, so the check
 // costs no dependency and runs the same in CI as it does here.
@@ -156,7 +156,8 @@ try {
         "message: document.querySelector('.box.bad p')?.textContent ?? ''," +
         "ratio: document.querySelector('.headline strong')?.textContent ?? ''," +
         "fields: document.querySelectorAll('.tree .row').length," +
-        "hexCells: document.querySelectorAll('.hex .cell').length" +
+        "hexCells: document.querySelectorAll('.hex .cell').length," +
+        "unmarshal: Array.from(document.querySelectorAll('.fact')).find(f => /^unmarshal via/.test(f.textContent))?.textContent ?? ''" +
         '}))()'
     )
 
@@ -170,8 +171,30 @@ try {
       check(name + ': has a ratio', /x$/.test(state.ratio), state.ratio)
       check(name + ': fields listed', state.fields > 0)
       check(name + ': hex rendered', state.hexCells > 0)
+      // `inspect` and `unmarshal` are fired together (PACKAGE_PLAN.md §6.1)
+      // through the one `Codec` handle `$lib/codec` holds — two concurrent
+      // callers sharing an instance, which is the case the handle's design
+      // claims is safe by construction and this is the test of it.
+      check(name + ': unmarshal ran', /^unmarshal via (materializer|JSON fallback)/.test(state.unmarshal), state.unmarshal)
     }
   }
+
+  // `products`/`metrics`/`clients` are bare arrays past the table threshold —
+  // the materializer's exact shape (§5.5). `bigints` is three records, under
+  // the threshold, so it stays a plain list and unmarshal's own fallback runs.
+  await click('Products, 200 records')
+  await wait(700)
+  const fastPath = await evaluate(
+    "Array.from(document.querySelectorAll('.fact')).find(f => /^unmarshal via/.test(f.textContent))?.textContent ?? ''"
+  )
+  check('a bare-array table takes the materializer', /materializer/.test(fastPath), fastPath)
+
+  await click('Integers past 2^53')
+  await wait(700)
+  const fallbackPath = await evaluate(
+    "Array.from(document.querySelectorAll('.fact')).find(f => /^unmarshal via/.test(f.textContent))?.textContent ?? ''"
+  )
+  check('a plain list falls back to JSON', /JSON fallback/.test(fallbackPath), fallbackPath)
 
   // The honesty cases have to show what the format actually does — and what
   // that is has changed. The schema now travels out of band, so a lone object

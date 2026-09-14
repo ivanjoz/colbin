@@ -1,6 +1,6 @@
 //! A schema-driven walk of a message, into JSON text.
 //!
-//! Mirrors `codec/json.go` and `web/assembly/walk.ts`. The walk is what a reader
+//! Mirrors `codec/json.go`. The walk is what a reader
 //! does when it has bytes and a section and no Rust type: the section says what
 //! each key holds, and this steps the message against it.
 //!
@@ -50,7 +50,7 @@ const MAX_DEPTH: u32 = 128;
 /// million identical rows really does fit in a handful of bytes. The bound is a
 /// budget, not a proof — four million rows is 32 MB per integer column, already
 /// past what a browser tab should be handed.
-const MAX_ROWS: usize = 1 << 22;
+pub(crate) const MAX_ROWS: usize = 1 << 22;
 
 /// Renders a message as the JSON `encoding/json` would have written for it.
 ///
@@ -859,14 +859,18 @@ impl<'s> Walker<'s> {
 }
 
 /// The columns of one table, gathered before the transpose.
-struct Gathered<'a> {
-    present: Vec<bool>,
-    ints: Vec<Vec<i64>>,
-    strings: Vec<Vec<&'a [u8]>>,
+///
+/// `pub(crate)` rather than private: [`crate::materialize`] reuses this
+/// gather step verbatim — a table row is only ever a columnable op (see
+/// [`plan::columnable_op`]), so the same per-column read serves both sinks.
+pub(crate) struct Gathered<'a> {
+    pub(crate) present: Vec<bool>,
+    pub(crate) ints: Vec<Vec<i64>>,
+    pub(crate) strings: Vec<Vec<&'a [u8]>>,
 }
 
 impl<'a> Gathered<'a> {
-    fn new(fields: usize) -> Self {
+    pub(crate) fn new(fields: usize) -> Self {
         Self {
             present: alloc::vec![false; fields],
             ints: (0..fields).map(|_| Vec::new()).collect(),
@@ -874,7 +878,7 @@ impl<'a> Gathered<'a> {
         }
     }
 
-    fn take(&mut self, columns: &mut Reader<'a>, index: usize, op: u8, rows: usize) {
+    pub(crate) fn take(&mut self, columns: &mut Reader<'a>, index: usize, op: u8, rows: usize) {
         if op == OP_STRING {
             self.strings[index] = columns.strings_bytes();
         } else {
@@ -883,7 +887,7 @@ impl<'a> Gathered<'a> {
         self.present[index] = true;
     }
 
-    fn take8(&mut self, columns: &mut Reader8<'a>, index: usize, op: u8, rows: usize) {
+    pub(crate) fn take8(&mut self, columns: &mut Reader8<'a>, index: usize, op: u8, rows: usize) {
         if op == OP_STRING {
             self.strings[index] = columns.strings_bytes();
         } else {
@@ -900,7 +904,7 @@ impl<'a> Gathered<'a> {
 /// produce different numbers. Hence the dispatch.
 macro_rules! read_column_at {
     ($name:ident, $reader:ty) => {
-        fn $name(columns: &mut $reader, op: u8, rows: usize) -> Vec<i64> {
+        pub(crate) fn $name(columns: &mut $reader, op: u8, rows: usize) -> Vec<i64> {
             match plan::width_of_op(op) {
                 1 => {
                     let mut values: Vec<i8> = Vec::new();

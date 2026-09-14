@@ -1,6 +1,6 @@
 //! The encode self-check, and the whole encode it closes.
 //!
-//! `web/PLAN.md` §4.3 argued that a self-check costing one decode is worth
+//! `rust/ENCODER.md` §5 argues that a self-check costing one decode is worth
 //! paying, on the evidence that five sixths of single-byte corruptions of a
 //! colbin message decode to well-formed, *wrong* JSON. A decoder cannot tell.
 //! An encoder can, because it still has the input.
@@ -19,10 +19,9 @@ use colbin::{json::parse, section, verify, walk};
 fn oracle() -> serde_json::Value {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../web/vectors/web_encoded.json"
+        "/../js/vectors/web_encoded.json"
     );
-    let text =
-        std::fs::read_to_string(path).expect("web_encoded.json — run `bun run emit` in web/");
+    let text = std::fs::read_to_string(path).expect("web_encoded.json — run `bun run emit` in js/");
     serde_json::from_str(&text).expect("web_encoded.json is not JSON")
 }
 

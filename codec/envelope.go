@@ -64,7 +64,7 @@ import (
 //
 // It reaches no document, because every walker unwraps it — so what it is for is
 // agreeing with the browser module, which builds the same envelope round a JSON
-// array and names it this (web/assembly/infer.ts, ENVELOPE_FIELD). Two ports
+// array and names it this (rust/src/infer.rs, ENVELOPE_FIELD). Two ports
 // writing the same document have no business writing different bytes for it.
 const envelopeFieldName = "rows"
 

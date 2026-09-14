@@ -636,6 +636,21 @@ impl<'a> Reader<'a> {
         self.at < self.buf.len()
     }
 
+    /// Where the cursor sits in the buffer this reader was given.
+    #[must_use]
+    #[inline]
+    pub fn cursor(&self) -> usize {
+        self.at
+    }
+
+    /// The buffer's length, so a span walk can turn a relative cursor into an
+    /// absolute offset without exposing the slice.
+    #[must_use]
+    #[inline]
+    pub fn buf_len(&self) -> usize {
+        self.buf.len()
+    }
+
     /// The field the cursor is on. It does not advance: the typed read does.
     /// Only meaningful while [`Reader::more`] reports true.
     pub fn key(&self) -> u8 {
@@ -837,24 +852,29 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// Reads a string written by [`Writer::packed_string`] or by
-    /// [`Writer::string`]. The header's escape code says which, so a reader needs
-    /// no configuration and cannot be wrong about it.
-    pub fn packed_string(&mut self) -> String {
-        let Some(header) = self.header() else {
-            return String::new();
-        };
+    /// Steps over a string field of either encoding without expanding it, which
+    /// is what a walk that wants the *span* rather than the characters needs.
+    ///
+    /// Reading a string as though it were always raw is the bug the AssemblyScript
+    /// port found in Go's own schema walk: `bytes()` works until the string is
+    /// packed, then refuses a message the writer produced.
+    pub fn skip_string(&mut self) {
+        let _ = self.string_span();
+    }
+
+    /// The payload of a string field of either encoding, and whether it is packed
+    /// in upper case. Advances past the field. `None` on a truncated header.
+    fn string_span(&mut self) -> Option<(&'a [u8], Option<bool>)> {
+        let header = self.header()?;
         let (size, start, upper) = if header & MORE_SIZE_FLAG == 0 {
-            match self.blob_size() {
-                Some((size, start)) => (size, start, None),
-                None => return String::new(),
-            }
+            let (size, start) = self.blob_size()?;
+            (size, start, None)
         } else {
             match header & 0b111 {
                 code @ (ESCAPE_PACKED1_LO | ESCAPE_PACKED1_UP) => {
                     let Some(&low) = self.buf.get(self.at + 1) else {
                         self.fail(Error::Truncated);
-                        return String::new();
+                        return None;
                     };
                     (
                         usize::from(low),
@@ -866,27 +886,36 @@ impl<'a> Reader<'a> {
                     let rest = &self.buf[self.at + 1..];
                     if rest.len() < 4 {
                         self.fail(Error::Truncated);
-                        return String::new();
+                        return None;
                     }
                     let size = le_uint(rest, 4) as usize;
                     if size <= 0xFF {
                         self.fail(Error::BadEscape); // one size has one encoding
-                        return String::new();
+                        return None;
                     }
                     (size, self.at + 5, Some(code == ESCAPE_PACKED4_UP))
                 }
-                _ => match self.blob_size() {
-                    Some((size, start)) => (size, start, None),
-                    None => return String::new(),
-                },
+                _ => {
+                    let (size, start) = self.blob_size()?;
+                    (size, start, None)
+                }
             }
         };
         if size > self.buf.len() - start {
             self.fail(Error::Truncated);
-            return String::new();
+            return None;
         }
         self.at = start + size;
-        let payload = &self.buf[start..start + size];
+        Some((&self.buf[start..start + size], upper))
+    }
+
+    /// Reads a string written by [`Writer::packed_string`] or by
+    /// [`Writer::string`]. The header's escape code says which, so a reader needs
+    /// no configuration and cannot be wrong about it.
+    pub fn packed_string(&mut self) -> String {
+        let Some((payload, upper)) = self.string_span() else {
+            return String::new();
+        };
         let Some(upper) = upper else {
             return match core::str::from_utf8(payload) {
                 Ok(value) => value.to_owned(),
@@ -1081,7 +1110,7 @@ impl<'a> Reader<'a> {
 
     /// Reads a narrow composite's length and returns its body, advancing past
     /// the whole field.
-    fn composite_body(&mut self) -> Option<&'a [u8]> {
+    pub(crate) fn composite_body(&mut self) -> Option<&'a [u8]> {
         if self.at + 2 > self.buf.len() {
             self.fail(Error::Truncated);
             return None;

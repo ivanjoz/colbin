@@ -174,9 +174,14 @@ reader skipping a field it does not know, derived ids, the packed5 encoding, and
 fourteen column shapes across all four element widths.
 
 Beyond it: `tests/wire.rs` drives all three framings directly, `tests/derive.rs`
-covers the generated code, and both walk every truncation of a valid message and
-a large space of arbitrary bytes, requiring an error rather than a panic. The
-crate is `#![forbid(unsafe_code)]`.
+covers the generated code, `tests/parse.rs` / `infer.rs` / `build.rs` /
+`verify.rs` / `inspect.rs` pin the JSON encoder and the span walk, and both walk
+every truncation of a valid message and a large space of arbitrary bytes,
+requiring an error rather than a panic. The crate is `#![forbid(unsafe_code)]`.
+
+The browser module is `rust/wasm`: a `cdylib` with `alloc` / `encode` /
+`set_schema` / `decode` / `inspect_message`. Decode-only is
+`--no-default-features`; the demo site links the default, which includes encode.
 
 ## Dynamic values
 
@@ -187,8 +192,22 @@ renders, including the type tag that names a record in the section so an array o
 them costs what a typed array costs rather than repeating its field names per
 row. `wire::Kind` is what a descriptor classifies to.
 
-It does not write one. `#[derive(Colbin)]` knows its own fields and has no
-dynamic value to encode, and the browser case this port exists for is one-way.
+It does not write one from `#[derive(Colbin)]`, which knows its own fields.
+JSON→colbin (`build::encode`, behind the `encode` feature) infers structs from
+a document and is the path the browser module uses.
+
+## JSON text in, colbin bytes out
+
+`build::encode` needs no type at compile time: it scans the text exactly, infers
+a schema from every record before committing to one, writes the body from that
+schema and — under `VERIFY` — reads the message back and walks it against the
+input. It is the one thing in this repository that Go has no counterpart for, so
+it is also the one thing with no cross-language oracle.
+
+**[`ENCODER.md`](ENCODER.md) is its specification**: what a document infers to,
+what is refused, what only warns, and the three differences a round trip does
+not restore. It is the statement the implementation is held to, and changing a
+rule means changing both it and `tests/{infer,build}.rs`, which pin the bytes.
 
 `tests/dynamic.rs` pins the reader against `rust/vectors/vectors.json`, which Go
 writes. Every case is checked under both deliveries — the out-of-band section and
