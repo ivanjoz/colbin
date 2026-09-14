@@ -71,7 +71,13 @@ pub mod diag;
 /// Type inference: a JSON document in, a schema out.
 #[cfg(feature = "encode")]
 pub mod infer;
+/// The field tree of a message, with a byte span on every node.
+pub mod inspect;
 pub mod json;
+/// A table's columns into a flat typed buffer, skipping the JSON-text
+/// intermediate for the one shape that supports it. See the module doc.
+#[cfg(feature = "materialize")]
+pub mod materialize;
 pub mod packed5;
 pub mod plan;
 pub mod section;

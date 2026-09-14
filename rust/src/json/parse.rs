@@ -1,20 +1,20 @@
 //! A UTF-8 JSON scanner producing a flat value tree.
 //!
-//! Mirrors `web/assembly/json.ts`, which exists rather than a host's
-//! `JSON.parse` for one reason (`web/PLAN.md` §2.1): `JSON.parse` turns
-//! 7295013456321098765 into 7295013456321098800. colbin has an exact int64
-//! column, so the parse has to be exact too, and that means reading the digits
-//! here.
+//! It exists rather than a host's `JSON.parse` for one reason
+//! (`rust/ENCODER.md` §5): `JSON.parse` turns 7295013456321098765 into
+//! 7295013456321098800. colbin has an exact int64 column, so the parse has to be
+//! exact too, and that means reading the digits here.
 //!
 //! # The 293 lines that did not come across
 //!
-//! The AssemblyScript module carries `decimal.ts`, an arbitrary-precision
-//! rational conversion, because AssemblyScript's `parseFloat` is not correctly
-//! rounded and "numbers are exact" is the module's central claim. Rust's
-//! `str::parse::<f64>` *is* correctly rounded, so the whole of that file is
-//! [`f64::from_str`] here. The float half of `rust/vectors/vectors.json` —
-//! 513 literals, Go's `strconv.ParseFloat` for every expected bit pattern — is
-//! what says so rather than the documentation does.
+//! The AssemblyScript module this replaced carried `decimal.ts`, an
+//! arbitrary-precision rational conversion, because AssemblyScript's
+//! `parseFloat` is not correctly rounded and "numbers are exact" is the central
+//! claim. Rust's `str::parse::<f64>` *is* correctly rounded, so the whole of
+//! that file is [`f64::from_str`] here. The float half of
+//! `rust/vectors/vectors.json` — 513 literals, Go's `strconv.ParseFloat` for
+//! every expected bit pattern — is what says so rather than the documentation
+//! does.
 //!
 //! # The tree is arrays
 //!
@@ -38,8 +38,7 @@ pub const K_STRING: u8 = 5;
 pub const K_ARRAY: u8 = 6;
 pub const K_OBJECT: u8 = 7;
 
-/// `web/PLAN.md` §4.2. Both are proposals in the plan, and both are enforced
-/// here.
+/// `ENCODER.md` §4 states both, and both are enforced here.
 pub const MAX_DEPTH: u32 = 64;
 pub const MAX_INPUT: usize = 64 * 1024 * 1024;
 
@@ -425,8 +424,7 @@ impl<'a, 'd> Parser<'a, 'd> {
     /// Reads a string into the text arena and returns its byte length.
     ///
     /// Lone surrogates become U+FFFD, which is what `encoding/json` does; the
-    /// bytes handed to packed5 are then always valid UTF-8 and the oracle agrees
-    /// (`web/PLAN.md` §4.5).
+    /// bytes handed to packed5 are then always valid UTF-8 (`ENCODER.md` §5).
     fn string_bytes(&mut self) -> Option<u32> {
         let start_len = self.doc.text.len();
         self.pos += 1; // opening quote

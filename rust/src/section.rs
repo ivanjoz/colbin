@@ -1,6 +1,6 @@
 //! The schema section: a type, in bytes, for a reader that has not got it.
 //!
-//! Mirrors `codec/schema_plan.go` and `web/assembly/section.ts`.
+//! Mirrors `codec/schema_plan.go`.
 //!
 //! ```text
 //! section   := [byteLength] [structCount] structDef{structCount}

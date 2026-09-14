@@ -1,14 +1,14 @@
-//! The encode self-check (`web/PLAN.md` §4.5).
+//! The encode self-check (`rust/ENCODER.md` §5).
 //!
-//! Mirrors `web/assembly/verify.ts`. The structural rules in [`crate::infer`]
-//! and [`crate::build`] are an argument that a message says what its input said.
-//! This is the proof: the encoder decodes what it just wrote and walks it
-//! against the parsed input, so the caller hears about a disagreement as an
-//! error rather than as data.
+//! The structural rules in [`crate::infer`] and [`crate::build`] are an argument
+//! that a message says what its input said. This is the proof: the encoder
+//! decodes what it just wrote and walks it against the parsed input, so the
+//! caller hears about a disagreement as an error rather than as data.
 //!
-//! It is on by default and costs roughly one decode. §4.3 established why that
-//! is worth paying, and the corruption sweep in `web/tests/fuzz.test.mjs` puts a
-//! number on it: five sixths of all single-byte corruptions of a colbin message
+//! It is on by default and costs about 70% on top of an encode — a decode, a
+//! parse of the text that came out, and this walk of the two trees. What makes
+//! that worth paying is the corruption sweep in `js/tests/fuzz.test.mjs`, which
+//! puts a number on it: five sixths of all single-byte corruptions of a message
 //! decode to well-formed, *wrong* JSON. A decoder cannot tell. An encoder can,
 //! because it still has the input.
 //!
@@ -20,7 +20,7 @@
 //! wrote only what it had in the order the author typed it.
 //!
 //! Three differences are expected rather than failures, and every one of them is
-//! a documented property of a dense columnar layout (`web/PLAN.md` §6):
+//! a documented property of a dense columnar layout (`ENCODER.md` §6):
 //!
 //!   - a key absent from a record comes back as its zero;
 //!   - an empty array comes back as null;

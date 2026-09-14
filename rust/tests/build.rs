@@ -1,10 +1,12 @@
-//! The encoder, against the module this port replaces.
+//! The encoder, against committed bytes.
 //!
-//! For each of the documents in `web/tests/documents.mjs`,
-//! `web/vectors/web_encoded.json` holds the JSON text that went in and the
-//! message the AssemblyScript encoder wrote for it — twice, once with strings
-//! raw and once with the opt-in packing on. This file encodes the same text and
-//! asserts the bytes are identical.
+//! For each of the documents in `js/tests/documents.mjs`,
+//! `js/vectors/web_encoded.json` holds the JSON text that went in and the
+//! message that came out — twice, once with strings raw and once with the
+//! opt-in packing on. This file encodes the same text and asserts the bytes are
+//! identical. The file was written by the AssemblyScript module
+//! `RUST_WASM_PLAN.md` phase 8 deleted, and reproducing it byte for byte is
+//! what made the deletion safe.
 //!
 //! Byte equality rather than "it decodes to the same document", and that is the
 //! point. Two encoders that agree on the document but not on the bytes are two
@@ -27,10 +29,9 @@ const PACK_STRINGS: u32 = 4;
 fn oracle() -> serde_json::Value {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../web/vectors/web_encoded.json"
+        "/../js/vectors/web_encoded.json"
     );
-    let text =
-        std::fs::read_to_string(path).expect("web_encoded.json — run `bun run emit` in web/");
+    let text = std::fs::read_to_string(path).expect("web_encoded.json — run `bun run emit` in js/");
     serde_json::from_str(&text).expect("web_encoded.json is not JSON")
 }
 
@@ -109,7 +110,7 @@ fn what_the_encoder_writes_the_decoder_reads_back() {
             .unwrap_or_else(|e| panic!("{name}: {e}"));
 
         // The module's own rendering of the same message, which Go has already
-        // agreed with (`go test ./web/vectors`).
+        // agreed with (`go test ./js/vectors`).
         let want = case["json"].as_str().expect("json");
         assert_eq!(
             String::from_utf8(json).expect("the walk writes UTF-8"),

@@ -205,9 +205,9 @@ impl Plan {
 
         let mut index = alloc::vec![-1i16; 256];
         for (at, field) in self.fields.iter().enumerate() {
-            // A section may repeat a key. Last writer wins, matching the way the
-            // AssemblyScript and Go readers index, so a crafted duplicate cannot
-            // make the three disagree about which field it named.
+            // A section may repeat a key. Last writer wins, matching the way
+            // Go's reader indexes, so a crafted duplicate cannot make the two
+            // disagree about which field it named.
             index[field.key as usize] = at as i16;
         }
         self.by_key = index;

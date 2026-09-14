@@ -1,9 +1,7 @@
 //! The body: a schema and a parsed document in, a message out.
 //!
-//! Mirrors `web/assembly/build.ts`.
-//!
 //! The body is generated from the **schema**, never from the raw JSON values
-//! (`web/PLAN.md` §4.5, rule 2). One source of truth means a value that does not
+//! (`rust/ENCODER.md` §5, rule 2). One source of truth means a value that does not
 //! fit its column cannot be written — it is a conflict at fill time instead of a
 //! byte that decodes as something else. So every function here takes the field
 //! it is writing and looks the value up, rather than taking a value and deciding
@@ -41,7 +39,7 @@ use crate::wire;
 const ROOT_SCHEMA: u8 = 0x04;
 
 /// How deep the encoder will recurse. At or below the decoder's bound, so what
-/// this writes it can always read back (`web/PLAN.md` §4.5, rule 4).
+/// this writes it can always read back (`ENCODER.md` §5, rule 4).
 const MAX_DEPTH: u32 = 64;
 
 /// Where a value lives in the document, or that the record does not carry it.

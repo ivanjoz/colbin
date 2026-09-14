@@ -24,7 +24,7 @@ colbin-derive = { version = "0.2", path = "derive", optional = true }
 # crate that touches the standard library; everything else is `core` + `alloc`,
 # which is what lets `rust/wasm` build this with `default-features = false` and
 # link no standard library at all.
-default = ["std", "encode"]
+default = ["std", "encode", "materialize"]
 std = []
 # Only the macro is optional. The `Colbin` trait and the readers and writers it
 # generates against are always present, so a caller can hand-write an impl
@@ -41,6 +41,11 @@ derive = ["dep:colbin-derive"]
 # it already carries and pay for it in bytes downloaded before the page can do
 # anything.
 encode = []
+# Columns into a flat typed buffer instead of decimal text: the table-shaped
+# fast path `PACKAGE_PLAN.md` §5 designs for the browser package. Its own
+# feature, separate from `encode`, because a decode-only client — the one this
+# exists for — wants it without wanting the JSON parser.
+materialize = []
 
 [dev-dependencies]
 # Only the cross-language vector corpus needs this; a consumer sees neither it
@@ -57,3 +62,9 @@ required-features = ["derive"]
 [[test]]
 name = "vectors"
 required-features = ["derive"]
+
+# Drives `colbin::build::encode` to synthesize the big-integer table case, the
+# same reason `derive`/`vectors` are gated above.
+[[test]]
+name = "materialize"
+required-features = ["encode", "materialize"]

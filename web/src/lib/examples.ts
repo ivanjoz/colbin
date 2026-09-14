@@ -1,5 +1,5 @@
 /**
- * The examples (PLAN.md §9).
+ * The examples.
  *
  * Chosen to cover the inference rules and the enforcement rules, not to flatter
  * the format. Five of them are cases colbin does badly on or refuses outright,

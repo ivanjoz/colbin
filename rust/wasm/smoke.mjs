@@ -2,10 +2,10 @@
 //
 //   node rust/wasm/smoke.mjs
 //
-// Against the same corpus the AssemblyScript module is tested on: every case
-// carries a section, a message, and the JSON the module rendered, which
-// `go test ./web/vectors` has already agreed with. Byte equality here makes
-// three implementations that agree.
+// Against the same corpus the bun tests drive: every case carries a section, a
+// message, and the JSON the module rendered, which `go test ./js/vectors` has
+// already agreed with. Byte equality here makes the crate, the wasm ABI and Go
+// agree.
 
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
@@ -21,7 +21,7 @@ const root = join(here, '..', '..')
 const wasm = await readFile(
   process.argv[2] ?? join(here, 'target/wasm32-unknown-unknown/release/colbin_wasm.wasm'),
 )
-const corpus = JSON.parse(await readFile(join(root, 'web/vectors/web_encoded.json'), 'utf8'))
+const corpus = JSON.parse(await readFile(join(root, 'js/vectors/web_encoded.json'), 'utf8'))
 // The dynamic corpus is Go's alone — no third implementation in the loop — which
 // is what makes it the pin for `map[string]any`, whose bytes are new.
 const dynamic = JSON.parse(await readFile(join(root, 'rust/vectors/vectors.json'), 'utf8'))
@@ -137,11 +137,11 @@ for (const item of dynamic.walks) {
   }
 }
 
-console.log(`${pass}/${corpus.cases.length} cases byte-identical to the AssemblyScript module`)
+console.log(`${pass}/${corpus.cases.length} cases byte-identical to the committed corpus`)
 console.log(`${dynamicPass}/${dynamic.walks.length * 2} dynamic deliveries agree with Go`)
 if (failures.length > 0) {
   console.log(`\n${failures.length} failure(s):`)
   for (const line of failures.slice(0, 10)) console.log('  ' + line)
   process.exit(1)
 }
-console.log('the Rust decoder agrees with the module and refuses what it should')
+console.log('the wasm decoder agrees with the corpus and refuses what it should')

@@ -1,6 +1,18 @@
 # `colbin` on npm
 
-**Status: proposed.** Nothing here is built yet.
+**Status: built, not yet published.** Every phase in §11 is done. The package
+is `js/` — `js/src/{core,materialize,index,node,asset,errors}.ts` — it builds
+`rust/wasm` with cargo and copies the artifact in, the demo site consumes it
+from the workspace exactly as a stranger would from npm, and `bun run test`
+ends by packing a tarball, installing it outside the repository and importing
+every entry from a file that has never seen this checkout.
+
+What is left is the one manual step §10 always described: `npm publish` of
+`0.1.0` by hand, because npm's trusted publishing needs the package to exist
+before it can take over. The release job is written and waiting for it.
+
+Read §5.5, §6.1 and §13 for where the implementation differs from the sketch
+below and why. The string dictionary and the token tape (§12) remain out.
 
 The goal, stated plainly: a browser client receives a self-describing colbin
 message from a backend and turns it into a JavaScript object, as fast as that
@@ -29,9 +41,10 @@ published.
    something a consumer on npm can spell. Fatal on its own.
 2. **The `.wasm` is not in git.** `web/.gitignore` ignores `build` and
    `static/colbin.wasm`. npm *does* run `prepare` for git dependencies, so
-   `"prepare": "asc …"` would work — and then every consumer compiles
-   AssemblyScript on install, which breaks under `--ignore-scripts` (CI's usual
-   posture, and pnpm's default).
+   `"prepare": "cargo build …"` would work — and then every consumer needs a
+   Rust toolchain and the `wasm32-unknown-unknown` target on install, which
+   breaks under `--ignore-scripts` (CI's usual posture, and pnpm's default) and
+   on any machine without rustup.
 3. **There is no entry point.** No `main`, no `exports`, and the nearest thing to
    an API — `src/lib/codec.ts` — imports `$app/paths` on line 1 and fetches the
    module from a site-relative URL. It is page code, not a library.
@@ -151,6 +164,30 @@ no formatting to do. For reference, V8 writes the same 107 KB of text with
 `JSON.stringify` in 0.180 ms — the AssemblyScript writer is **9.5x slower than
 native at the one job that dominates decode**.
 
+**The 9.5x is gone.** `web/tests/bench.mjs` now measures the module and V8 in the
+same process on the same corpus, so the comparison is self-contained rather than
+quoted:
+
+| the same 1000 product records | |
+|---|---:|
+| colbin `decode` → 106 670 B of JSON text | **0.20 ms** |
+| `JSON.stringify` of the same document | 0.14 ms |
+| colbin `encode` — scan, infer, build | **1.11 ms** |
+| `encode` with the self-check on | 1.88 ms |
+| `JSON.parse` of the same text | 0.29 ms |
+
+The writer is **1.4x** native, not 9.5x, which is the §2.6 rewrite rather than
+anything in §2.5. That moves what §5 is worth: the text path's 0.20 ms plus a
+`TextDecoder` and a `JSON.parse` is around 0.55 ms to an object in hand against
+native JSON's 0.30, where §2 measured 1.20 against 0.30. The materialiser still
+removes the parse — and should still end up *faster* than native — but it is
+buying a 1.8x gap rather than a 4x one.
+
+Encode is 3.9x `JSON.parse` and does considerably more than parsing: two passes
+of inference over every record, then a write. The self-check is **about 70% on top** —
+not the "roughly one decode" the first plan estimated, because it decodes, parses
+the text that came out, and walks the two trees against each other.
+
 ### 2.3 The floor for a direct path
 
 If the module hands over decoded values instead of text, here is what the
@@ -220,8 +257,9 @@ reuse a tight buffer.
 
 ## 2.6 The decoder was rewritten in Rust, and it is built
 
-Decode-only, which is what a browser client of a Go service needs; encode stays
-in AssemblyScript until someone wants it in the browser.
+Decode-only was what landed first, which is what a browser client of a Go
+service needs. Encode followed in `RUST_WASM_PLAN.md`; the AssemblyScript
+module is gone and the demo site runs on `rust/wasm`.
 
 `rust/wasm` is a `cdylib` with its own workspace — Cargo only honours a
 `[profile]` at a workspace root, and this one sets `panic = "abort"`, which would
@@ -251,6 +289,12 @@ the wire, while still going through the JSON-text intermediate §2.3 was written
 to remove. §5's materialiser is now an optimisation rather than the thing that
 makes this viable.
 
+**The 34.8 KB is a snapshot of that day and should not be quoted for the module
+now.** It predates `map[string]any` and the root envelope; the same decode-only
+build measures **44.9 KB gzipped** by the time `RUST_WASM_PLAN.md` began, and the
+default build — the encoder included, which is what the site loads — is 91.3 KB.
+`RUST_WASM_PLAN.md` §6 has the measurement and the breakdown.
+
 Three findings worth keeping:
 
 **Rust's float formatter is 30.6% of the module** — `core::fmt`'s
@@ -263,24 +307,24 @@ shortest-round-trip is not optional because the vectors compare float spellings.
 within 34 bytes of each other gzipped and within noise on throughput, so the
 level is set to `3`. `wasm-opt` dominates the size outcome.
 
-**A narrow unsigned column comes back sign-extended.** The column codec stores
-signed residuals and the width is derived from the type on both sides, so a `u8`
-column read as `i8` and widened is wrong for any value above 127.
-`web/assembly/walk.ts`'s `columnValue` does exactly that. Unreachable from the
-module's own encoder — JSON numbers always infer to 64-bit — so no vector
-catches it, but reachable from a Go-written message with a `uint8` field. The
-Rust port truncates to the op's width, which is what Go's `uint8(int8(v))` does.
-**The AssemblyScript module should be fixed to match.**
+**A narrow unsigned column came back sign-extended in AssemblyScript.** The
+column codec stores signed residuals and the width is derived from the type on
+both sides, so a `u8` column read as `i8` and widened is wrong for any value
+above 127. Unreachable from the JSON encoder — numbers always infer to 64-bit —
+but reachable from a Go-written message with a `uint8` field. The Rust port
+truncates to the op's width, which is what Go's `uint8(int8(v))` does, and
+deleting the AssemblyScript module closed the bug by removing the file it lived
+in.
 
 ---
 
 ## 3. Decisions taken
 
 **The name is `colbin`,** unscoped. Free on npm, and it matches the Go module
-path and the Rust crate. One name across three implementations.
+path and the Rust crate. One name across the implementations.
 
-**`assembly/` moves into the package, and the site becomes a consumer.** A thin
-package beside `web/` with the `.wasm` copied in is a much smaller diff, and was
+**`rust/wasm` is the module, and the site becomes a consumer.** A thin package
+beside `web/` with the `.wasm` copied in is a much smaller diff, and was
 rejected because the copy step is a seam where a stale module ships and because a
 package whose source lives in another directory has no tests of its own. Under
 this layout the demo site imports `colbin` exactly as a stranger would, which
@@ -307,28 +351,41 @@ than the text path. `toJSONText()` stays available for callers who want the text
 ```
 colbin/
   package.json            workspaces: ["js", "web"]   (new, root)
+  rust/wasm/              the module — stays where it is, see below
   js/                     the package — publishes as `colbin`
     package.json
-    assembly/             moved from web/assembly
-      materialize.ts      NEW — the sink that writes values, not text
-    asconfig.json         moved from web/
     src/
-      core.ts             the Codec handle
-      materialize.ts      reads the value buffer, builds the objects
-      rowbuilder.ts       per-schema generated builders, cached
-      index.ts / node.ts / asset.ts / errors.ts
-    tests/                moved from web/tests
+      core.ts             the Codec handle, and the ABI behind it
+      materialize.ts      reads the value buffer, builds the objects, and
+                          holds the per-schema generated row builders
+      errors.ts           ColbinError
+      shared.ts           what all three entries re-export
+      index.ts            the module inline, as base64
+      node.ts             the `node` condition: reads the .wasm beside itself
+      asset.ts            new URL('./colbin.wasm', import.meta.url)
+      generated/          the base64, written by the build, never committed
+    tests/                moved from web/tests, plus package.test.mjs
     vectors/              moved from web/vectors (Go — generates the corpus)
-    scripts/inline.mjs
+    scripts/inline.mjs    the base64
+    scripts/tarball.mjs   pack, install outside the repo, import every entry
+    build/                the cargo artifact, gitignored
     dist/                 built, gitignored, shipped in the tarball
   web/                    the demo site, now `import { Codec } from 'colbin'`
 ```
 
+**The module's source does not move into `js/`, and cannot.** That was written
+when it was `assembly/` — a TypeScript directory with nothing but `asc` between
+it and the `.wasm`. It is a Rust crate now, in the workspace every other Rust
+consumer links, so `js/` builds it with `cargo` and copies the artifact in. That
+is the copy step the decision above calls a seam, and this is the version of it
+worth accepting: the seam is a `cargo build` in `prepack`, not a `.wasm` committed
+in two places, and `js/tests/` runs against the copy rather than the source, so a
+stale one fails the package's own tests rather than shipping.
+
 Everything under `web/tests` resolves paths relative to `harness.mjs`, and
 `web/vectors` is referenced only by its own files, so the move is mechanical.
 Edited by hand: `web/package.json` scripts, the `working-directory: web` steps
-and `go run ./web/vectors` paths in `.github/workflows/ci.yml`, and the stale
-mentions of `web/assembly/` in `JSON_MODE_PLAN.md` and `packed5/README.md`.
+and `go run ./web/vectors` paths in `.github/workflows/ci.yml`.
 
 The root `package.json` is a workspace manifest only — `private: true`, never
 published. `web/` gets `"colbin": "workspace:*"`.
@@ -434,6 +491,46 @@ materialiser declines falls back to the JSON-text path automatically, and
 `codec.lastPath` reports which ran, so a caller can find out they are on the slow
 one without guessing.
 
+### 5.5 What actually shipped, and where it differs from the sketch
+
+§5.1–5.4 above describe the design; `rust/src/materialize.rs` and
+`js/src/materialize.ts` are the implementation, and `cargo test` and
+`bun run test` both pass against it. Four differences from the sketch, all
+deliberate:
+
+**No `Sink` trait.** The Rust decoder was never refactored to make `Walker`
+generic over a sink the way the old AssemblyScript `walk.ts` was — that would
+have been a large change to well-tested code for a feature that only needs a
+fraction of what `Walker` does. `materialize.rs` is a small, independent
+function that reuses `walk.rs`'s column-gather step (`Gathered`,
+`read_column`/`read_column8`, bumped to `pub(crate)`) rather than the sink
+abstraction, since a table row can only hold a columnable op — no recursion, no
+null bitmap, nothing the general walk needs that a table does.
+
+**The buffer has no offset/length table.** Every run's byte length is derivable
+from `rowCount` and the field's own kind (a bitmap is `ceil(rows/8)` bytes, an
+int or float run is `rows*8`, a string run's blob length is its own offset
+table's last entry), so the header carries only `[kind][flags][nameLen][name]`
+per field — no `dataOff`/`nullBitmapOff` to keep in sync with the data.
+
+**Scope is narrower than "a table": one field, at the root.** The covered shape
+is a root wrapped in the one-field envelope (`Plan::is_envelope` — the top
+level was a bare array or scalar, not an object) whose field the wire encoded
+as a table. A named field holding a table inside a larger object (`{"rows":
+[...]}`, ENCODER.md's own `records-past-the-table-threshold` fixture) is
+**not** covered and falls back to JSON text — broadening this to any one-field
+struct regardless of envelope was considered and rejected, because a
+non-enveloped one-field struct's JSON is `{"name": [...]}`, not a bare array,
+and returning bare rows for one shape and a wrapped object for the other would
+make `unmarshal`'s return type shape-dependent in a way the JSON fallback path
+does not need to be.
+
+**`codec.lastPath` after all.** The first version of this returned
+`path: 'materialize' | 'json'` on each call's result, because there was no
+handle for a persistent flag to live on. There is one now, so the package has
+the field §5.4 asked for; the page's wrapper still turns it back into a field
+on its own result, since that is what its `Outcome` union wants.
+
 ---
 
 ## 6. The API
@@ -453,23 +550,46 @@ const rows = codec.unmarshal(bytes)
 
 `Codec.open()` is async because compiling WebAssembly is; there is no synchronous
 escape, since `new WebAssembly.Module` is blocked on the main thread above 4 KB
-and the module is 169 KB. **`web/PLAN.md` §10 sketches a synchronous `decode` and
-that sketch is not achievable** — correcting it is part of phase 6.
+and the module is 244 KB. An earlier plan sketched a synchronous `decode`; that
+sketch is not achievable, and the sketch went with the document.
+
+**Everything after `open` is synchronous**, which was not planned and is what
+the shape turned out to allow: the compile is hoisted into `open`, and
+`new WebAssembly.Instance` over an already-compiled module needs no `await`. So
+`unmarshal` returns rows rather than a promise of them. §6.1 is what that
+settles.
 
 | | |
 |---|---|
-| `Codec.open(opts?)` | compile + instantiate; `opts.module` takes a pre-compiled `WebAssembly.Module` |
+| `Codec.open(opts?)` | compile + instantiate; `opts.module` takes a pre-compiled `WebAssembly.Module`, `opts.wasm` takes bytes, a `Response` or a URL |
+| `Codec.fromModule(module)` | another handle over a module compiled already |
+| `Codec.preload()` | start the compile without waiting for it |
 | `codec.unmarshal(bytes, opts?)` | **the headline** — objects, via §5, no JSON text |
-| `codec.columns(bytes)` | the zero-copy views themselves, for a caller feeding a grid or a chart that never wants row objects |
-| `codec.toJSONText(bytes)` | the text path, unchanged |
+| `codec.columns(bytes, opts?)` | the columns themselves, for a caller feeding a grid or a chart that never wants row objects; `null` when the message is not that shape |
+| `codec.toJSONText(bytes, opts?)` | the text path, unchanged |
 | `codec.marshal(value \| jsonText, opts?)` | `{ message, section, standalone, warnings }` |
 | `codec.setSchema(section \| null)` | hold a section for what follows; `null` clears |
-| `codec.inspect(bytes)` | the field tree with byte spans |
-| `unmarshal` / `marshal` / … | the same, each on a fresh codec, `await`ed |
-| `ColbinError` | `code`, `offset`, `line`, `path`, `message` |
+| `codec.inspect(bytes, opts?)` | the field tree with byte spans — needs the `colbin/inspect` module (§7) |
+| `codec.lastPath` | `'materialize'` or `'json'` — §5.4's "which one ran" |
+| `codec.canInspect` / `canMaterialize` | which exports this handle's module actually has |
+| `unmarshal` / `marshal` / … | the same without a handle, each `await`ed |
+| `ColbinError` | `code`, `offset`, `line`, `path`, `message`, `warnings` |
 
 `codec.columns()` is worth having for its own sake: a client rendering a table or
-a chart wants columns, and handing back the typed arrays skips even the 7 µs.
+a chart wants columns, and handing back the arrays skips even the 7 µs. Float and
+bigint columns are views straight over the buffer; a bitmap, a UTF-8 blob and a
+pair of i32 lanes are not things a chart can read, so those three are built — the
+cheap end of §2.3, and still less work than the row build this skips.
+
+`marshal`'s `standalone` is **composed, not encoded twice**: the self-describing
+form is the same body behind the same section with bit 2 of the root byte set, so
+it is assembled on first read. `js/tests/package.test.mjs` asserts that against
+what the module writes for `SELF_DESCRIBING` across the whole corpus, which is
+what makes the shortcut checkable rather than merely plausible.
+
+`marshal`'s self-check is **off** by default, where the page has it on: it costs
+about 65% on top of the encode and what it catches is a codec bug rather than a
+caller's mistake. `{ verify: true }` turns it on, and the README says when to.
 
 Failure is a thrown `ColbinError` carrying every diagnostic field, rather than an
 `Outcome` union — a library consumer's normal path is success, and the page keeps
@@ -478,31 +598,78 @@ column, a null where an object belongs), so warnings ride on the result.
 
 ### 6.1 The handle, and the measurement that chose it
 
-`codec.ts` instantiates a fresh module per operation, justified by a claim that a
-shared instance "would grow without bound". That is not true — 2000 decodes on
-one held instance settle at 32 pages (2 MB) and stay flat, because the
-incremental runtime collects. Held is 1.73 ms against 1.97 ms fresh, and
-instantiation alone is 0.062 ms, so speed is not the argument either.
+`codec.ts` used to instantiate a fresh module per operation, justified by a
+claim that a shared instance "would grow without bound". That was not true —
+2000 decodes on one held instance settle at 32 pages (2 MB) and stay flat,
+because the incremental runtime collects. Held is 1.73 ms against 1.97 ms
+fresh, and instantiation alone is 0.062 ms, so speed was not the argument
+either.
 
 The argument is semantic: the format's recommended delivery is **a schema sent
 once per connection**, and a fresh instance per call re-parses the section every
 time and throws away the cached row builder with it. A handle is the shape that
 delivery already implies.
 
+**The pool is gone, and the reason it existed went with it.** What follows is
+kept because it is the measurement that chose the handle, and because it
+explains what the package does *not* need. `js/src/core.ts` holds **one**
+instance per `Codec`, because `Codec.open()` hoists the compile out of the
+calls: `new WebAssembly.Instance` over an already-compiled module is
+synchronous, so every operation on the handle — `unmarshal`, `marshal`,
+`inspect` — is a straight run of wasm calls with no `await` in it. A call that
+cannot be preempted between writing its input and reading its output cannot
+interleave with another one, so `Promise.all([codec.unmarshal(a),
+codec.unmarshal(b)])` is safe by construction rather than by inspection. The
+pool below existed only because that file compiled lazily *inside* each call,
+which is the one thing that put an `await` in the middle. Holding the section
+across messages — the semantic argument above, and the one that actually
+matters — is what the single instance is for: §6's `setSchema` writes it into
+the instance once and the identity check in `Codec.#schema` keeps every message
+after it from re-parsing it.
+
+**It was implemented as a pool first.** `web/src/lib/codec.ts` held a free-list
+of instances (`acquire`/`release`) rather than one handle,
+because every call here is a single synchronous stretch of wasm calls between
+its one `await compile()` and its return — JS never preempts that stretch to
+interleave a second call's writes into the same instance's `INPUT` — but two
+calls fired together (`Promise.all([unmarshal(a), unmarshal(b)])`) still need
+two *separate* instances the moment either has to wait on `compile()` for the
+first time. A pool converges to size one under sequential calls (which is what
+§6.1's measurement above is about) and grows only as far as real concurrent
+demand requires, with no cap — consistent with §2.4's "client RAM is
+spendable." `preload()` now also pushes one warm instance into the pool
+alongside compiling the module, so the first real call finds one waiting.
+
+That was structural safety rather than safety by construction: nothing in
+`encode`/`decode`/`unmarshal`/`inspect` awaited between writing input and
+reading output, which is what made a single instance safe to share even then.
+The package makes the same invariant hold by construction, by having nothing
+left in a call that *could* await. The demo page still fires `inspect` and
+`unmarshal` together with `Promise.all` on every encode (§13), so
+`web/tests/browser.mjs` drives two genuinely concurrent calls through the one
+handle on every one of its encodable examples, in a real browser — which is now
+a test of the handle rather than of a pool.
+
 ---
 
 ## 7. Build and packaging
 
-`asc` compiles `assembly/` as now. The wrapper is TypeScript compiled by `tsc` to
-ESM plus declarations — no bundler in the package's own build, so `dist/` stays
-readable.
+`cargo` compiles `rust/wasm` as `web/` does now. The wrapper is TypeScript
+compiled by `tsc` to ESM plus declarations — no bundler in the package's own
+build, so `dist/` stays readable.
 
 ```
-asbuild   asc assembly/index.ts --target release   -> build/colbin.wasm
+wasm      cargo build --release --target wasm32-unknown-unknown
+          + wasm-opt -O3                           -> build/colbin.wasm
+          the same again --features inspect        -> build/colbin.inspect.wasm
 inline    scripts/inline.mjs                       -> src/generated/wasm-inline.ts
 tsc                                                -> dist/*.js + dist/*.d.ts
-copy      build/colbin.wasm                        -> dist/colbin.wasm
+copy      build/*.wasm                             -> dist/
 ```
+
+A publisher therefore needs a Rust toolchain and the `wasm32-unknown-unknown`
+target, which a *consumer* never does — the tarball ships the built module, and
+§1's third reason is why that is not negotiable.
 
 `scripts/inline.mjs` emits one base64 string, decoded at runtime with `atob`. It
 is gitignored and regenerated by `prepack`, so the base64 cannot drift from the
@@ -512,17 +679,68 @@ is gitignored and regenerated by `prepack`, so the base64 cannot drift from the
 "exports": {
   ".": { "types": "./dist/index.d.ts", "node": "./dist/node.js", "default": "./dist/index.js" },
   "./asset": { "types": "./dist/asset.d.ts", "default": "./dist/asset.js" },
-  "./colbin.wasm": "./dist/colbin.wasm"
+  "./inspect": { "types": "./dist/inspect.d.ts", "default": "./dist/inspect.js" },
+  "./colbin.wasm": "./dist/colbin.wasm",
+  "./colbin.inspect.wasm": "./dist/colbin.inspect.wasm"
 }
 ```
 
-Plus `"files": ["dist"]`, `"sideEffects": false`, `"type": "module"`,
-`"license": "MIT"`, `"repository"`, `"engines": { "node": ">=18" }`. No `prepare`
-script — the tarball ships built, and a git install is explicitly unsupported.
+Plus `"files": ["dist", "README.md", "LICENSE"]`, `"sideEffects": false`,
+`"type": "module"`, `"license": "MIT"`, `"repository"`,
+`"engines": { "node": ">=18" }`, and `"./package.json"` in the exports map so a
+tool can read it. No `prepare` script — the tarball ships built, and a git
+install is explicitly unsupported. `prepack` runs the build, so a publish
+cannot ship a stale `dist/`.
 
-**To measure once it builds:** inline gzipped against asset gzipped. The `.wasm`
-is 169 KB raw, 46.2 KB gzipped; base64 costs 33% in source bytes and gzip should
-recover most of it, but the README should quote a number rather than that guess.
+**Measured, and the guess was wrong.** Inline against asset, on the modules the
+package ships today:
+
+| | raw | gzipped |
+|---|---:|---:|
+| `colbin.wasm` — `colbin/asset`, and the `node` entry | 209 109 B | **84 195 B** |
+| the same as inline base64 — the default entry | 279 124 B | **114 271 B** |
+| `colbin.inspect.wasm` — `colbin/inspect` | 224 199 B | 90 127 B |
+| the wrapper's own JavaScript, every entry | 36 085 B | 10 651 B |
+| the tarball as published | 422 KB | — |
+
+Base64 costs 33% raw and gzip recovers *less than half* of it, not "most":
+**+36% gzipped**, because base64 destroys the byte alignment gzip's matcher
+works on. Inline stays the default for the reason §3 chose it — no
+configuration, no 404 mode — but the README says the number and points a
+transfer-sensitive consumer at `colbin/asset`, which is what the demo site
+itself imports.
+
+**Two modules, not one, and `wasm-opt` on both.** Two things came out of asking
+where 253 KB of WebAssembly was going (`RUST_WASM_PLAN.md` §6.1 has the
+breakdown by subsystem):
+
+*`inspect` has its own cargo feature and its own `.wasm`*, because the span
+walk is 15 KB — 6.6% of the module's code — that only a tool drawing the bytes
+ever calls, and every consumer was downloading it. `colbin` and `colbin/asset`
+carry the build without it; `colbin/inspect` carries the build with it, and the
+demo site imports that one. `codec.canInspect` says which a handle is over, and
+`codec.inspect()` on a handle that cannot throws an error naming the entry that
+can. `js/tests/package.test.mjs` asserts the published module has no
+`inspect_message` export, so the saving cannot quietly evaporate.
+
+*`wasm-opt -O3` runs over both*, as a tool rather than a dependency —
+`js/scripts/optimize.mjs` takes it from the PATH, warns when there is none, and
+CI installs binaryen and sets `COLBIN_REQUIRE_WASM_OPT=1` so a published module
+cannot be an unoptimised one. It is worth 12% raw and 4% gzipped, and an A/B
+through `bench.mjs` found no throughput difference between the two modules.
+`-O3` rather than `-Oz`: `-Oz` wins 1.5 KB raw and gives it back gzipped. No
+`--enable-*` flags are passed, because `rust/wasm`'s profile keeps rustc's
+`target_features` section alive for `wasm-opt` to read — a hand-kept flag list
+measured the same and would go stale on a toolchain upgrade.
+
+Together those take the module a consumer downloads from **93 409 B gzipped to
+84 195 B**, without removing anything a consumer calls.
+
+A build step worth naming: `bun run dist` is the build *without* cargo, taking
+whatever is already at `build/colbin.wasm`. That is what the release job runs
+after downloading the `.wasm` artifact the tests ran against, so the module on
+npm is the module that was tested rather than a second compile of the same
+commit.
 
 ---
 
@@ -581,12 +799,20 @@ The workflow already does most of this: `release` runs on `v*` tags and uploads
 the bytes the tests ran against. npm publish belongs in that same job for the same
 reason.
 
-- **Build job** gains the tarball smoke test, so packaging is checked on every
-  pull request rather than discovered at a tag.
-- **Build job** gains a benchmark step that fails if `unmarshal` regresses past a
-  threshold. §2 is the whole justification for the package's design; letting it
-  rot silently would be the obvious way to waste this work.
-- **Release job** gains `npm publish`.
+- ~~**Build job** gains the tarball smoke test~~ **done**, and inside
+  `bun run test` rather than as a step of its own, so a local run gets it too.
+- ~~**Build job** gains a benchmark step~~ **done**: `bun run bench:check`.
+  The threshold is a *ratio* against `JSON.parse` measured in the same process
+  on the same corpus, never a millisecond figure — a shared runner's absolute
+  speed varies by more than any regression worth catching, and the ratio does
+  not. It sits at 1.5x, far above where the number lands (0.55x), because the
+  job is to catch the JSON-text intermediate creeping back into `unmarshal`,
+  which would cost 3-4x, and not to litigate a few percent.
+- ~~**Release job** gains `npm publish`~~ **done**, publishing the `.wasm`
+  artifact the build job tested rather than compiling again: the job downloads
+  it, runs `bun run dist` over it, and publishes with `--ignore-scripts` so
+  `prepack` cannot quietly rebuild it. It also refuses a tag whose version does
+  not match `js/package.json`.
 - **Trusted publishing** (npm's OIDC flow for GitHub Actions) rather than an
   `NPM_TOKEN` secret — no long-lived credential, and provenance is stamped
   automatically. It requires the package to exist first, so `0.1.0` is published
@@ -599,18 +825,18 @@ reason.
 
 | | | ends when |
 |---|---|---|
-| 0 | Move `assembly/`, `tests/`, `vectors/`, `asconfig.json` into `js/`. Root workspace manifest. Rewire `ci.yml` and the scripts. No behaviour change. | every existing test passes from the new paths; `bun run build` and `tests/browser.mjs` still green |
-| 1 | **Calibration** (§5.1): a throwaway sink that writes i64s instead of text, measured end to end. | the wasm-side number, and a decision on whether column unpacking needs its own work |
-| 2 | `assembly/materialize.ts` — the value sink and the `materialize` export. | the buffer decodes to the same values as the text path, checked in AssemblyScript |
-| 3 | `src/` — the `Codec` handle, the materialiser reader, generated row builders with the CSP fallback, `ColbinError`. | `unmarshal` returns objects equal to the text path over every vector, and the benchmark is recorded |
-| 4 | The three entries, `scripts/inline.mjs`, the `exports` map, package metadata. | all three entries unmarshal the same vector identically |
-| 5 | Tarball smoke test, wired into `bun run test` and CI. | `npm pack` → install → import works outside the repository |
-| 6 | `web/` consumes `colbin` from the workspace; `src/lib/codec.ts` shrinks to the page's `Outcome` wrapper. Correct `web/PLAN.md` §10. | the page runs all eleven examples through the package |
-| 7 | README: install, quickstart, the §2 numbers, the schema-out-of-band model, the version-pinning warning, measured sizes. Publish `0.1.0` by hand, enable trusted publishing, add `npm publish` to the release job. | `npm install colbin` works from a clean machine |
+| 0 | ~~Move `tests/`, `vectors/` into `js/`~~ **done.** `js/` builds `rust/wasm` with cargo and copies the artifact in; the root manifest makes `js/` and `web/` one Bun workspace. | every existing test passes from the new paths; `bun run build` and `tests/browser.mjs` still green |
+| 1 | ~~**Calibration** (§5.1)~~ **done, skipped straight to the real thing.** The direction was already settled by §2.2 and §2.6's Rust rewrite, so no throwaway sink was built — `materialize.rs` was written directly and measured against `bench.mjs` instead. | wasm-side `materialize` measured at 0.16 ms against `decode`'s 0.20 ms and native `JSON.parse`'s 0.26 ms on the products corpus |
+| 2 | ~~`rust/src/materialize.rs` and the `materialize` export~~ **done** — the value function beside `walk`, behind its own `materialize` feature (default-on, independent of `encode`). Scoped to §5.5's one-field-envelope-root shape rather than every table. | `rust/tests/materialize.rs`: every table-shaped corpus case decodes to what Go's JSON says, plus a hand-built >2^53 case, in `cargo test` |
+| 3 | ~~`src/` — the `Codec` handle~~ **done**, now in `js/src/`: `core.ts` is the handle and `ColbinError` is `errors.ts`; the materialiser reader and the generated row builders with the CSP fallback are `materialize.ts`. The handle's operations are synchronous (§6.1). | `unmarshal` returns objects equal to the text path over every table-shaped vector (`js/tests/materialize.test.mjs`), and `bench.mjs` records the comparison |
+| 4 | ~~The three entries, `scripts/inline.mjs`, the `exports` map, package metadata~~ **done.** | all three entries unmarshal the same message identically (`js/tests/package.test.mjs`) |
+| 5 | ~~Tarball smoke test, wired into `bun run test` and CI~~ **done** — `js/scripts/tarball.mjs`, installed with `--ignore-scripts` because that is CI's and pnpm's posture and §1's second reason says it has to work under it. | `npm pack` → install → import works outside the repository |
+| 6 | ~~`web/` consumes `colbin` from the workspace~~ **done**, through `colbin/asset`, so Vite resolving the exports map and emitting the `.wasm` is checked on every build. `src/lib/codec.ts` is now only the page's `Outcome` wrapper — 150 lines against 340. | the page runs every example through the package; `tests/browser.mjs` green with no console errors |
+| 7 | ~~README~~ **done** (`js/README.md`, and the root README points at it); ~~`npm publish` in the release job~~ **done**. **Left: publish `0.1.0` by hand and enable trusted publishing** — npm's OIDC flow cannot claim a name that does not exist yet. | `npm install colbin` works from a clean machine |
 
-Phase 0 is large and mechanical and should land alone — a move that size is
-unreviewable mixed with new code. Phase 1 gates phases 2 and 3; if the spike
-misses, the package still ships on the text path and the README says so.
+Phase 0 was large and mechanical and landed alone — a move that size is
+unreviewable mixed with new code. Phase 1 was meant to gate phases 2 and 3; it
+did not need to, because §2.6's rewrite had already settled the direction.
 
 ---
 
@@ -639,5 +865,60 @@ message that does not fit in memory is out of scope for 0.1.
 **A worker entry.** Decoding off the main thread is the caller's choice; shipping
 a wrapper means owning a message protocol.
 
-**The DNS work** `web/PLAN.md` §10 lists — a `CNAME` for `colbin` in the `un.pe`
-zone and *Enforce HTTPS* — is unrelated and still outstanding.
+**The DNS work** — a `CNAME` for `colbin` in the `un.pe` zone and *Enforce
+HTTPS* — is unrelated and still outstanding.
+
+---
+
+## 13. Open follow-ups from what's built
+
+Tracked here rather than left implicit, now that the whole of §11 is built:
+
+**Left: publish `0.1.0` by hand.** Everything else in phase 7 is done, and
+this one step cannot be automated — npm's trusted publishing takes over a name
+that already exists, so the first version has to be pushed from a machine with
+a login. The release job is written against that assumption and refuses a tag
+whose version does not match `js/package.json`.
+
+**Done: the demo site calls `unmarshal`, concurrently with `inspect`.**
+`web/src/routes/+page.svelte` fires both with `Promise.all` on every encode,
+and a "fact" in the results panel names which path ran (`materializer` or
+`JSON fallback`) with a timing. `web/tests/browser.mjs` asserts the fact
+renders for every encodable example, and specifically that `Products, 200
+records` (a bare-array table) takes the materializer while `Integers past
+2^53` (three records, under the table threshold) falls back to JSON — through
+the package, in a real browser, with two concurrent calls on the one handle.
+
+**Done: the CI benchmark gate** (§10). `js/tests/bench.mjs --check` fails the
+build if `unmarshal` lands above 1.5x `JSON.parse` on the products corpus; it
+measures 0.14 ms against `JSON.parse`'s 0.26 and `decode`'s 0.20 — materialize
+is faster than native JSON, not just closer to it.
+
+**The encoder is half the module, and no entry drops it.** The lean build a
+browser client of a Go service actually wants — decode plus the materializer,
+no JSON parser, no inference, no self-check — is **45 335 B gzipped** against
+the published module's 84 195. That is a bigger saving than everything §7's
+two-module split and `wasm-opt` won together, and it is entirely a packaging
+decision: the feature already exists (`--no-default-features --features
+materialize`) and is already built and tested in CI. What it needs is an entry
+(`colbin/reader`, say), a third artifact in the tarball, and an answer to what
+`marshal` should do on a handle that cannot encode — `#needs` already throws
+the right shape of error, so the answer may simply be "that".
+
+**The convenience functions are not tree-shaken out of the site's bundle.**
+`export const { unmarshal, ... } = convenience(Codec)` in each entry is a
+destructuring initialiser, and Rollup keeps it even under `sideEffects: false`
+because it cannot prove the call does nothing. It costs a few hundred bytes in
+a page that only ever uses the `Codec` handle. Worth fixing if the surface
+grows; not worth a lazier shape than one call while it is this small.
+
+**Constant/all-absent columns materialize as full arrays, not a flag.** A
+column the message never wrote (every row holds the field's zero value) is
+written out as a full array of that zero value rather than a single "this
+column is constant" marker the column codec itself already has a concept of.
+Deliberate for now, per §2.4's "client RAM is spendable," but worth revisiting
+if a very wide or very sparse table shape ever makes it matter.
+
+**Everything in §12 stays out**, unchanged by any of the above — the token
+tape, the string dictionary, typed output, streaming and a worker entry are
+all still just this document. The package itself no longer is.

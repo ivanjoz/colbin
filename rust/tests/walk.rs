@@ -5,11 +5,11 @@
 //! message and the JSON `colbin.ToJSON` produced from the two, so matching it
 //! here is agreeing with the specification rather than with a second opinion.
 //!
-//! These cases used to come from `web/vectors/web_encoded.json`, which only the
-//! AssemblyScript module writes — so this file could not run without first
-//! building a module in another language. The shapes are the same ones
-//! `web/tests/documents.mjs` drives that module over; only the hand that writes
-//! them changed.
+//! These cases used to come from `js/vectors/web_encoded.json`, which at the
+//! time only the AssemblyScript module wrote — so this file could not run
+//! without first building a module in another language. The shapes are the same
+//! ones `js/tests/documents.mjs` drives the browser module over; only the hand
+//! that writes them changed.
 
 use colbin::{section, walk};
 

@@ -1,6 +1,6 @@
 //! The JSON text sink: what a walk puts its findings into.
 //!
-//! Mirrors `codec/jsontext.go` and `web/assembly/jsontext.ts`. The output is
+//! Mirrors `codec/jsontext.go`. The output is
 //! what `encoding/json` would have written for the same record, down to the
 //! escaping and the spelling of numbers — a stronger claim than "valid JSON",
 //! and the one the vectors check, because a test that compared parsed values

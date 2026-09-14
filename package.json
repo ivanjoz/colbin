@@ -1,0 +1,6 @@
+{
+  "name": "colbin-repo",
+  "private": true,
+  "workspaces": ["js", "web"],
+  "engines": { "node": ">=18" }
+}

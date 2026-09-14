@@ -1,0 +1,56 @@
+{
+  "name": "colbin",
+  "version": "0.1.0",
+  "description": "A columnar binary format for tabular JSON — decode to objects in the browser without JSON text in the middle",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ivanjoz/colbin.git",
+    "directory": "js"
+  },
+  "homepage": "https://colbin.un.pe",
+  "bugs": "https://github.com/ivanjoz/colbin/issues",
+  "keywords": ["binary", "columnar", "json", "serialization", "wasm", "decode"],
+  "sideEffects": false,
+  "engines": { "node": ">=18" },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "node": "./dist/node.js",
+      "default": "./dist/index.js"
+    },
+    "./asset": {
+      "types": "./dist/asset.d.ts",
+      "default": "./dist/asset.js"
+    },
+    "./inspect": {
+      "types": "./dist/inspect.d.ts",
+      "default": "./dist/inspect.js"
+    },
+    "./colbin.wasm": "./dist/colbin.wasm",
+    "./colbin.inspect.wasm": "./dist/colbin.inspect.wasm",
+    "./package.json": "./package.json"
+  },
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "wasm": "bun run wasm:lean && bun run wasm:inspect",
+    "wasm:lean": "mkdir -p build && cargo build --release --target wasm32-unknown-unknown --manifest-path ../rust/wasm/Cargo.toml && cp ../rust/wasm/target/wasm32-unknown-unknown/release/colbin_wasm.wasm build/colbin.wasm && node scripts/optimize.mjs colbin.wasm",
+    "wasm:inspect": "mkdir -p build && cargo build --release --target wasm32-unknown-unknown --manifest-path ../rust/wasm/Cargo.toml --features inspect && cp ../rust/wasm/target/wasm32-unknown-unknown/release/colbin_wasm.wasm build/colbin.inspect.wasm && node scripts/optimize.mjs colbin.inspect.wasm",
+    "inline": "node scripts/inline.mjs",
+    "dist": "bun run inline && tsc -p tsconfig.json && cp build/colbin.wasm build/colbin.inspect.wasm dist/ && cp ../LICENSE LICENSE",
+    "build": "bun run wasm && bun run dist",
+    "prepack": "bun run build",
+    "vectors": "go run ./vectors ./vectors/vectors.json",
+    "test": "bun run vectors && bun run build && node --test tests/*.test.mjs && node scripts/tarball.mjs && bun run emit",
+    "tarball": "bun run build && node scripts/tarball.mjs",
+    "emit": "node tests/emit.mjs",
+    "bench": "bun run wasm && node tests/bench.mjs",
+    "bench:check": "bun run wasm && node tests/bench.mjs --check"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "@types/node": "^22.10.0"
+  }
+}

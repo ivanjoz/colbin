@@ -223,7 +223,7 @@ type walkCase struct {
 }
 
 // numberCase pins how one JSON number literal must be read. The rule is
-// `web/PLAN.md` §3.2: a literal with no '.' and no exponent is an integer and
+// `rust/ENCODER.md` §2: a literal with no '.' and no exponent is an integer and
 // must land in int64 or uint64 with every digit intact; anything else is a real
 // number and becomes a float64, which must be finite.
 //
@@ -242,7 +242,7 @@ type numberCase struct {
 
 // textCase pins how one JSON string literal decodes. encoding/json is the
 // reference for the escape rules, including the lone surrogate that
-// `web/PLAN.md` §4.5 defines as U+FFFD — so that what reaches the encoder is
+// `rust/ENCODER.md` §5 defines as U+FFFD — so that what reaches the encoder is
 // always valid UTF-8.
 type textCase struct {
 	Name    string `json:"name"`
@@ -476,15 +476,15 @@ type Holder struct {
 
 // --- the reader corpus -------------------------------------------------------
 //
-// The shapes `web/tests/documents.mjs` drives the browser encoder over, written
+// The shapes `js/tests/documents.mjs` drives the browser encoder over, written
 // here as Go types with the same field names and the same ids.
 //
 // They exist because `rust/tests/{section,walk}.rs` read
-// `web/vectors/web_encoded.json`, which only the AssemblyScript module writes —
-// so the Rust port's decoder tests could not run without building a module in
-// another language first. Go is the specification for everything those tests
-// check, and Go can write every one of these shapes, so it may as well be the
-// one that does.
+// `js/vectors/web_encoded.json`, which at the time only the AssemblyScript
+// module wrote — so the Rust port's decoder tests could not run without
+// building a module in another language first. Go is the specification for
+// everything those tests check, and Go can write every one of these shapes, so
+// it may as well be the one that does.
 //
 // Coverage is what is being kept, not the bytes: narrow keys and wide, a table
 // and a list of the same record, a nested struct four deep, scalar and string
@@ -801,7 +801,7 @@ func walks() []walkCase {
 	add("dynamic.map.empty", "a dynamic map with no entries at all", Doc{})
 
 	// The reader corpus. See the types above for what it is covering and why it
-	// is here rather than in web/vectors.
+	// is here rather than in js/vectors.
 	readers := []struct {
 		name  string
 		about string

@@ -1,18 +1,21 @@
-# The browser decoder: colbin bytes in, JSON text out.
+# The browser module: JSON text in, colbin bytes out, and the other way.
 #
 # A separate crate from `colbin` rather than a copy of it. The library is the
 # format and other Rust code depends on it normally; this is a `cdylib` with a
 # C ABI and a profile tuned for size, and neither of those belongs on the
 # library everyone else links. Nothing is duplicated — the wire readers, the
-# column codec and the schema walk all come from the crate next door, and LTO
-# drops everything this ABI does not reach, which is how the encoder stays out
-# of the module without a second implementation to keep in step.
+# column codec, the schema walk and the encoder all come from the crate next
+# door, and LTO drops everything this ABI does not reach.
+#
+# The `encode` feature (on by default) is what the demo site links. Off is the
+# decode-only build a client of a Go service wants, and the size budget in
+# RUST_WASM_PLAN.md §6 is measured against that one.
 [package]
 name = "colbin-wasm"
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
-description = "The colbin decoder, compiled to WebAssembly for the browser"
+description = "The colbin encoder and decoder, compiled to WebAssembly for the browser"
 license = "MIT"
 repository = "https://github.com/ivanjoz/colbin"
 publish = false
@@ -25,6 +28,23 @@ publish = false
 
 [lib]
 crate-type = ["cdylib"]
+
+[features]
+default = ["encode", "materialize"]
+# JSON text in, colbin bytes out: the parser, inference, the plan-driven build
+# and the self-check. Off keeps the decode-only module at the size §2.6 measured.
+encode = ["colbin/encode"]
+# Columns into a flat typed buffer instead of decimal text — PACKAGE_PLAN.md §5's
+# fast path. On by default in both builds: the decode-only client is exactly
+# who this is for.
+materialize = ["colbin/materialize"]
+# The field tree with a byte span on every node. **Off by default**, because
+# the only thing that wants it is a tool that draws the bytes — the demo page's
+# hex view — and it is 14.8 KB of code (6.6% of the module) that every consumer
+# of the npm package was downloading to never call. `web/` builds its own module
+# with this on; `js/` publishes the build without it. It needs neither `encode`
+# nor `materialize`: a span walk over a message and a section is all it is.
+inspect = []
 
 [dependencies]
 # default-features = false so the `std::error::Error` impl — the one piece of
@@ -44,4 +64,11 @@ codegen-units = 1
 # library has no `unwrap`, `expect` or `panic!` in it, so this mostly removes
 # code that was never going to run.
 panic = "abort"
-strip = true
+# `debuginfo` rather than `true`, which would also take the `target_features`
+# and `name` custom sections. Both earn their place between here and the
+# published module: `wasm-opt` reads `target_features` to know which proposals
+# rustc emitted, so `js/scripts/optimize.mjs` needs no hand-kept
+# `--enable-bulk-memory --enable-sign-ext …` list to go stale, and `name` is
+# what makes a size breakdown by function possible at all. `wasm-opt` strips
+# both on its way out, so the module that ships carries neither.
+strip = "debuginfo"

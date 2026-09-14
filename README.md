@@ -318,8 +318,12 @@ Going straight to text is also the faster direction, because the intermediate
 | `encoding/json` on the structs | 40 000 | 14 327 |
 | `colbin.DecodeAny` | 41 000 | 54 712 |
 
-Writing colbin *from* JSON is not in this: it needs type inference, and it is a
-separate job.
+Writing colbin *from* JSON is not in this package: it needs type inference, and
+it is a separate job. It is a built one — in Rust rather than in Go, because the
+case that wanted it was a browser. `colbin::build::encode` takes JSON text and
+returns a message and the section that describes it, and `rust/ENCODER.md` is
+what it infers, refuses and warns about. Go reads what it writes; that is what
+`go test ./js/vectors` checks.
 
 ## `map[string]any`, for the part of the answer that has no type
 
@@ -511,6 +515,8 @@ fact, and there is a test in that repository asserting it.
   and the optimisations that did not pay
 - `wire/README.md`, `column/README.md` — the layouts
 - `rust/README.md` — the Rust port
+- `js/README.md` — the npm package, and the numbers the browser client hits
+- `PACKAGE_PLAN.md` — why the client decodes to objects without JSON text
 - [colbin-benchmarks][bench-repo] — the comparison against protocol buffers, and
   the corpus materialised and pinned by checksum
 
@@ -538,14 +544,39 @@ go run ./rust/vectors && go test ./rust/vectors
 cargo test -p colbin --features derive
 ```
 
+## JavaScript, in the browser and on Node
+
+`js/` is the client: the Rust implementation compiled to WebAssembly, published
+to npm as [`colbin`](https://www.npmjs.com/package/colbin), with a wrapper that
+turns a message into JavaScript objects **without JSON text in the middle**.
+
+```sh
+npm install colbin
+```
+
+```js
+import { Codec } from 'colbin'
+
+const codec = await Codec.open()
+codec.setSchema(section)                 // sent once per connection
+const rows = codec.unmarshal(message)    // objects, no JSON.parse
+```
+
+A thousand product records decode to objects in 0.14 ms, against 0.26 ms for
+`JSON.parse` on the same data — from 3.5x fewer bytes on the wire, and exactly
+past 2^53, which `JSON.parse` is not. `js/README.md` has the whole surface and
+the measurements; the demo at [colbin.un.pe](https://colbin.un.pe) is a consumer
+of the published package rather than a copy of it.
+
 ## Status
 
 Alpha. The wire format is settled, the Go façade covers everything in the table
-above, and the Rust port covers the same ground. Interfaces have no form on the
-wire yet.
+above, and the Rust port covers the same ground — including the schema section,
+which it now both writes and reads. Interfaces have no form on the wire yet.
 
-The schema section is Go-only so far: it changes nothing about the bytes an
-ordinary message carries, so the Rust port reads and writes those unaffected,
-but it cannot yet produce or consume a section of its own.
+One tag drives all three implementations, and while on `0.x` there is no
+wire-compatibility promise across minor versions: a Go service on 0.3 and a
+browser on 0.2 will not interoperate, and the failure looks like corrupt data
+rather than a version error. Pin both.
 
 [bench-repo]: https://github.com/ivanjoz/colbin-benchmarks

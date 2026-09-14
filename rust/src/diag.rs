@@ -1,9 +1,8 @@
 //! Structured failure, for the encode side.
 //!
-//! Mirrors `web/assembly/diag.ts`. One shape for parse errors, type conflicts,
-//! limits and corrupt messages alike, carrying a byte offset and a path into the
-//! document so a caller can point at what was wrong rather than only say that
-//! something was.
+//! One shape for parse errors, type conflicts, limits and corrupt messages
+//! alike, carrying a byte offset and a path into the document so a caller can
+//! point at what was wrong rather than only say that something was.
 //!
 //! # Why not [`crate::Error`]
 //!
@@ -96,8 +95,8 @@ impl Diag {
 
     /// The diagnostic as JSON: code, offset, line, path, message, warnings.
     ///
-    /// The same envelope `web/assembly/diag.ts` writes and `rust/wasm` writes
-    /// for a decode failure, so one host-side reader serves every case.
+    /// The same envelope `rust/wasm` writes for a decode failure, so one
+    /// host-side reader serves every case.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(128 + self.message.len());
