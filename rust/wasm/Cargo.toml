@@ -12,7 +12,7 @@
 # RUST_WASM_PLAN.md §6 is measured against that one.
 [package]
 name = "colbin-wasm"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 description = "The colbin encoder and decoder, compiled to WebAssembly for the browser"
