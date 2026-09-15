@@ -227,6 +227,10 @@ func readTableField(reader *wire.Reader8, field *planField, at unsafe.Pointer, b
 	if !ok {
 		return
 	}
+	if rows > maxTableRows {
+		reader.Fail(errTooManyRows)
+		return
+	}
 	buf.reserve(rows)
 	newSlice(field, at, rows)
 	data := (*sliceHeader)(at).data
