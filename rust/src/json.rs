@@ -154,8 +154,8 @@ impl JsonSink {
             b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         self.before_value();
         self.out.push(b'"');
-        let mut chunks = value.chunks_exact(3);
-        for group in &mut chunks {
+        let (groups, left) = value.as_chunks::<3>();
+        for group in groups {
             let bits =
                 (u32::from(group[0]) << 16) | (u32::from(group[1]) << 8) | u32::from(group[2]);
             self.out.push(ALPHABET[(bits >> 18) as usize & 0x3f]);
@@ -163,7 +163,6 @@ impl JsonSink {
             self.out.push(ALPHABET[(bits >> 6) as usize & 0x3f]);
             self.out.push(ALPHABET[bits as usize & 0x3f]);
         }
-        let left = chunks.remainder();
         if !left.is_empty() {
             let mut bits = u32::from(left[0]) << 16;
             if left.len() == 2 {

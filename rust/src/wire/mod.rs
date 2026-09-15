@@ -421,21 +421,18 @@ fn append_magnitudes<T: Integer>(dst: &mut Vec<T>, elements: &[u8], width: usize
             }
         }
         2 => {
-            for chunk in elements.chunks_exact(2) {
-                let bytes: [u8; 2] = chunk.try_into().expect("two bytes");
-                dst.push(T::from_u64(u64::from(u16::from_le_bytes(bytes))));
+            for bytes in elements.as_chunks::<2>().0 {
+                dst.push(T::from_u64(u64::from(u16::from_le_bytes(*bytes))));
             }
         }
         4 => {
-            for chunk in elements.chunks_exact(4) {
-                let bytes: [u8; 4] = chunk.try_into().expect("four bytes");
-                dst.push(T::from_u64(u64::from(u32::from_le_bytes(bytes))));
+            for bytes in elements.as_chunks::<4>().0 {
+                dst.push(T::from_u64(u64::from(u32::from_le_bytes(*bytes))));
             }
         }
         _ => {
-            for chunk in elements.chunks_exact(8) {
-                let bytes: [u8; 8] = chunk.try_into().expect("eight bytes");
-                dst.push(T::from_u64(u64::from_le_bytes(bytes)));
+            for bytes in elements.as_chunks::<8>().0 {
+                dst.push(T::from_u64(u64::from_le_bytes(*bytes)));
             }
         }
     }
@@ -449,21 +446,18 @@ fn append_twos_complement<T: Integer>(dst: &mut Vec<T>, elements: &[u8], width: 
             }
         }
         2 => {
-            for chunk in elements.chunks_exact(2) {
-                let bytes: [u8; 2] = chunk.try_into().expect("two bytes");
-                dst.push(T::from_i64(i64::from(i16::from_le_bytes(bytes))));
+            for bytes in elements.as_chunks::<2>().0 {
+                dst.push(T::from_i64(i64::from(i16::from_le_bytes(*bytes))));
             }
         }
         4 => {
-            for chunk in elements.chunks_exact(4) {
-                let bytes: [u8; 4] = chunk.try_into().expect("four bytes");
-                dst.push(T::from_i64(i64::from(i32::from_le_bytes(bytes))));
+            for bytes in elements.as_chunks::<4>().0 {
+                dst.push(T::from_i64(i64::from(i32::from_le_bytes(*bytes))));
             }
         }
         _ => {
-            for chunk in elements.chunks_exact(8) {
-                let bytes: [u8; 8] = chunk.try_into().expect("eight bytes");
-                dst.push(T::from_i64(i64::from_le_bytes(bytes)));
+            for bytes in elements.as_chunks::<8>().0 {
+                dst.push(T::from_i64(i64::from_le_bytes(*bytes)));
             }
         }
     }
