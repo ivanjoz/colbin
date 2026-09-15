@@ -1,7 +1,9 @@
 package codec
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"math"
 	"reflect"
 	"strings"
@@ -602,6 +604,59 @@ func TestJSONRecursiveTypes(t *testing.T) {
 		},
 	}
 	matchesEncodingJSON(t, value)
+}
+
+// A table's row count is the one number a message gives that decides an
+// allocation on its own, and it escapes to four bytes past 254 — so one flipped
+// bit in a 300-row table asks the decoder for four billion rows, which is 34 GB
+// of int64 before anything has looked at the column. That is how it was found:
+// `go test ./...` died with "runtime: out of memory" on CI, inside the vector
+// generator's one-bit corruption sweep, on the only case in the corpus whose
+// count is wide enough to corrupt into something enormous.
+//
+// Every reader has to refuse it, not only the JSON walk: Unmarshal sizes the
+// destination slice from the same number.
+func TestTableRowCountIsNotTrusted(t *testing.T) {
+	// The count is written as 0xFF and then four little-endian bytes, so this is
+	// what 300 rows looks like on the wire. Patching it in place is deliberate:
+	// finding the offset by decoding would test the thing being corrupted.
+	count := []byte{0xFF, 0x2C, 0x01, 0x00, 0x00}
+	huge := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+
+	for _, one := range []struct {
+		name  string
+		value any
+	}{
+		{"narrow", &basket{ID: 9, Lines: lines(300)}},
+		{"wide", &wideBasket{ID: 9, Lines: lines(300)}},
+	} {
+		t.Run(one.name, func(t *testing.T) {
+			message := mustMarshal(t, one.value)
+			if !bytes.Contains(message, count) {
+				t.Fatal("no escaped count in the message, so there is nothing to patch")
+			}
+			// The table writes its row count before its columns, so the first
+			// occurrence is the one. Asserting the error below is what makes
+			// that an assumption the test would catch rather than rely on: any
+			// other patched field fails somewhere else.
+			corrupt := bytes.Replace(message, count, huge, 1)
+
+			schema, err := SchemaOf(one.value)
+			if err != nil {
+				t.Fatalf("schema: %v", err)
+			}
+			if _, err := ToJSON(schema, corrupt); !errors.Is(err, errTooManyRows) {
+				t.Errorf("ToJSON: %v", err)
+			}
+			if _, err := DecodeAny(schema, corrupt); !errors.Is(err, errTooManyRows) {
+				t.Errorf("DecodeAny: %v", err)
+			}
+			fresh := reflect.New(reflect.TypeOf(one.value).Elem()).Interface()
+			if err := Unmarshal(corrupt, fresh); !errors.Is(err, errTooManyRows) {
+				t.Errorf("Unmarshal: %v", err)
+			}
+		})
+	}
 }
 
 // TestPackedNarrowStringThroughEveryReader pins that a packed string under

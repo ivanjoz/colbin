@@ -54,6 +54,32 @@ import (
 // short of anything that hurts.
 const maxSchemaDepth = 128
 
+// maxTableRows bounds the row count a table may declare.
+//
+// It is the one number a message gives that decides an allocation on its own,
+// and unlike every length here it cannot be checked against the bytes left: a
+// constant column is nine bytes whatever its length, so a legitimate table of a
+// million identical rows really does fit in a handful of them. The bound is
+// therefore a budget rather than a proof, which is worth stating rather than
+// hiding. Without it the row count's four-byte escape is a decompression bomb:
+// one flipped bit in a three-hundred-row table asks for four billion rows, and
+// 34 GB of int64, before anything has looked at a column.
+//
+// Four million rows is 32 MB per integer column, and about twice the largest
+// fixture here (corpus.Large's two million metrics).
+//
+// The number is the Rust port's MAX_ROWS (rust/src/walk.rs) and has to stay
+// equal to it. That is the constraint, rather than the size: a table the
+// browser module refuses must not be one a Go service will hand it, so raising
+// this means raising both. Rust has refused on it since it was written, which
+// is why closing the hole here left every refusal count in the vector corpora
+// exactly where it was.
+const maxTableRows = 1 << 22
+
+var errTooManyRows = fmt.Errorf(
+	"colbin: a table declares more than %d rows, which this decoder refuses to allocate for",
+	maxTableRows)
+
 // sink is where a walk puts what it finds. A JSON sink appends text; an `any`
 // sink builds maps and slices. Nothing about the wire reaches this far.
 type sink interface {
@@ -720,6 +746,10 @@ func (w *walker) narrowTable(reader *wire.Reader, field *planField) {
 		w.fail(reader.Err())
 		return
 	}
+	if rows > maxTableRows {
+		w.fail(errTooManyRows)
+		return
+	}
 	sub := field.sub
 	if sub == nil {
 		w.fail(errNoSubSchema)
@@ -764,6 +794,10 @@ func (w *walker) wideTable(reader *wire.Reader8, field *planField) {
 func (w *walker) structTable(rows int, columns *wire.Reader8, sub *typePlan) {
 	if sub == nil {
 		w.fail(errNoSubSchema)
+		return
+	}
+	if rows > maxTableRows {
+		w.fail(errTooManyRows)
 		return
 	}
 	gathered := newTableColumns(len(sub.fields))
