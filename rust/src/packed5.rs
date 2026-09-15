@@ -91,11 +91,7 @@ const NUMBER_MAX_DIGITS: usize = 4;
 
 /// The opcode 29 operand table: what a short record is made of once letters and
 /// spaces are accounted for. All 32 entries are assigned.
-const SYM_TABLE: [u8; 32] = [
-    b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'.', b',', b'-', b'/', b':', b';',
-    b'_', b'(', b')', b'%', b'#', b'"', b'\'', b'!', b'?', b'@', b'=', b'+', b'*', b'&', b'<',
-    b'>',
-];
+const SYM_TABLE: [u8; 32] = *b"0123456789.,-/:;_()%#\"'!?@=+*&<>";
 
 /// The opcode 30 operand table. Indices 28..=30 are reserved and 31 is the
 /// escape, so a decoder rejects them rather than reinterpreting them later.
