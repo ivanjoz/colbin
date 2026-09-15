@@ -1,6 +1,6 @@
 [package]
 name = "colbin"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 description = "The colbin binary format: a byte-aligned [key][descriptor][payload] wire, a blocked column codec, and the packed5 string codec"
@@ -16,7 +16,7 @@ readme = "README.md"
 # Optional: a consumer who does not derive links neither it nor the three
 # build-time crates it needs, which is what keeps the "no dependencies" promise
 # above true for everyone who does not opt in.
-colbin-derive = { version = "0.2", path = "derive", optional = true }
+colbin-derive = { version = "0.3", path = "derive", optional = true }
 
 [features]
 # `std` is on by default so an ordinary Rust consumer gets `Error: std::error::Error`
