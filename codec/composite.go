@@ -17,7 +17,7 @@ package codec
 // in it and a decoder that terminates on the data rather than on the type.
 
 import (
-	"fmt"
+	"errors"
 	"reflect"
 	"unsafe"
 
@@ -38,6 +38,29 @@ func appendStructField(writer *wire.Writer8, field *planField, at unsafe.Pointer
 	mark := writer.OpenStruct(field.key)
 	appendNarrowInto(writer, field.sub, at, buf)
 	writer.Close(mark)
+}
+
+// appendPointerStructField writes a *T under key, and nothing at all when it is
+// nil.
+//
+// Nil and non-nil-to-zero stay distinguishable without a null code, which is the
+// whole reason this op is cheap: a struct body is written whether or not it is
+// empty, so an absent key is nil and a present key with an empty body is a
+// pointer to a zero value. See pointer.go.
+func appendPointerStructField(writer *wire.Writer8, field *planField, at unsafe.Pointer, buf *scratch) {
+	pointee := *(*unsafe.Pointer)(at)
+	if pointee == nil {
+		return
+	}
+	appendStructField(writer, field, pointee, buf)
+}
+
+// readPointerStructField allocates a pointee and reads the body into it. The
+// record was zeroed first, so a key the message omits leaves the field nil.
+func readPointerStructField(reader *wire.Reader8, field *planField, at unsafe.Pointer, buf *scratch) {
+	pointee := reflect.New(field.sliceType.Elem()).UnsafePointer()
+	readStructField(reader, field, pointee, buf)
+	*(*unsafe.Pointer)(at) = pointee
 }
 
 // appendNarrowInto writes a narrow key run onto the wide writer's buffer. Both
@@ -171,9 +194,22 @@ func readRun(reader *wire.Reader8, plan *typePlan, record unsafe.Pointer, buf *s
 	}
 }
 
-// compositeOpFor resolves a struct or a slice-of-struct field to its op and its
-// child plan. It returns ok false for anything that is not one, so the scalar
-// table stays the first thing tried.
+// errNotComposite says the type is not a struct, a slice of them or a pointer to
+// one — so the caller should go on and try a map, a pointer to a scalar, or the
+// scalar table.
+//
+// It is a sentinel rather than any error because the caller has to tell the two
+// apart. A struct that *is* a composite and fails to plan — one field of it
+// holding a type the format does not carry — used to come back indistinguishable
+// from "not one of mine", and the caller would fall through and report whatever
+// the scalar table said about the outer type. That is how a bad field inside an
+// element got reported as `[]T` not being a carriable slice, naming the one type
+// in the message that was fine.
+var errNotComposite = errors.New("not a composite")
+
+// compositeOpFor resolves a struct, a slice of structs or a pointer to a struct
+// to its op and its child plan. It returns errNotComposite for anything that is
+// not one, so the scalar table stays the first thing tried.
 func compositeOpFor(fieldType reflect.Type, building map[reflect.Type]*typePlan) (fieldOp, *typePlan, reflect.Type, uintptr, error) {
 	switch fieldType.Kind() {
 	case reflect.Struct:
@@ -190,6 +226,16 @@ func compositeOpFor(fieldType reflect.Type, building map[reflect.Type]*typePlan)
 			}
 			return opStructs, sub, fieldType, element.Size(), nil
 		}
+	case reflect.Pointer:
+		if element := fieldType.Elem(); element.Kind() == reflect.Struct {
+			sub, err := planForBuilding(element, building)
+			if err != nil {
+				return 0, nil, nil, 0, err
+			}
+			// sliceType carries the pointer type, which is what the reader allocates
+			// a pointee from. There is no stride: there is one pointee, not a run.
+			return opPointerStruct, sub, fieldType, 0, nil
+		}
 	}
-	return 0, nil, nil, 0, fmt.Errorf("not a composite")
+	return 0, nil, nil, 0, errNotComposite
 }

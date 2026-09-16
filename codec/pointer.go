@@ -16,13 +16,20 @@ package codec
 // place in this format where a zero goes on the wire, and it is there because
 // the alternative is losing a distinction the Go type makes.
 //
-// # Scalars only
+// # Scalars here, structs next door
 //
-// A pointer to a struct, a slice or a map is refused. Those are composites and
-// already carry a length, so absence is expressible for them — but a nil
-// composite and an empty one are the same thing on this wire today, and adding a
-// pointer to the mix would need the SPECIAL null code and a decision about what
-// `*[]T` nil means that nothing has asked for yet.
+// This file is pointers to scalars. A pointer to a *struct* is carried too, but
+// by opPointerStruct in composite.go, and it needs none of the machinery above:
+// a struct body goes on the wire whether or not it is empty, so an absent key is
+// already nil and a present key with an empty body is already a pointer to a
+// zero value. The distinction the explicit-zero dance buys for a scalar comes
+// free for a struct, and the wire is unchanged — a reader in another language
+// sees a struct field that is present or absent, which it already handles.
+//
+// A pointer to a slice or a map is still refused. Those collapse the other way:
+// a nil one and an empty one are the same thing on this wire, so telling them
+// apart would need the SPECIAL null code and a decision about what `*[]T` nil
+// means that nothing has asked for yet.
 
 import (
 	"fmt"

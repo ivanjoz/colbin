@@ -123,6 +123,8 @@ func appendWide(writer *wire.Writer8, plan *typePlan, record unsafe.Pointer, buf
 			appendMapField(writer, field, at, buf)
 		case opPointer:
 			appendPointerWide(writer, field, at)
+		case opPointerStruct:
+			appendPointerStructField(writer, field, at, buf)
 		case opAny:
 			appendAnyField(writer, field, at, buf)
 		case opAnys:
@@ -187,6 +189,8 @@ func readWideField(reader *wire.Reader8, field *planField, record unsafe.Pointer
 		readMapField(reader, field, at, buf)
 	case opPointer:
 		readPointerWide(reader, field, at)
+	case opPointerStruct:
+		readPointerStructField(reader, field, at, buf)
 	case opAny:
 		*(*any)(at) = readAnyValue(reader, buf)
 	case opAnys:

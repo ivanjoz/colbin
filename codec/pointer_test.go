@@ -1,6 +1,7 @@
 package codec
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -152,15 +153,102 @@ func TestPointerTruncated(t *testing.T) {
 	}
 }
 
-func TestPointerToCompositeIsRefused(t *testing.T) {
+// TestPointerToStructRoundTrips covers the distinction the op exists to keep: a
+// nil pointer writes no key and reads back nil, and a pointer to a zero struct
+// writes an empty body and reads back non-nil. Collapsing those two would make
+// the pointer indistinguishable from the value.
+func TestPointerToStructRoundTrips(t *testing.T) {
 	type inner struct {
-		A int32 `cb:"1"`
+		A int32  `cb:"1"`
+		B string `cb:"2"`
 	}
 	type holder struct {
-		Sub *inner `cb:"1"`
+		Sub  *inner `cb:"1"`
+		Tail int32  `cb:"2"`
 	}
-	if _, err := Marshal(&holder{}); err == nil {
-		t.Fatal("a pointer to a struct was accepted; it has no form on the wire yet")
+	for _, sub := range []*inner{nil, {}, {A: 7, B: "seven"}} {
+		original := holder{Sub: sub, Tail: 9}
+		var back holder
+		roundTrip(t, &original, &back)
+		if back.Tail != 9 {
+			t.Errorf("sub %+v: the field after the pointer read back %d", sub, back.Tail)
+		}
+		if (back.Sub == nil) != (sub == nil) {
+			t.Fatalf("sub %+v read back as %+v: nil-ness was not preserved", sub, back.Sub)
+		}
+		if sub != nil && *back.Sub != *sub {
+			t.Errorf("sub %+v read back as %+v", *sub, *back.Sub)
+		}
+	}
+}
+
+// TestPointerToStructJSON is the same distinction seen by a reader that has only
+// the schema section: nil is null, and a pointer to a zero struct is an object
+// of zeros. A field the message omits is rendered after the ones it carries,
+// which is why the nil case puts Sub last.
+func TestPointerToStructJSON(t *testing.T) {
+	type inner struct {
+		A int32  `cb:"1"`
+		B string `cb:"2"`
+	}
+	type holder struct {
+		Sub  *inner `cb:"1"`
+		Tail int32  `cb:"2"`
+	}
+	for _, want := range []struct {
+		value holder
+		json  string
+	}{
+		{holder{Sub: nil, Tail: 9}, `{"Tail":9,"Sub":null}`},
+		{holder{Sub: &inner{}, Tail: 9}, `{"Sub":{"A":0,"B":""},"Tail":9}`},
+		{holder{Sub: &inner{A: 7, B: "x"}, Tail: 9}, `{"Sub":{"A":7,"B":"x"},"Tail":9}`},
+	} {
+		message, err := MarshalSelfDescribing(&want.value)
+		if err != nil {
+			t.Fatalf("%+v: %v", want.value, err)
+		}
+		out, err := ToJSON(nil, message)
+		if err != nil {
+			t.Fatalf("%+v: %v", want.value, err)
+		}
+		if string(out) != want.json {
+			t.Errorf("%+v:\n got %s\nwant %s", want.value, out, want.json)
+		}
+	}
+}
+
+// A pointer to a struct is carried; a pointer to a slice or a map is not, since
+// a nil and an empty one are the same thing on this wire. See pointer.go.
+func TestPointerToSliceOrMapIsRefused(t *testing.T) {
+	type toSlice struct {
+		Sub *[]int32 `cb:"1"`
+	}
+	type toMap struct {
+		Sub *map[string]int32 `cb:"1"`
+	}
+	if _, err := Marshal(&toSlice{}); err == nil {
+		t.Error("a pointer to a slice was accepted; it has no form on the wire yet")
+	}
+	if _, err := Marshal(&toMap{}); err == nil {
+		t.Error("a pointer to a map was accepted; it has no form on the wire yet")
+	}
+}
+
+// TestUncarriableFieldIsNamed is the regression for an error that named the
+// wrong type. A struct whose field the format cannot carry used to come back
+// from compositeOpFor indistinguishable from "not a composite", so the caller
+// fell through to the scalar table and reported that []holder was not a
+// carriable slice — naming the one type in the message that was fine.
+func TestUncarriableFieldIsNamed(t *testing.T) {
+	type holder struct {
+		Lookup map[string]*int32 `cb:"1"`
+	}
+	_, err := Marshal([]holder{{}})
+	if err == nil {
+		t.Fatal("a map of pointers was accepted")
+	}
+	if !strings.Contains(err.Error(), "Lookup") {
+		t.Errorf("the error does not name the field that could not be carried: %v", err)
 	}
 }
 

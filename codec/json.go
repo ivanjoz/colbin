@@ -438,7 +438,9 @@ func (w *walker) floatValue(value float64, width int) {
 // would otherwise be one switch written twice.
 func (w *walker) narrowValue(reader *wire.Reader, field *planField) {
 	switch field.op {
-	case opStruct:
+	case opStruct, opPointerStruct:
+		// A present key is a body either way: a nil pointer wrote no key at all,
+		// and absent() renders that as null.
 		body, wideKeys, ok := reader.StructBody()
 		if !ok {
 			w.fail(reader.Err())
@@ -520,7 +522,7 @@ func (w *walker) narrowScalar(reader *wire.Reader, op fieldOp) {
 // and boxing them would cost an allocation per field to save a switch.
 func (w *walker) wideValue(reader *wire.Reader8, field *planField) {
 	switch field.op {
-	case opStruct:
+	case opStruct, opPointerStruct:
 		body, wideKeys, ok := reader.StructBody()
 		if !ok {
 			w.fail(reader.Err())

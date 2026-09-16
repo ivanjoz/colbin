@@ -140,7 +140,7 @@ func parseDesc(field *planField, plans []*typePlan, data []byte) ([]byte, error)
 	data = data[1:]
 
 	switch op {
-	case opStruct, opStructs:
+	case opStruct, opStructs, opPointerStruct:
 		index, width, ok := wire.ReadLength(data)
 		if !ok {
 			return nil, errShortSection

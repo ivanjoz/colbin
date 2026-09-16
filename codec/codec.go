@@ -1,6 +1,7 @@
 package codec
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -65,6 +66,13 @@ const (
 	// declared type, which says on the wire what it is. See dynamic.go.
 	opAny
 	opAnys
+	// opPointerStruct is a *T where T is a struct: the body of opStruct, with the
+	// key omitted when the pointer is nil. See pointer.go.
+	//
+	// It sits after opAnys rather than beside opPointer because these numbers are
+	// format — a schema section writes the op byte — so a new one goes on the end
+	// and everything already written keeps its meaning.
+	opPointerStruct
 
 	// opCount bounds the block, so a schema section carrying a number this
 	// version does not assign is refused rather than indexed on.
@@ -216,6 +224,15 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 		op, sub, sliceType, stride, compositeErr := compositeOpFor(field.Type, building)
 		var keyKind, valueKind mapKind
 		var elemOp fieldOp
+		// A composite that failed to plan is reported as itself. Only
+		// errNotComposite means "try the other kinds" — see errNotComposite. The
+		// error is passed up unwrapped because it already names the type and the
+		// field that could not be carried, which is the one the reader has to go
+		// and change; another frame of `colbin: Outer.Field:` in front of it only
+		// buries that.
+		if compositeErr != nil && !errors.Is(compositeErr, errNotComposite) {
+			return nil, compositeErr
+		}
 		if compositeErr != nil {
 			switch field.Type.Kind() {
 			case reflect.Map:
@@ -561,6 +578,8 @@ func writePlan(writer *wire.Writer, plan *typePlan, record unsafe.Pointer, buf *
 			appendNarrowMap(writer, field, at)
 		case opPointer:
 			appendPointer(writer, field, at)
+		case opPointerStruct:
+			appendNarrowPointerStruct(writer, field, at, buf)
 		}
 	}
 }
@@ -770,6 +789,8 @@ func readField(reader *wire.Reader, field *planField, record unsafe.Pointer, buf
 		readNarrowMap(reader, field, at)
 	case opPointer:
 		readPointer(reader, field, at)
+	case opPointerStruct:
+		readNarrowPointerStruct(reader, field, at, buf)
 	}
 }
 
