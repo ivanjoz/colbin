@@ -30,6 +30,7 @@ package codec
 //
 //	scalars, string, bytes, arrays   —   (the op names the element type)
 //	opStruct, opStructs              [structIndex]
+//	opPointerStruct                  [structIndex]
 //	opMap                            [keyKind:1] [valueKind:1]
 //	opPointer                        [elemOp:1]
 //
@@ -238,7 +239,7 @@ func (builder *sectionBuilder) structIndex(plan *typePlan) int {
 func (builder *sectionBuilder) appendDesc(dst []byte, field *planField) []byte {
 	dst = append(dst, uint8(field.op))
 	switch field.op {
-	case opStruct, opStructs:
+	case opStruct, opStructs, opPointerStruct:
 		return wire.AppendLength(dst, builder.structIndex(field.sub))
 	case opMap:
 		return append(dst, uint8(field.keyKind), uint8(field.valueKind))

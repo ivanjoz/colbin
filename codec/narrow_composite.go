@@ -32,6 +32,15 @@ func appendNarrowStruct(writer *wire.Writer, field *planField, at unsafe.Pointer
 	writer.Close(mark)
 }
 
+// appendNarrowPointerStruct is appendPointerStructField at four key bits.
+func appendNarrowPointerStruct(writer *wire.Writer, field *planField, at unsafe.Pointer, buf *scratch) {
+	pointee := *(*unsafe.Pointer)(at)
+	if pointee == nil {
+		return
+	}
+	appendNarrowStruct(writer, field, pointee, buf)
+}
+
 // appendWideInto writes a wide key run onto the narrow writer's buffer. Both
 // writers are a []byte and nothing else, so this is a hand-off rather than a
 // copy — the same trick appendNarrowInto plays in the other direction.
@@ -123,6 +132,13 @@ func readNarrowStruct(reader *wire.Reader, field *planField, at unsafe.Pointer, 
 		return
 	}
 	readNarrowBody(reader, body, wideKeys, field.sub, at, buf)
+}
+
+// readNarrowPointerStruct is readPointerStructField at four key bits.
+func readNarrowPointerStruct(reader *wire.Reader, field *planField, at unsafe.Pointer, buf *scratch) {
+	pointee := reflect.New(field.sliceType.Elem()).UnsafePointer()
+	readNarrowStruct(reader, field, pointee, buf)
+	*(*unsafe.Pointer)(at) = pointee
 }
 
 // readNarrowBody fills a record from a nested run at whichever width it declared.

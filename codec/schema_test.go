@@ -46,12 +46,14 @@ func TestFieldOpsArePinned(t *testing.T) {
 		"opPointer": {opPointer, 24},
 		"opAny":     {opAny, 25},
 		"opAnys":    {opAnys, 26},
+
+		"opPointerStruct": {opPointerStruct, 27},
 	} {
 		if uint8(pinned.op) != pinned.want {
 			t.Errorf("%s is %d, and the wire says %d", name, pinned.op, pinned.want)
 		}
 	}
-	if opCount != 27 {
+	if opCount != 28 {
 		t.Errorf("there are %d ops; a new one goes on the end and this number follows it",
 			opCount)
 	}
