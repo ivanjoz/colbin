@@ -1,5 +1,5 @@
 // Reads the flat buffer `colbin::materialize::to_buffer` writes and turns it
-// into row objects without going through JSON text — PACKAGE_PLAN.md §5.
+// into row objects without going through JSON text — INTERNALS.md §16.3.
 //
 // The buffer has no offset table: every run's byte length is derivable from
 // `rowCount` and the field's own kind, so this walks it once, in field order,
@@ -44,7 +44,7 @@ type Field = { name: string; col: ColumnKind }
 
 /** A uniform per-row accessor, for the CSP fallback path only — the generated
  * builder never calls this, since a function call per cell is exactly the
- * cost §2.1 measured a monomorphic object literal beating by 10x. */
+ * cost a monomorphic object literal was measured beating by 10x. */
 type Generic = { get(row: number): unknown }
 
 /**
@@ -84,7 +84,7 @@ function readRuns(buffer: ArrayBuffer, start: number, rowCount: number, fields: 
         // read signed and `lo` unsigned: that reconstructs any 64-bit two's
         // complement pattern exactly, whichever the field's own signedness,
         // as long as the true value's magnitude is under 2^53 — which the
-        // exceeds flag guarantees for this column kind. §2.3.
+        // exceeds flag guarantees for this column kind (INTERNALS.md §16.3).
         runs.push({
           col: 'intSafe',
           hi: new Int32Array(buffer, at, rowCount * 2),
@@ -114,7 +114,7 @@ function readRuns(buffer: ArrayBuffer, start: number, rowCount: number, fields: 
         const blobLen = offsets[rowCount]
         // One bulk decode over the whole blob, then `substring` per row: 10-12x
         // faster than decoding each string, because byte offsets equal UTF-16
-        // code unit offsets exactly when the blob is ASCII. §5.3.
+        // code unit offsets exactly when the blob is ASCII.
         const text = new TextDecoder().decode(new Uint8Array(buffer, blobStart, blobLen))
         runs.push({ col: 'stringAscii', text, offsets })
         at = blobStart + blobLen
@@ -198,8 +198,8 @@ function signatureOf(fields: Field[]): string {
 
 /**
  * A generated, monomorphic row builder for this exact field signature,
- * compiled once and cached — §2.1 measures this at 10x a generic `for key in
- * schema` loop, because V8 gives every row the same hidden class.
+ * compiled once and cached — measured at 10x a generic `for key in schema`
+ * loop, because V8 gives every row the same hidden class.
  */
 function getFactory(fields: Field[]): Factory {
   const key = signatureOf(fields)
@@ -370,12 +370,12 @@ export type Column =
 export type ColumnTable = { rowCount: number; columns: Column[] }
 
 /**
- * The materialize buffer as columns rather than rows — PACKAGE_PLAN.md §6, for
+ * The materialize buffer as columns rather than rows — INTERNALS.md §16.2, for
  * a caller feeding a grid or a chart that never wants row objects.
  *
  * `float` and `bigint` columns are views straight over `buffer`; the rest are
  * built, because a bitmap, a UTF-8 blob and a pair of i32 lanes are not things
- * a chart can read. Building them is the cheap end of §2.3 — thousandths of a
+ * a chart can read. Building them is cheap — thousandths of a
  * millisecond per thousand rows — and it is still less work than the row build
  * this exists to skip.
  */

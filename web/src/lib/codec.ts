@@ -1,4 +1,4 @@
-// The page's wrapper around the published package — PACKAGE_PLAN.md phase 6.
+// The page's wrapper around the published package — INTERNALS.md §16.
 //
 // Everything that used to be here (the instance pool, the ABI, the
 // materializer's buffer reader) is `colbin` now, and this file is what is left
@@ -18,7 +18,7 @@
 // `colbin/asset` is: the module is served as a `.wasm` file instead of a third
 // of a megabyte of base64 in the bundle. And it is the entry whose
 // `new URL('./colbin.inspect.wasm', import.meta.url)` has to survive a real
-// bundler: this site is that test (§9), so importing it any other way here
+// bundler: this site is that test (INTERNALS.md §19), so importing it any other way here
 // would leave nothing checking it.
 
 import {
@@ -124,7 +124,7 @@ export async function decode(message: Uint8Array, section?: Uint8Array): Promise
 export type Unmarshaled = {
   rows: unknown
   /** Which path produced `rows` — `materialize` skips JSON text entirely
-   * (PACKAGE_PLAN.md §5); `json` is the fallback for anything that is not a
+   * (INTERNALS.md §16.3); `json` is the fallback for anything that is not a
    * one-field envelope around a table. */
   path: Path
 }

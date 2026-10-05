@@ -4,9 +4,8 @@
 //! `js/vectors/web_encoded.json` holds the JSON text that went in and the
 //! message that came out — twice, once with strings raw and once with the
 //! opt-in packing on. This file encodes the same text and asserts the bytes are
-//! identical. The file was written by the AssemblyScript module
-//! `RUST_WASM_PLAN.md` phase 8 deleted, and reproducing it byte for byte is
-//! what made the deletion safe.
+//! identical. The file was written by the AssemblyScript module this crate
+//! replaced, and reproducing it byte for byte is what made the deletion safe.
 //!
 //! Byte equality rather than "it decodes to the same document", and that is the
 //! point. Two encoders that agree on the document but not on the bytes are two

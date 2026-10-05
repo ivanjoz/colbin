@@ -171,7 +171,7 @@ try {
       check(name + ': has a ratio', /x$/.test(state.ratio), state.ratio)
       check(name + ': fields listed', state.fields > 0)
       check(name + ': hex rendered', state.hexCells > 0)
-      // `inspect` and `unmarshal` are fired together (PACKAGE_PLAN.md §6.1)
+      // `inspect` and `unmarshal` are fired together (INTERNALS.md §16.2)
       // through the one `Codec` handle `$lib/codec` holds — two concurrent
       // callers sharing an instance, which is the case the handle's design
       // claims is safe by construction and this is the test of it.
@@ -180,7 +180,7 @@ try {
   }
 
   // `products`/`metrics`/`clients` are bare arrays past the table threshold —
-  // the materializer's exact shape (§5.5). `bigints` is three records, under
+  // the materializer's exact shape (INTERNALS.md §16.3). `bigints` is three records, under
   // the threshold, so it stays a plain list and unmarshal's own fallback runs.
   await click('Products, 200 records')
   await wait(700)

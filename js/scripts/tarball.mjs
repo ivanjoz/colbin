@@ -1,4 +1,4 @@
-// The tarball, as a consumer receives it — PACKAGE_PLAN.md phase 5.
+// The tarball, as a consumer receives it — INTERNALS.md §17.
 //
 // `npm pack`, install the tarball into a directory outside the repository, and
 // import the entries from a file that has never seen this checkout. What that
@@ -8,7 +8,7 @@
 //
 // The consumer is deliberately plain Node with no bundler and no TypeScript:
 // anything that needs one of those is a bundler's problem, and `web/` is the
-// test for that (§9).
+// test for that.
 
 import { execFileSync } from 'node:child_process'
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
@@ -142,8 +142,8 @@ try {
     JSON.stringify({ name: 'colbin-consumer', private: true, type: 'module' }, null, 2),
   )
 
-  // `--ignore-scripts` is the posture CI and pnpm default to, and §1's second
-  // reason is that the package must install under it. If anything here needed
+  // `--ignore-scripts` is the posture CI and pnpm default to, and the package
+  // must install under it. If anything here needed
   // a Rust toolchain on install, this is where it would fail.
   run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', tarball], consumer)
 

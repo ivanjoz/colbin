@@ -1,5 +1,5 @@
 /**
- * The one failure type. PACKAGE_PLAN.md §6: a thrown error rather than an
+ * The one failure type. INTERNALS.md §16.2: a thrown error rather than an
  * `Outcome` union, because a library consumer's normal path is success and a
  * page that wants a union can wrap this in three lines.
  *

@@ -78,7 +78,7 @@ func matchesEncodingJSON(t *testing.T, value any) {
 	sameJSON(t, toJSON(t, value), want)
 }
 
-// Phase 3: the flat record, which is most of a REST payload.
+// The flat record, which is most of a REST payload.
 func TestJSONFlatRecords(t *testing.T) {
 	full := everyShape{
 		Flag:    true,
@@ -146,7 +146,7 @@ func TestJSONFillsInWhatTheMessageOmitted(t *testing.T) {
 	}
 }
 
-// Phase 4: a nested struct and a list of them, at both key widths.
+// A nested struct and a list of them, at both key widths.
 func TestJSONNestedStructs(t *testing.T) {
 	matchesEncodingJSON(t, &outer{
 		Head: 7,
@@ -220,7 +220,7 @@ func columnar(t *testing.T, message []byte) bool {
 	return reader.IsTable()
 }
 
-// Phases 4 and 5 together: the same rows, both layouts, one answer.
+// Lists and tables together: the same rows, both layouts, one answer.
 //
 // Quantity is left zero in every row on purpose. A column of nothing but zeros
 // is not written at all, so the table path has to put the zeros back from the
@@ -261,7 +261,7 @@ func TestJSONCannotTellAnEmptySliceFromANilOne(t *testing.T) {
 	}
 }
 
-// Phase 6, floats: a scalar float travels byte-reversed and a column float does
+// Floats: a scalar float travels byte-reversed and a column float does
 // not, so reading either as the other is silent nonsense rather than an error.
 // The table path is what this is really testing.
 type readings struct {
@@ -341,7 +341,7 @@ func mustSchema(t *testing.T, value any) *Schema {
 	return schema
 }
 
-// Phase 6, pointers: nil is null, and a pointer to a zero is that zero — which
+// Pointers: nil is null, and a pointer to a zero is that zero — which
 // is the distinction pointer.go spends an explicit zero on the wire to keep.
 func TestJSONPointers(t *testing.T) {
 	for _, value := range []any{
@@ -367,7 +367,7 @@ func TestJSONPointers(t *testing.T) {
 	}
 }
 
-// Phase 6, maps. A map does not round-trip to identical JSON bytes — Go map
+// Maps. A map does not round-trip to identical JSON bytes — Go map
 // iteration has no order — so this compares by value, which is also all a JSON
 // object promises.
 func TestJSONMaps(t *testing.T) {
@@ -423,7 +423,7 @@ func TestJSONReadsPackedStrings(t *testing.T) {
 	sameJSON(t, out, want)
 }
 
-// Phase 7: a message that carries its own schema needs none passed in.
+// A message that carries its own schema needs none passed in.
 func TestJSONFromASelfDescribingMessage(t *testing.T) {
 	value := &basket{ID: 9, Lines: lines(12)}
 	message, err := MarshalSelfDescribing(value)
@@ -456,7 +456,7 @@ func TestJSONFromASelfDescribingMessage(t *testing.T) {
 	}
 }
 
-// Phase 8: DecodeAny, on the same walk.
+// DecodeAny, on the same walk.
 func TestDecodeAnyShapes(t *testing.T) {
 	value := &everyShape{
 		Flag: true, Small: -7, Wide: 1 << 40, Counted: 4_000_000_000,

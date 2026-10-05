@@ -171,7 +171,7 @@ jobs:
           cargo clippy --manifest-path rust/wasm/Cargo.toml --target wasm32-unknown-unknown --features inspect -- -D warnings
           cargo clippy --manifest-path rust/wasm/Cargo.toml --target wasm32-unknown-unknown --no-default-features --features inspect -- -D warnings
 
-      # RUST_WASM_PLAN.md §6: the encoder is behind a feature so that a consumer
+      # INTERNALS.md §15: the encoder is behind a feature so that a consumer
       # decoding a Go service's answers does not download it. That only stays
       # true while something checks, and the check is that the decode-only module
       # is materially smaller than the one the page ships.
@@ -218,7 +218,7 @@ jobs:
         working-directory: js
         run: bun run test
 
-      # PACKAGE_PLAN.md §2 is the entire justification for the package's
+      # INTERNALS.md §16.3 is the entire justification for the package's
       # design, so letting it rot silently would be the obvious way to waste
       # the work. The gate is a ratio against `JSON.parse` measured in the same
       # process on the same corpus, never a millisecond figure: a shared runner
@@ -246,7 +246,7 @@ jobs:
       # stranger would from npm, which makes this the bundler integration test:
       # it resolves the exports map through Vite and emits the `.wasm` from the
       # entry's own `new URL('./colbin.wasm', import.meta.url)`. That is why
-      # the package moved out of `web/` (PACKAGE_PLAN.md §3 and §9) — please do
+      # the package moved out of `web/` (INTERNALS.md §16.1) — please do
       # not "simplify" it back to a relative import, which would leave nothing
       # checking any of it.
       - name: Build the site, which is the package's bundler test
@@ -425,7 +425,7 @@ jobs:
       - name: Publish to npm
         working-directory: repo
         run: |
-          # One tag drives all three implementations (PACKAGE_PLAN.md §8), so
+          # One tag drives all three implementations (INTERNALS.md §19), so
           # the version in js/package.json has to be the tag without its `v` —
           # checked here rather than discovered as a published package nobody
           # can match to a commit.

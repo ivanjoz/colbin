@@ -155,7 +155,7 @@ The reader defends against the network; the writer trusts its own program.
   four layouts it is, so a reader that does not know the key cannot step over it.
   Adding a field is a coordinated deploy of both sides — the same trade compact
   mode makes. The self-describing variant is the 8-bit key width, which carries a
-  class in its descriptor; see `BYTE_ALIGNED_PLAN.md` §2.3.
+  class in its descriptor; see `INTERNALS.md` §4.
 - **Carry more than sixteen fields**, or a nested struct, map, pointer or
   interface. A field's whole layout has to follow from its key.
 - **Be recognised by `Unmarshal`.** A narrow message has no version byte and no

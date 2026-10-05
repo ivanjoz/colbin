@@ -72,7 +72,7 @@ execFileSync(
   [
     // -O3 rather than -Oz: it wins on gzipped size (89 710 B against -Oz's
     // 89 790) while also being the level that does not trade speed away, and
-    // speed is the whole subject of PACKAGE_PLAN.md §2. -Oz wins on raw bytes
+    // speed is the whole subject of INTERNALS.md §16.3. -Oz wins on raw bytes
     // by 1.5 KB, which gzip then gives back.
     '-O3',
     // The sections that exist only to get us here.
