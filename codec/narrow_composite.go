@@ -69,16 +69,22 @@ func appendNarrowStructs(writer *wire.Writer, field *planField, at unsafe.Pointe
 	}
 	list := writer.OpenList(field.key, slice.len)
 	for index := range slice.len {
-		element := writer.OpenElement()
-		elementAt := unsafe.Add(slice.data, uintptr(index)*field.stride)
-		if field.sub.isWide {
-			appendWideInto(writer, field.sub, elementAt, buf)
-		} else {
-			writePlan(writer, field.sub, elementAt, buf)
-		}
-		writer.CloseElement(element)
+		appendNarrowElement(writer, field.sub, unsafe.Add(slice.data, uintptr(index)*field.stride), buf)
 	}
 	writer.Close(list)
+}
+
+// appendNarrowElement writes one struct as a narrow list element or map value:
+// a length and a key run, with no descriptor, so its key width is the schema's
+// to say.
+func appendNarrowElement(writer *wire.Writer, plan *typePlan, at unsafe.Pointer, buf *scratch) {
+	element := writer.OpenElement()
+	if plan.isWide {
+		appendWideInto(writer, plan, at, buf)
+	} else {
+		writePlan(writer, plan, at, buf)
+	}
+	writer.CloseElement(element)
 }
 
 // appendNarrowTable writes a table under a narrow parent, its columns keyed at
@@ -117,9 +123,18 @@ func appendNarrowMap(writer *wire.Writer, field *planField, at unsafe.Pointer, b
 		return
 	}
 	defer buf.leave()
+	holder := structHolder(field)
 	mark := writer.OpenMap(field.key, count)
 	for _, key := range sortedMapKeys(value) {
+		if buf.err != nil {
+			break
+		}
 		writeNarrowMapValue(writer, field.keyKind, key)
+		if field.valueKind == mapStruct {
+			holder.Set(value.MapIndex(key))
+			appendNarrowElement(writer, field.sub, holder.Addr().UnsafePointer(), buf)
+			continue
+		}
 		writeNarrowMapValue(writer, field.valueKind, value.MapIndex(key))
 	}
 	writer.Close(mark)
@@ -292,7 +307,15 @@ func readNarrowMap(reader *wire.Reader, field *planField, at unsafe.Pointer, buf
 	value := reflect.New(field.sliceType.Elem()).Elem()
 	for range count {
 		readNarrowMapValue(&entries, field.keyKind, key)
-		readNarrowMapValue(&entries, field.valueKind, value)
+		if field.valueKind == mapStruct {
+			// Zeroed per entry for the reason readMapField gives.
+			value.SetZero()
+			if body, ok := entries.Element(); ok {
+				readNarrowBody(&entries, body, field.sub.isWide, field.sub, value.Addr().UnsafePointer(), buf)
+			}
+		} else {
+			readNarrowMapValue(&entries, field.valueKind, value)
+		}
 		if entries.Err() != nil {
 			reader.Fail(entries.Err())
 			return

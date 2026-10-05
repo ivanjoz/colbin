@@ -26,10 +26,20 @@ package codec
 // free for a struct, and the wire is unchanged — a reader in another language
 // sees a struct field that is present or absent, which it already handles.
 //
-// A pointer to a slice or a map is still refused. Those collapse the other way:
-// a nil one and an empty one are the same thing on this wire, so telling them
-// apart would need the SPECIAL null code and a decision about what `*[]T` nil
-// means that nothing has asked for yet.
+// # Slices and maps: the pointer is not on the wire
+//
+// A pointer to a slice or a map is written as the slice or the map: nothing
+// when it is nil, and exactly the bytes the plain field would be otherwise. A
+// reader allocates the pointee when the key is present and leaves the field nil
+// when it is not. The schema names the pointee's op, so a reader in another
+// language sees an ordinary slice or map, and there is no op for this at all —
+// the plan marks the field indirect and the walks step through it.
+//
+// What it does not do is keep `&[]T{}` apart from nil. An empty slice or map
+// writes nothing, so a pointer to one writes nothing either and reads back nil.
+// Keeping them apart would take a null code on the wire and a rule about what
+// an empty-but-present collection is, for a distinction a slice field already
+// does not make. See RATIONALE.md.
 
 import (
 	"fmt"
@@ -50,6 +60,25 @@ func pointerOpFor(fieldType reflect.Type) (fieldOp, error) {
 		return 0, fmt.Errorf("a pointer to %s is not carried", fieldType.Elem())
 	}
 	return op, nil
+}
+
+// pointsToCollection says a field is a pointer to a slice or a map, which is
+// planned as its pointee and marked indirect.
+func pointsToCollection(fieldType reflect.Type) bool {
+	if fieldType.Kind() != reflect.Pointer {
+		return false
+	}
+	kind := fieldType.Elem().Kind()
+	return kind == reflect.Slice || kind == reflect.Map
+}
+
+// newPointee allocates what an indirect field points at, publishes it into the
+// field and returns it, for the reader to fill. The record was zeroed first, so
+// a key the message omits leaves the field nil without coming here.
+func newPointee(field *planField, at unsafe.Pointer) unsafe.Pointer {
+	pointee := reflect.New(field.sliceType).UnsafePointer()
+	*(*unsafe.Pointer)(at) = pointee
+	return pointee
 }
 
 // isZeroScalar reports whether the pointee is what the omit-zero rule drops,

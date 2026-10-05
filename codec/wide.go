@@ -29,7 +29,7 @@ import (
 	"github.com/ivanjoz/colbin/wire"
 )
 
-// Root descriptors, from BYTE_ALIGNED_PLAN.md §2.1. They are the STRUCT class of
+// Root descriptors; INTERNALS.md §2.1 lists them. They are the STRUCT class of
 // an ordinary K8 descriptor, which is what puts every colbin message in
 // 0xD0..0xDF — see root.go for the reservation that follows from it, and for the
 // 240 first bytes an application may claim.
@@ -57,6 +57,11 @@ func appendWide(writer *wire.Writer8, plan *typePlan, record unsafe.Pointer, buf
 	for index := range plan.fields {
 		field := &plan.fields[index]
 		at := unsafe.Add(record, field.offset)
+		if field.indirect {
+			if at = *(*unsafe.Pointer)(at); at == nil {
+				continue
+			}
+		}
 		switch field.op {
 		case opStruct:
 			appendStructField(writer, field, at, buf)
@@ -83,6 +88,9 @@ func appendWide(writer *wire.Writer8, plan *typePlan, record unsafe.Pointer, buf
 // readWideField is readField for the wide key width.
 func readWideField(reader *wire.Reader8, field *planField, record unsafe.Pointer, buf *scratch) {
 	at := unsafe.Add(record, field.offset)
+	if field.indirect {
+		at = newPointee(field, at)
+	}
 	switch field.op {
 	case opStruct:
 		readStructField(reader, field, at, buf)

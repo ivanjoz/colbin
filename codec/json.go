@@ -961,6 +961,12 @@ func (w *walker) narrowMap(reader *wire.Reader, field *planField) {
 			w.floatValue(float64FromReversed(entries.ElementUint()), 64)
 		case mapBool:
 			w.to.boolean(entries.ElementUint() == 1)
+		case mapStruct:
+			// A narrow list's element: a length and a body, whose key width the
+			// schema says because nothing on the wire does.
+			if body, ok := entries.Element(); ok {
+				w.body(field.sub, body, field.sub != nil && field.sub.isWide)
+			}
 		default:
 			w.fail(errBadMapValue(field.valueKind))
 		}
@@ -1017,6 +1023,10 @@ func (w *walker) wideMap(reader *wire.Reader8, field *planField) {
 			// The entries of a `map[string]any`, which say what they are one at a
 			// time rather than once in the schema. See dynamic.go.
 			w.dynamicValue(&entries)
+		case mapStruct:
+			if body, wideKeys, ok := entries.ElementStructBody(); ok {
+				w.body(field.sub, body, wideKeys)
+			}
 		default:
 			w.fail(errBadMapValue(field.valueKind))
 		}

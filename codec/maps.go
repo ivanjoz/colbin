@@ -23,9 +23,15 @@ package codec
 //
 // # What a key and a value may be
 //
-// Strings and integers as keys, and those plus floats, bools and `any` as
-// values. Anything else is refused at plan time with the field named, because
+// Strings and integers as keys, and those plus floats, bools, structs and `any`
+// as values. Anything else is refused at plan time with the field named, because
 // silently dropping a shape is worse than saying so.
+//
+// A struct value is written the way a list's element is, so a map of structs
+// is `map[K]V` with the elements of a `[]V` behind its keys. It needs no
+// self-describing message: the schema section names the struct by its index in
+// the struct table, as it does a slice of structs' element. A `map[K]*V` is not
+// carried — a nil value inside a map has no form on this wire.
 //
 // `any` is the escape hatch and the expensive one: an entry of it carries its
 // own type on the wire (dynamic.go), which is what a `map[string]any` needs and
@@ -70,6 +76,11 @@ const (
 	// mapAny is a value with no declared type: every entry says what it is. It
 	// is what makes `map[string]any` carriable. See dynamic.go.
 	mapAny
+	// mapStruct is a struct value, written as a list element is: a struct body
+	// with its length, and at eight key bits its descriptor. Which struct is the
+	// section's struct table's to say, by an index after the two kinds — the way
+	// a slice of structs names its element. See schema.go.
+	mapStruct
 
 	// mapKindCount bounds the block, so a section naming a kind this version
 	// does not assign is refused.
@@ -111,6 +122,11 @@ func mapKindOf(t reflect.Type, what string) (mapKind, error) {
 			return 0, err
 		}
 		return mapAny, nil
+	case reflect.Struct:
+		if what == "key" {
+			return 0, fmt.Errorf("a struct is not a map key this format carries")
+		}
+		return mapStruct, nil
 	}
 	return 0, fmt.Errorf("a map %s of %s is not carried", what, t)
 }
@@ -143,19 +159,39 @@ func appendMapField(writer *wire.Writer8, field *planField, at unsafe.Pointer, b
 	}
 	defer buf.leave()
 	keys := sortedMapKeys(value)
+	holder := structHolder(field)
 	mark := writer.OpenMap(field.key, len(keys))
 	for _, key := range keys {
 		if buf.err != nil {
 			break
 		}
 		writeMapValue(writer, field.keyKind, key)
-		if field.valueKind == mapAny {
+		switch field.valueKind {
+		case mapAny:
 			appendAnyReflect(writer, value.MapIndex(key), buf)
-		} else {
+		case mapStruct:
+			holder.Set(value.MapIndex(key))
+			appendStructElement(writer, field.sub, holder.Addr().UnsafePointer(), buf)
+		default:
 			writeMapValue(writer, field.valueKind, value.MapIndex(key))
 		}
 	}
 	writer.Close(mark)
+}
+
+// structHolder is somewhere to put a map's struct values one at a time, for a
+// map of them, and nothing otherwise.
+//
+// A map value has no address — Go may move it as the map grows — and the plan
+// walks read a struct through one. So each entry is copied into this and
+// written from here, and on the way back each is read into it and copied in.
+// One holder per map rather than one per entry: the walk is done with an entry
+// before the next is copied over it.
+func structHolder(field *planField) reflect.Value {
+	if field.valueKind != mapStruct {
+		return reflect.Value{}
+	}
+	return reflect.New(field.sliceType.Elem()).Elem()
 }
 
 // sortedMapKeys is a map's keys in the order its entries are written.
@@ -204,7 +240,8 @@ func readMapField(reader *wire.Reader8, field *planField, at unsafe.Pointer, buf
 	value := reflect.New(field.sliceType.Elem()).Elem()
 	for range count {
 		readMapValue(&entries, field.keyKind, key)
-		if field.valueKind == mapAny {
+		switch field.valueKind {
+		case mapAny:
 			// A dynamic entry decodes to whatever the wire said it was, and the
 			// destination is an interface, so this is a Set rather than one of the
 			// typed stores readMapValue does.
@@ -213,7 +250,14 @@ func readMapField(reader *wire.Reader8, field *planField, at unsafe.Pointer, buf
 			} else {
 				value.SetZero()
 			}
-		} else {
+		case mapStruct:
+			// value is reused across entries and SetMapIndex copies it, so it is
+			// zeroed first: a field this entry omits must not keep the last one's.
+			value.SetZero()
+			if body, wideKeys, ok := entries.ElementStructBody(); ok {
+				readBody(&entries, body, wideKeys, field.sub, value.Addr().UnsafePointer(), buf)
+			}
+		default:
 			readMapValue(&entries, field.valueKind, value)
 		}
 		if entries.Err() != nil {

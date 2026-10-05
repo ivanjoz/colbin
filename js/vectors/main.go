@@ -144,6 +144,19 @@ type Maps struct {
 	Counts map[int32]int64   `cb:"2"`
 }
 
+// Catalog holds maps of structs, whose section names the value's struct by its
+// index in the table, the way a slice of structs names its element. The values
+// are narrow (Line) and wide (WideCell). Catalog is wide because the module
+// renders a map at eight key bits only. Tags and Counts are pointers to
+// collections, which are the collections on the wire.
+type Catalog struct {
+	Name   string             `cb:"1"`
+	ByCode map[string]Line    `cb:"2"`
+	Cells  map[int32]WideCell `cb:"3"`
+	Tags   *[]string          `cb:"20"`
+	Counts *map[string]uint16 `cb:"21"`
+}
+
 // Wide has an id past sixteen, whose key four bits cannot carry, so the type
 // takes eight-bit keys. It is one of three things that do: the others are a
 // field with no id in its tag, whose key is a hash of its name and lands
@@ -324,6 +337,14 @@ func types() []typeCase {
 			&Paged{ID: 1, Name: "first", Late: -300, Last: "third"}),
 		describe("paged-first-page", "the later pages empty, so not written, and their fields zeros",
 			&Paged{ID: 2, Name: "only"}),
+		describe("map-of-structs", "maps of narrow and wide structs, and pointers to collections",
+			&Catalog{
+				Name:   "store",
+				ByCode: map[string]Line{"a-1": {SKU: "A1", Qty: 3, Cents: 250}, "empty": {}},
+				Cells:  map[int32]WideCell{-1: {Label: "W", Cents: 1 << 40}, 7: {ProductID: 7}},
+				Tags:   &[]string{"open", "late"},
+				Counts: &map[string]uint16{"doors": 2},
+			}),
 		describe("maps", "one entry each, which keeps the case about a map's framing",
 			&Maps{
 				Labels: map[string]string{"env": "prod"},

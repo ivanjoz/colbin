@@ -1,6 +1,9 @@
 package codec
 
 import (
+	"bytes"
+	"io"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -217,20 +220,210 @@ func TestPointerToStructJSON(t *testing.T) {
 	}
 }
 
-// A pointer to a struct is carried; a pointer to a slice or a map is not, since
-// a nil and an empty one are the same thing on this wire. See pointer.go.
-func TestPointerToSliceOrMapIsRefused(t *testing.T) {
-	type toSlice struct {
-		Sub *[]int32 `cb:"1"`
+// Pointers to slices and maps: the pointee goes on the wire, and the pointer
+// does not. See pointer.go.
+
+type toCollections struct {
+	Rows    *[]inner          `cb:"1"`
+	Ints    *[]int32          `cb:"2"`
+	Natives *[]int            `cb:"3"`
+	Texts   *[]string         `cb:"4"`
+	Blob    *[]byte           `cb:"5"`
+	Counts  *map[string]int32 `cb:"6"`
+	ByName  *map[string]inner `cb:"7"`
+	Tag     int32             `cb:"8"`
+}
+
+// plainCollections is toCollections without the pointers, which is what it has
+// to be byte for byte.
+type plainCollections struct {
+	Rows    []inner          `cb:"1"`
+	Ints    []int32          `cb:"2"`
+	Natives []int            `cb:"3"`
+	Texts   []string         `cb:"4"`
+	Blob    []byte           `cb:"5"`
+	Counts  map[string]int32 `cb:"6"`
+	ByName  map[string]inner `cb:"7"`
+	Tag     int32            `cb:"8"`
+}
+
+// wideCollections takes the eight-bit walks, and the one pointer only they
+// carry: a slice of `any`.
+type wideCollections struct {
+	Rows   *[]inner          `cb:"1"`
+	Ints   *[]int64          `cb:"2"`
+	Anys   *[]any            `cb:"3"`
+	Counts *map[uint32]bool  `cb:"4"`
+	ByName *map[string]inner `cb:"5"`
+	Far    string            `cb:"40"`
+}
+
+func fullCollections() toCollections {
+	return toCollections{
+		Rows:    &[]inner{{ID: 1, Name: "a"}, {ID: 2}},
+		Ints:    &[]int32{-1, 0, 1 << 20},
+		Natives: &[]int{7, -7},
+		Texts:   &[]string{"x", ""},
+		Blob:    &[]byte{0, 1, 2},
+		Counts:  &map[string]int32{"a": 1, "b": -2},
+		ByName:  &map[string]inner{"first": {ID: 1, Name: "one"}, "zero": {}},
+		Tag:     9,
 	}
-	type toMap struct {
-		Sub *map[string]int32 `cb:"1"`
+}
+
+func TestPointerToCollectionRoundTrips(t *testing.T) {
+	original := fullCollections()
+	var back toCollections
+	roundTrip(t, &original, &back)
+	if !reflect.DeepEqual(back, original) {
+		t.Fatalf("round-tripped as %+v, want %+v", back, original)
 	}
-	if _, err := Marshal(&toSlice{}); err == nil {
-		t.Error("a pointer to a slice was accepted; it has no form on the wire yet")
+
+	wide := wideCollections{
+		Rows:   &[]inner{{ID: 3}},
+		Ints:   &[]int64{1 << 40},
+		Anys:   &[]any{"text", int64(-4), true},
+		Counts: &map[uint32]bool{1: true, 2: false},
+		ByName: &map[string]inner{"k": {Name: "v"}},
+		Far:    "far",
 	}
-	if _, err := Marshal(&toMap{}); err == nil {
-		t.Error("a pointer to a map was accepted; it has no form on the wire yet")
+	var wideBack wideCollections
+	roundTrip(t, &wide, &wideBack)
+	if !reflect.DeepEqual(wideBack, wide) {
+		t.Fatalf("round-tripped as %+v, want %+v", wideBack, wide)
+	}
+}
+
+// A nil pointer is absent, and so is a pointer to an empty collection — which
+// reads back nil, the one thing this does not preserve. See pointer.go.
+func TestPointerToEmptyCollectionReadsBackNil(t *testing.T) {
+	empty := toCollections{
+		Rows: &[]inner{}, Ints: &[]int32{}, Natives: &[]int{}, Texts: &[]string{},
+		Blob: &[]byte{}, Counts: &map[string]int32{}, ByName: &map[string]inner{},
+	}
+	for _, original := range []toCollections{{}, empty} {
+		data, err := Marshal(&original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(data) != 1 {
+			t.Fatalf("nil and empty collections cost %d bytes, want the root alone", len(data))
+		}
+		back := fullCollections()
+		if err := Unmarshal(data, &back); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(back, toCollections{}) {
+			t.Fatalf("read back %+v, want every pointer nil", back)
+		}
+	}
+}
+
+// The pointer is not on the wire: the message, the schema and the JSON are the
+// plain field's.
+func TestPointerToCollectionIsTheCollection(t *testing.T) {
+	pointed := fullCollections()
+	plain := plainCollections{
+		Rows: *pointed.Rows, Ints: *pointed.Ints, Natives: *pointed.Natives,
+		Texts: *pointed.Texts, Blob: *pointed.Blob, Counts: *pointed.Counts,
+		ByName: *pointed.ByName, Tag: pointed.Tag,
+	}
+	for name, encode := range map[string]func(any) ([]byte, error){
+		"Marshal":               Marshal,
+		"MarshalSelfDescribing": MarshalSelfDescribing,
+	} {
+		left, err := encode(&pointed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		right, err := encode(&plain)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(left, right) {
+			t.Fatalf("%s: a pointer wrote\n% x\nand the plain field\n% x", name, left, right)
+		}
+	}
+	document, err := MarshalSelfDescribing(&pointed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ToJSON(nil, document); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type pointerTree struct {
+	Name string          `cb:"1"`
+	Kids *[]pointerTree  `cb:"2"`
+	ByID *map[uint16]int `cb:"3"`
+}
+
+func TestPointerToCollectionRecursive(t *testing.T) {
+	original := pointerTree{Name: "root", Kids: &[]pointerTree{
+		{Name: "leaf"},
+		{Name: "branch", Kids: &[]pointerTree{{Name: "deep", ByID: &map[uint16]int{1: 2}}}},
+	}}
+	var back pointerTree
+	roundTrip(t, &original, &back)
+	if !reflect.DeepEqual(back, original) {
+		t.Fatalf("round-tripped as %+v, want %+v", back, original)
+	}
+}
+
+// A row holding a pointer to a slice is not a table row — its field is not a
+// column — and a slice of them past the threshold goes as a list.
+func TestPointerToCollectionInRowsPastTheThreshold(t *testing.T) {
+	type row struct {
+		ID   uint32   `cb:"1"`
+		Tags *[]int32 `cb:"2"`
+	}
+	type rows struct {
+		Rows []row `cb:"1"`
+	}
+	var original rows
+	for index := range tableThreshold * 2 {
+		value := row{ID: uint32(index)}
+		if index%3 == 0 {
+			value.Tags = &[]int32{int32(index)}
+		}
+		original.Rows = append(original.Rows, value)
+	}
+	var back rows
+	roundTrip(t, &original, &back)
+	if !reflect.DeepEqual(back, original) {
+		t.Fatalf("round-tripped as %+v, want %+v", back, original)
+	}
+}
+
+func TestPointerToCollectionTruncationIsRefused(t *testing.T) {
+	original := fullCollections()
+	checkPrefixes(t, &original, unmarshalInto[toCollections])
+}
+
+// What a pointer can still not point at, and Generate, which emits the flat
+// walk and has no indirection in it.
+func TestPointersStillRefused(t *testing.T) {
+	type toPointer struct {
+		P **int32 `cb:"1"`
+	}
+	type toArray struct {
+		P *[3]int32 `cb:"1"`
+	}
+	type toAny struct {
+		P *any `cb:"1"`
+	}
+	for _, value := range []any{toPointer{}, toArray{}, toAny{}} {
+		if _, err := Marshal(value); err == nil {
+			t.Errorf("%T was accepted", value)
+		}
+	}
+	type flatButPointed struct {
+		Ints *[]int32 `cb:"1"`
+	}
+	err := Generate(io.Discard, "x", flatButPointed{})
+	if err == nil || !strings.Contains(err.Error(), "no generated form") {
+		t.Fatalf("Generate on a pointer to a slice: %v", err)
 	}
 }
 

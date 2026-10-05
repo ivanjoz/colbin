@@ -23,10 +23,10 @@ use alloc::vec::Vec;
 use crate::Error;
 use crate::json::{JsonSink, render_key_run};
 use crate::plan::{
-    self, MAP_ANY, MAP_BOOL, MAP_FLOAT32, MAP_FLOAT64, MAP_INT, MAP_STRING, MAP_UINT, OP_ANY,
-    OP_ANYS, OP_BOOL, OP_BYTES, OP_FLOAT32, OP_FLOAT64, OP_INT8, OP_INT16, OP_INT32, OP_INT64,
-    OP_MAP, OP_POINTER, OP_STRING, OP_STRINGS, OP_STRUCT, OP_STRUCTS, OP_UINT8, OP_UINT16,
-    OP_UINT32, OP_UINT64, Plan, PlanField,
+    self, MAP_ANY, MAP_BOOL, MAP_FLOAT32, MAP_FLOAT64, MAP_INT, MAP_STRING, MAP_STRUCT, MAP_UINT,
+    OP_ANY, OP_ANYS, OP_BOOL, OP_BYTES, OP_FLOAT32, OP_FLOAT64, OP_INT8, OP_INT16, OP_INT32,
+    OP_INT64, OP_MAP, OP_POINTER, OP_STRING, OP_STRINGS, OP_STRUCT, OP_STRUCTS, OP_UINT8,
+    OP_UINT16, OP_UINT32, OP_UINT64, Plan, PlanField,
 };
 use crate::section::Schema;
 use crate::wire::{Kind, Reader, Reader8};
@@ -525,7 +525,7 @@ impl<'s> Walker<'s> {
                 MAP_INT => self.number_key(entries.element_int(), true),
                 _ => self.number_key(entries.element_uint() as i64, false),
             }
-            self.map_value(&mut entries, field.value_kind)?;
+            self.map_value(&mut entries, field.value_kind, field.sub)?;
             entries.err()?;
         }
         self.to.end_object();
@@ -533,8 +533,14 @@ impl<'s> Walker<'s> {
         Ok(())
     }
 
-    /// One map value, by the kind the section declared for all of them.
-    fn map_value(&mut self, entries: &mut Reader8<'_>, kind: u8) -> Result<(), Error> {
+    /// One map value, by the kind the section declared for all of them — and,
+    /// for a struct value, the plan it named.
+    fn map_value(
+        &mut self,
+        entries: &mut Reader8<'_>,
+        kind: u8,
+        sub: Option<u32>,
+    ) -> Result<(), Error> {
         match kind {
             MAP_STRING => {
                 let text = entries.element_blob();
@@ -561,6 +567,13 @@ impl<'s> Walker<'s> {
             // The entries of a `map[string]any`, which say what they are one at a
             // time rather than once in the schema.
             MAP_ANY => return self.dynamic_value(entries),
+            // A struct value is a list's element: a descriptor that says its key
+            // width, a length and a key run.
+            MAP_STRUCT => {
+                let at = sub.ok_or(Error::BadSection)?;
+                let (body, wide) = entries.element_struct_body().ok_or(Error::Truncated)?;
+                return self.message(at, body, wide);
+            }
             other => return Err(Error::UnwalkableOp(other)),
         }
         Ok(())

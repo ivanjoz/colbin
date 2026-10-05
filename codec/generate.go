@@ -145,7 +145,7 @@ func generateOne(out *bytes.Buffer, structType reflect.Type) error {
 // 32-bit build refuses a value it cannot hold rather than truncating it.
 func generatedCalls(field planField, fieldType reflect.Type, name, pkgPath string) (write, read string, err error) {
 	row, ok := valueOpOf(schemaOp(field.op, field.native))
-	if !ok {
+	if !ok || field.indirect {
 		return "", "", fmt.Errorf("a %s field has no generated form: Generate emits flat records", fieldType)
 	}
 	same := fieldType == row.goType

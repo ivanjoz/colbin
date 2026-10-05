@@ -490,8 +490,9 @@ data a caller may be authenticating.
 
 ## One byte-aligned format: what the wire gave up, and what it refused to
 
-`BYTE_ALIGNED_PLAN.md` is the design; this is the record of the decisions that
-changed while implementing it, and of the ones the measurements reversed.
+`INTERNALS.md` describes the format as built; this is the record of the
+decisions that changed while implementing its design, and of the ones the
+measurements reversed.
 
 ### Little-endian, where the format was big-endian
 
@@ -619,7 +620,7 @@ duplication is the honest cost of the approach on this side.
 
 ### The presence bitmap is smaller and *slower*, which reverses the plan
 
-`BYTE_ALIGNED_PLAN.md` §2.7 argued that replacing a wide key run's per-field keys
+The design argued that replacing a wide key run's per-field keys
 with a presence bitmap is smaller *and* faster, and used that to argue K4 might
 be droppable. Half of that is right.
 
@@ -793,7 +794,7 @@ express all of them; the reflection over it cannot yet.
 
 `Marshal` now writes byte 0 as the root value's own descriptor — `0xD0` for a
 narrow-keyed struct, `0xD8` for a wide-keyed one — and the decoder dispatches on
-it. That is the last piece of §2.1: the mode bit, the shape bits, the
+it. That is the last piece of the one-byte root (INTERNALS.md §2.1): the mode bit, the shape bits, the
 omit-empty flag and `ALL_POSITIVE` are all either in that byte or gone, and no
 message the old format wrote can be mistaken for one, because every legal root
 byte is even and above 0x90.
@@ -829,7 +830,7 @@ to do with the byte:
 - **`plan.find` was a linear scan**, O(fields) per field and so O(fields²) per
   record: 24% of the profile, the largest single line in it. It is now a
   `[]int16` lookup table sized to the largest declared key, built with the plan.
-  This is the optimisation §5.2 of the plan has recommended from the start; it
+  This is the optimisation the design had recommended from the start; it
   took a profile to make it the obvious thing to do rather than the next thing.
 
 Both together: 45 ns back to 26, which is under where it started.
@@ -873,7 +874,7 @@ every *scalar* in that struct pays a byte it does not need, to make room for the
 two fields that do.
 
 The format already has the answer and the implementation does not use it:
-§2.5 gives the narrow nibble a composite form, `[key:4][lw:2][k8:1][—:1]`,
+the design gives the narrow nibble a composite form, `[key:4][lw:2][k8:1][—:1]`,
 because a narrow reader takes the class from the schema and needs no class bits
 on the wire. Writing that would let a struct with nested fields stay narrow and
 close most of the gap.
@@ -946,7 +947,7 @@ needed a byte length, a byte length needed a class, and a class needed the wide
 descriptor. Every *scalar* in that struct then paid a byte it did not need, to
 make room for the one or two fields that did.
 
-§2.5 said the narrow nibble could carry a composite — a narrow reader has the
+The design said the narrow nibble could carry a composite (INTERNALS.md §3.2) — a narrow reader has the
 schema, so it already knows the shape and needs only the length. Implementing it
 took a four-field order with three nested lines from **55 bytes to 48**, against
 protobuf's 49, and dropped the nested encode from 84 ns to 72 with its last
@@ -1014,7 +1015,7 @@ of it.
 
 ### The scalar walk, and the cost the narrow composite had been hiding
 
-Landing §2.5 made `writePlan` and `readField` handle composites on the narrow
+Landing the narrow composite made `writePlan` and `readField` handle composites on the narrow
 path, which they had not had to before — a composite used to force the wide
 width. Three new arms, each calling out of line and taking a scratch buffer.
 
@@ -1203,7 +1204,7 @@ to carry a second, slower one.
 
 *The widths are separate types, not a flag.* `Writer`/`Reader`,
 `Writer8`/`Reader8` and `BitmapWriter`/`BitmapReader`, exactly as in `wire/`.
-§5 of the plan suggests a const generic here, and it would work — but the two
+The design suggested a const generic here, and it would work — but the two
 widths differ in more than a number: K4 has no class in its descriptor and K8
 has an inline value form, so a single body would be a `match` on the width in
 every method rather than a parameter the monomorphiser folds. The value codecs
@@ -1449,3 +1450,54 @@ rather than disagree, and the vectors did not move. `codec.Generate` refuses a
 paged type, since the code it writes is one key run. The JavaScript encoder
 infers its schema and still caps an object at 256 keys; the reader renders
 paged messages.
+
+## A pointer to a slice or a map is the slice or the map
+
+**Context** — `*[]T` and `*map[K]V` were refused, because on this wire a nil
+collection and an empty one are the same bytes — both absent — so a pointer to
+one could not say which it held. The question was whether that distinction is
+worth putting on the wire.
+
+**Considered** — A null code for a nil pointer, with an empty collection
+written explicitly so it could be told apart. It would have been a new shape in
+three implementations and a rule nothing else in the format follows: everywhere
+else an empty slice is absent, and a `[]T` field already reads `[]T{}` back nil.
+
+**Decision** — The pointer is not on the wire. A nil pointer writes nothing and
+a non-nil one writes exactly the bytes of the plain field; the schema names the
+pointee's op, so a reader in another language sees an ordinary slice or map.
+The decoder allocates the pointee when the key is present. In the plan it is a
+flag, `indirect`, rather than an op: every question about what the field holds
+gets the pointee's answer unchanged, and only the four walks that reach the
+field's memory step through it. A plan with one is not `simple`, so the flat
+walks — which read every field where it sits — never see one.
+
+**What it cost** — `&[]T{}` reads back nil, which is the distinction the old
+refusal was protecting and nothing asked for. `codec.Generate` refuses the
+field. The flat walks are unchanged: their machine code is byte for byte the
+same, and the ±8% the flat benchmarks moved by, in opposite directions on
+encode and decode, followed the functions' addresses rather than their code.
+
+## Maps of structs: an index after the two kinds
+
+**Context** — A map's value was a scalar, a string or `any`. A struct value was
+refused, and the question that came with it was whether it needed the
+self-describing form, since nothing in the two kind bytes names a struct.
+
+**Decision** — A map kind for it, `mapStruct = 7`, with the struct's index in
+the section's table after the two kinds, the way a slice of structs names its
+element. So it works with a section sent once per connection as well as one in
+front of the message, and the typed decoder needs neither. Each value is
+written as a list element is: at eight key bits a STRUCT descriptor, a length
+and the run; at four, a length and the run, its width the schema's to say. A
+recursive type through a map terminates where a map is empty, the way one
+through a slice does, and `ParseSchema` refuses a page reached through one.
+
+**What it cost** — The kind is format: a 0.4 reader refuses a section that
+names it, which is the right failure — the alternative is a value read as the
+wrong kind. Go reads a map value through reflection, so each struct is copied
+into one holder per map on the way out and read into it on the way in; the
+holder is zeroed per entry, or a field one entry omits would keep the last
+one's. `map[K]*Struct` stays refused, since a nil value inside a map has no
+form. The Rust walk renders a wide map of structs and still refuses every
+narrow map; the derive does not do maps of structs.
