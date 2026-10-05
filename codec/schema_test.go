@@ -73,6 +73,7 @@ func TestMapKindsArePinned(t *testing.T) {
 		"mapBool":    {mapBool, 4},
 		"mapFloat32": {mapFloat32, 5},
 		"mapAny":     {mapAny, 6},
+		"mapStruct":  {mapStruct, 7},
 	} {
 		if uint8(pinned.kind) != pinned.want {
 			t.Errorf("%s is %d, and the wire says %d", name, pinned.kind, pinned.want)
@@ -97,6 +98,10 @@ func schemaCases() []any {
 		pointers{},
 		widePointers{},
 		withMaps{},
+		structMaps{},
+		wideStructMaps{},
+		mapTree{},
+		toCollections{},
 		recursive{},
 		bare{},
 	}
@@ -153,8 +158,11 @@ func samePlan(t *testing.T, path string, got, want *typePlan, seen map[[2]*typeP
 			t.Fatalf("%s: field %d is called %q, want %q",
 				path, index, got.names[index], want.names[index])
 		}
-		if gotField.key != wantField.key || gotField.op != wantField.op ||
-			gotField.elemOp != wantField.elemOp ||
+		// A platform-width integer is named by its 64-bit op whatever the plan
+		// reads it at, so a 32-bit plan is compared as its section says it.
+		if gotField.key != wantField.key ||
+			gotField.op != schemaOp(wantField.op, wantField.native) ||
+			gotField.elemOp != schemaOp(wantField.elemOp, wantField.native) ||
 			gotField.keyKind != wantField.keyKind ||
 			gotField.valueKind != wantField.valueKind {
 			t.Fatalf("%s: %+v, want %+v", where, gotField, wantField)
@@ -278,7 +286,7 @@ func FuzzParseSchema(f *testing.F) {
 	})
 }
 
-// Phase 7's property: the section is additive. The body behind it is byte for
+// The section is additive. The body behind it is byte for
 // byte what Marshal writes, and the typed decoder takes either form.
 func TestSelfDescribingIsMarshalWithAPrefix(t *testing.T) {
 	for _, value := range []any{

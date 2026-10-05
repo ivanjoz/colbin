@@ -15,6 +15,7 @@
 //! scalars, string, bytes, arrays   —   (the op names the element type)
 //! opStruct, opStructs              [structIndex]
 //! opMap                            [keyKind:1] [valueKind:1]
+//! opMap, valueKind MAP_STRUCT      [keyKind:1] [valueKind:1] [structIndex]
 //! opPointer                        [elemOp:1]
 //! ```
 //!
@@ -43,7 +44,8 @@ use alloc::vec::Vec;
 
 use crate::Error;
 use crate::plan::{
-    MAP_KIND_COUNT, OP_COUNT, OP_MAP, OP_POINTER, OP_STRUCT, OP_STRUCTS, Plan, PlanField,
+    MAP_KIND_COUNT, MAP_STRUCT, OP_COUNT, OP_MAP, OP_POINTER, OP_STRUCT, OP_STRUCTS, Plan,
+    PlanField,
 };
 
 /// The smallest a definition can be, which is what bounds a declared count
@@ -277,13 +279,7 @@ fn parse_desc(cursor: &mut Cursor<'_>, key: u8, table_len: usize) -> Result<Plan
     };
 
     match op {
-        OP_STRUCT | OP_STRUCTS => {
-            let at = cursor.length()?;
-            if at >= table_len {
-                return Err(Error::BadSection);
-            }
-            field.sub = Some(at as u32);
-        }
+        OP_STRUCT | OP_STRUCTS => field.sub = Some(struct_index(cursor, table_len)?),
         OP_MAP => {
             let key_kind = cursor.byte()?;
             let value_kind = cursor.byte()?;
@@ -292,6 +288,9 @@ fn parse_desc(cursor: &mut Cursor<'_>, key: u8, table_len: usize) -> Result<Plan
             }
             field.key_kind = key_kind;
             field.value_kind = value_kind;
+            if value_kind == MAP_STRUCT {
+                field.sub = Some(struct_index(cursor, table_len)?);
+            }
         }
         OP_POINTER => {
             let elem_op = cursor.byte()?;
@@ -305,6 +304,15 @@ fn parse_desc(cursor: &mut Cursor<'_>, key: u8, table_len: usize) -> Result<Plan
         _ => {}
     }
     Ok(field)
+}
+
+/// The struct a field holds, by its index in the table.
+fn struct_index(cursor: &mut Cursor<'_>, table_len: usize) -> Result<u32, Error> {
+    let at = cursor.length()?;
+    if at >= table_len {
+        return Err(Error::BadSection);
+    }
+    Ok(at as u32)
 }
 
 // ---- the write half ---------------------------------------------------------
@@ -365,6 +373,9 @@ fn append_desc(out: &mut Vec<u8>, field: &PlanField) {
         OP_MAP => {
             out.push(field.key_kind);
             out.push(field.value_kind);
+            if field.value_kind == MAP_STRUCT {
+                append_length(out, field.sub.unwrap_or(0) as usize);
+            }
         }
         OP_POINTER => out.push(field.elem_op),
         // Everything else is named by its op alone.

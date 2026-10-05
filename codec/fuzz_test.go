@@ -38,6 +38,14 @@ type fuzzNarrow struct {
 	Next   *fuzzNarrow      `cb:"16"`
 }
 
+// fuzzNarrowMaps is the same at four key bits — fuzzNarrow has no id left —
+// and reaches itself through a pointer to a map of itself.
+type fuzzNarrowMaps struct {
+	ByName map[string]fuzzLeaf        `cb:"1"`
+	Ints   *[]int32                   `cb:"2"`
+	Self   *map[string]fuzzNarrowMaps `cb:"3"`
+}
+
 type fuzzWide struct {
 	ID     int             `cb:"1"`
 	Any    any             `cb:"2"`
@@ -48,6 +56,11 @@ type fuzzWide struct {
 	Uints  []uint64        `cb:"22"`
 	Flags  map[uint32]bool `cb:"23"`
 	Opt    *string         `cb:"24"`
+	// A map of structs at eight key bits, and pointers to collections.
+	ByName map[string]fuzzLeaf  `cb:"25"`
+	Tags   *[]string            `cb:"26"`
+	Rows   *map[uint16]fuzzLeaf `cb:"27"`
+	Maps   fuzzNarrowMaps       `cb:"28"`
 	// Past 255, so the type is paged: Late is on the second page, and Last on
 	// the third with the second linking to it. See pages.go.
 	Late string `cb:"300"`
@@ -70,6 +83,12 @@ func FuzzUnmarshal(f *testing.F) {
 		Leaves: make([]fuzzLeaf, tableThreshold), Narrow: narrow,
 		Uints: []uint64{1, 1 << 40}, Flags: map[uint32]bool{1: true, 2: false}, Opt: &word,
 		Late: "late", Last: -1,
+		ByName: map[string]fuzzLeaf{"a": {A: 1}, "b": {}},
+		Tags:   &[]string{"t"}, Rows: &map[uint16]fuzzLeaf{3: {S: "row"}},
+		Maps: fuzzNarrowMaps{
+			ByName: map[string]fuzzLeaf{"x": {B: 9}}, Ints: &[]int32{-1},
+			Self: &map[string]fuzzNarrowMaps{"inner": {Ints: &[]int32{2}}},
+		},
 	}
 	for _, value := range []any{&narrow, &wide} {
 		for _, encode := range []func(any) ([]byte, error){Marshal, MarshalSelfDescribing} {

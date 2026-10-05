@@ -69,7 +69,11 @@ pub const MAP_FLOAT32: u8 = 5;
 /// A map value with no declared type: every entry says what it is. It is what
 /// makes `map[string]any` carriable.
 pub const MAP_ANY: u8 = 6;
-pub const MAP_KIND_COUNT: u8 = 7;
+/// A struct map value, written as a list element is. Which struct is the
+/// section's to say, by an index after the two kinds, held in
+/// [`PlanField::sub`].
+pub const MAP_STRUCT: u8 = 7;
+pub const MAP_KIND_COUNT: u8 = 8;
 
 /// Whether a field of this op can be a *column*, which is what lets a slice of
 /// the struct holding it be transposed into a table.
@@ -124,8 +128,8 @@ pub const fn array_element_op(op: u8) -> u8 {
 pub struct PlanField {
     pub key: u8,
     pub op: u8,
-    /// The child plan's index in [`Schema::plans`], for `OP_STRUCT` and
-    /// `OP_STRUCTS`.
+    /// The child plan's index in [`Schema::plans`], for `OP_STRUCT`,
+    /// `OP_STRUCTS` and an `OP_MAP` of [`MAP_STRUCT`] values.
     pub sub: Option<u32>,
     /// What a pointer points at.
     pub elem_op: u8,

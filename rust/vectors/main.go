@@ -761,6 +761,44 @@ type Paged struct {
 	Last string `cb:"600"`
 }
 
+// Catalog holds maps of structs, whose section names the value's struct by its
+// index in the table, the way a slice of structs names its element. Its values
+// are narrow (Inner), wide (WideLine), and wide holding a map of structs in
+// turn (Aisle). Catalog and Aisle are wide because the Rust walk reads a map at
+// eight key bits only. Tags and Counts are pointers to collections, which are
+// the collections on the wire.
+type Catalog struct {
+	Name   string             `cb:"1"`
+	ByCode map[string]Inner   `cb:"2"`
+	Wide   map[int32]WideLine `cb:"3"`
+	Aisles map[uint8]Aisle    `cb:"4"`
+	Tags   *[]string          `cb:"20"`
+	Counts *map[string]uint16 `cb:"21"`
+}
+
+type Aisle struct {
+	Label string           `cb:"1"`
+	Bins  map[string]Inner `cb:"17"`
+}
+
+func catalog() *Catalog {
+	return &Catalog{
+		Name: "store",
+		ByCode: map[string]Inner{
+			"a-1":   {SKU: "A1", Qty: 3, Cents: 250},
+			"b-2":   {SKU: "B2"},
+			"empty": {},
+		},
+		Wide: map[int32]WideLine{-1: {SKU: "W", Cents: 1 << 40}, 7: {Quantity: 7}},
+		Aisles: map[uint8]Aisle{
+			1: {Label: "dairy", Bins: map[string]Inner{"top": {SKU: "milk", Qty: 1}}},
+			2: {Label: "bare"},
+		},
+		Tags:   &[]string{"open", "late"},
+		Counts: &map[string]uint16{"doors": 2},
+	}
+}
+
 func walks() []walkCase {
 	var out []walkCase
 	add := func(name, about string, value any) {
@@ -846,6 +884,10 @@ func walks() []walkCase {
 		&Paged{ID: 2, Name: "only"})
 	add("doc.paged-last-page", "only the third page set, so the second holds nothing but the link",
 		&Paged{Last: "end"})
+	add("doc.map-of-structs", "maps of narrow, wide and map-holding structs, and pointers to collections",
+		catalog())
+	add("doc.map-of-structs-absent", "every map and pointer empty or nil, so absent and null",
+		&Catalog{Name: "none", Tags: &[]string{}})
 
 	// The reader corpus. See the types above for what it covers and why.
 	readers := []struct {

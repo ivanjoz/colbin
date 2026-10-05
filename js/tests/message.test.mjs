@@ -17,8 +17,9 @@ test('the type tier is present', () => {
 
 for (const c of cases) {
   // A narrow map's entries take their type from the schema and need a second
-  // element codec. The Rust walk refuses rather than guessing — RUST_WASM_PLAN.md
-  // §7. The page never produces one: JSON objects infer to structs.
+  // element codec. The Rust walk refuses rather than guessing — see "Dynamic
+  // values" in rust/README.md. The page never produces one: JSON objects infer
+  // to structs.
   if (c.name === 'maps') {
     test(`${c.name}: refused as unsupported, not guessed at`, () => {
       must(wasm, wasm.exports.set_schema(put(wasm, unhex(c.section))), 'set_schema')
@@ -65,7 +66,7 @@ test('an unassigned root detail is refused rather than guessed at', () => {
 })
 
 test('every prefix of a valid message is a diagnostic, never a trap', () => {
-  for (const name of ['corpus-sale-table', 'corpus-product', 'table', 'maps', 'arrays']) {
+  for (const name of ['corpus-sale-table', 'corpus-product', 'table', 'maps', 'map-of-structs', 'arrays']) {
     const c = cases.find((one) => one.name === name)
     const full = unhex(c.selfDescribing)
     for (let cut = 1; cut < full.length; cut++) {

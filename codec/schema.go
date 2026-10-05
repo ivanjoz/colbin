@@ -32,7 +32,11 @@ package codec
 //	opStruct, opStructs              [structIndex]
 //	opPointerStruct                  [structIndex]
 //	opMap                            [keyKind:1] [valueKind:1]
+//	opMap, valueKind mapStruct       [keyKind:1] [valueKind:1] [structIndex]
 //	opPointer                        [elemOp:1]
+//
+// A pointer to a slice or a map has no desc of its own: it is the pointee's,
+// because the pointer is not on the wire. See pointer.go.
 //
 // Every length is wire.AppendLength — one byte escaping to four, the format's
 // own rule — rather than a varint, for the reason nothing else here is a varint.
@@ -251,7 +255,11 @@ func (builder *sectionBuilder) appendDesc(dst []byte, field *planField) []byte {
 	case opStruct, opStructs, opPointerStruct:
 		return wire.AppendLength(dst, builder.structIndex(field.sub))
 	case opMap:
-		return append(dst, uint8(field.keyKind), uint8(field.valueKind))
+		dst = append(dst, uint8(field.keyKind), uint8(field.valueKind))
+		if field.valueKind == mapStruct {
+			return wire.AppendLength(dst, builder.structIndex(field.sub))
+		}
+		return dst
 	case opPointer:
 		return append(dst, uint8(schemaOp(field.elemOp, field.native)))
 	}

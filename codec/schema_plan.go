@@ -271,16 +271,7 @@ func parseDesc(field *planField, plans []*typePlan, data []byte) ([]byte, error)
 
 	switch op {
 	case opStruct, opStructs, opPointerStruct:
-		index, width, ok := wire.ReadLength(data)
-		if !ok {
-			return nil, errShortSection
-		}
-		if index >= len(plans) {
-			return nil, fmt.Errorf(
-				"colbin: a schema section points at struct %d of %d", index, len(plans))
-		}
-		field.sub = plans[index]
-		return data[width:], nil
+		return parseStructIndex(field, plans, data)
 	case opMap:
 		if len(data) < 2 {
 			return nil, errShortSection
@@ -290,6 +281,9 @@ func parseDesc(field *planField, plans []*typePlan, data []byte) ([]byte, error)
 		}
 		if field.valueKind, err = mapKindCode(data[1]); err != nil {
 			return nil, err
+		}
+		if field.valueKind == mapStruct {
+			return parseStructIndex(field, plans, data[2:])
 		}
 		return data[2:], nil
 	case opPointer:
@@ -302,6 +296,20 @@ func parseDesc(field *planField, plans []*typePlan, data []byte) ([]byte, error)
 		return data[1:], nil
 	}
 	return data, nil
+}
+
+// parseStructIndex reads the struct a field holds, by its index in the table.
+func parseStructIndex(field *planField, plans []*typePlan, data []byte) ([]byte, error) {
+	index, width, ok := wire.ReadLength(data)
+	if !ok {
+		return nil, errShortSection
+	}
+	if index >= len(plans) {
+		return nil, fmt.Errorf(
+			"colbin: a schema section points at struct %d of %d", index, len(plans))
+	}
+	field.sub = plans[index]
+	return data[width:], nil
 }
 
 // opCode and mapKindCode refuse a number this version does not assign, rather

@@ -18,7 +18,9 @@ package codec
 // flat walks sufficient.
 func (plan *typePlan) simplePlan() bool {
 	for _, field := range plan.fields {
-		if _, ok := valueOpOf(field.op); !ok {
+		// A pointer to an array is a value op one step away, and the flat walks
+		// read every field where it sits.
+		if _, ok := valueOpOf(field.op); !ok || field.indirect {
 			return false
 		}
 	}

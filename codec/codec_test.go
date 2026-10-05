@@ -223,11 +223,10 @@ type sixteenFields struct {
 	F16 int32 `cb:"16"`
 }
 
-// A pointer to a scalar is carried — see pointer.go. A pointer to a composite
-// is not: a composite already expresses absence with a length, and nothing has
-// asked what a nil one should mean.
+// A pointer to a scalar, a struct, a slice or a map is carried — see
+// pointer.go. A pointer to an array is not, because an array is not.
 type pointerToComposite struct {
-	Values *[]int32 `cb:"1"`
+	Values *[3]int32 `cb:"1"`
 }
 
 // Every refusal names the field and says what to do about it, because each one is
@@ -238,7 +237,7 @@ func TestRefusesTypesItCannotCarry(t *testing.T) {
 		wants string
 	}{
 		{clashing{}, "id 4 is on both"},
-		{pointerToComposite{}, "a pointer to []int32 is not carried"},
+		{pointerToComposite{}, "a pointer to [3]int32 is not carried"},
 		{42, "encodes a struct"},
 	} {
 		_, err := Marshal(testCase.value)

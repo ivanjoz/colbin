@@ -95,6 +95,10 @@ type planField struct {
 	// platform's. The plan reads it at that width; the schema section names the
 	// 64-bit op either way, so a section does not depend on where it was written.
 	native bool
+	// indirect says the field is a pointer to the slice or map the rest of this
+	// struct describes: everything above is the pointee's, and only the walks
+	// that reach the field's memory step through it. See pointer.go.
+	indirect bool
 }
 
 type typePlan struct {
@@ -239,7 +243,13 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 				typeName(structType), field.Name, explicitID, maxFieldID)
 		}
 
-		op, sub, sliceType, stride, compositeErr := compositeOpFor(field.Type, building)
+		// A pointer to a slice or a map is planned as its pointee and marked, so
+		// that every question about what the field holds gets the pointee's answer.
+		fieldType, indirect := field.Type, pointsToCollection(field.Type)
+		if indirect {
+			fieldType = fieldType.Elem()
+		}
+		op, sub, sliceType, stride, compositeErr := compositeOpFor(fieldType, building)
 		var keyKind, valueKind mapKind
 		var elemOp fieldOp
 		// A composite that failed to plan is reported as itself. Only
@@ -252,28 +262,40 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 			return nil, compositeErr
 		}
 		if compositeErr != nil {
-			switch field.Type.Kind() {
+			switch fieldType.Kind() {
 			case reflect.Map:
 				var err error
-				if keyKind, valueKind, err = mapOpFor(field.Type); err != nil {
+				if keyKind, valueKind, err = mapOpFor(fieldType); err != nil {
 					return nil, fmt.Errorf("colbin: %s.%s: %w",
 						typeName(structType), field.Name, err)
 				}
-				op, sliceType = opMap, field.Type
+				op, sliceType = opMap, fieldType
+				if valueKind == mapStruct {
+					// The value's plan, the way a slice of structs holds its
+					// element's: an error in it is reported as itself.
+					if sub, err = planForBuilding(fieldType.Elem(), building); err != nil {
+						return nil, err
+					}
+				}
 			case reflect.Pointer:
 				var err error
-				if elemOp, err = pointerOpFor(field.Type); err != nil {
+				if elemOp, err = pointerOpFor(fieldType); err != nil {
 					return nil, fmt.Errorf("colbin: %s.%s: %w",
 						typeName(structType), field.Name, err)
 				}
-				op, sliceType = opPointer, field.Type
+				op, sliceType = opPointer, fieldType
 			default:
 				var err error
-				if op, err = opFor(field.Type); err != nil {
+				if op, err = opFor(fieldType); err != nil {
 					return nil, fmt.Errorf("colbin: %s.%s: %w",
 						typeName(structType), field.Name, err)
 				}
 			}
+		}
+		if indirect {
+			// What the reader allocates when the key is present. A slice of
+			// structs and a map hold it already; an array of values does not.
+			sliceType = fieldType
 		}
 		plan.fields = append(plan.fields, planField{
 			offset:    field.Offset,
@@ -284,7 +306,8 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 			elemOp:    elemOp,
 			keyKind:   keyKind,
 			valueKind: valueKind,
-			native:    isNative(field.Type),
+			native:    isNative(fieldType),
+			indirect:  indirect,
 		})
 		hashNames = append(hashNames, hashName)
 		fieldNames = append(fieldNames, field.Name)
@@ -641,6 +664,11 @@ func writePlan(writer *wire.Writer, plan *typePlan, record unsafe.Pointer, buf *
 	for index := range plan.fields {
 		field := &plan.fields[index]
 		at := unsafe.Add(record, field.offset)
+		if field.indirect {
+			if at = *(*unsafe.Pointer)(at); at == nil {
+				continue
+			}
+		}
 		switch field.op {
 		case opStruct:
 			appendNarrowStruct(writer, field, at, buf)
@@ -840,6 +868,9 @@ func (plan *typePlan) indexKeys() {
 // value op through readValue (ops_gen.go).
 func readField(reader *wire.Reader, field *planField, record unsafe.Pointer, buf *scratch) {
 	at := unsafe.Add(record, field.offset)
+	if field.indirect {
+		at = newPointee(field, at)
+	}
 	switch field.op {
 	case opStruct:
 		readNarrowStruct(reader, field, at, buf)
