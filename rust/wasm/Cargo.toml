@@ -8,11 +8,11 @@
 # door, and LTO drops everything this ABI does not reach.
 #
 # The `encode` feature (on by default) is what the demo site links. Off is the
-# decode-only build a client of a Go service wants, and the size budget in
-# RUST_WASM_PLAN.md §6 is measured against that one.
+# decode-only build a client of a Go service wants, and the module's size budget
+# is measured against that one.
 [package]
 name = "colbin-wasm"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.88"
 description = "The colbin encoder and decoder, compiled to WebAssembly for the browser"
@@ -32,9 +32,10 @@ crate-type = ["cdylib"]
 [features]
 default = ["encode", "materialize"]
 # JSON text in, colbin bytes out: the parser, inference, the plan-driven build
-# and the self-check. Off keeps the decode-only module at the size §2.6 measured.
+# and the self-check. Off keeps the decode-only module small: CI holds it under
+# two thirds of the default build (INTERNALS.md §19).
 encode = ["colbin/encode"]
-# Columns into a flat typed buffer instead of decimal text — PACKAGE_PLAN.md §5's
+# Columns into a flat typed buffer instead of decimal text — INTERNALS.md §16.3's
 # fast path. On by default in both builds: the decode-only client is exactly
 # who this is for.
 materialize = ["colbin/materialize"]
