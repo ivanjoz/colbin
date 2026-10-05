@@ -31,6 +31,7 @@
 //! the same idea for Rust, and there is no reflective path here to fall back to.
 
 use crate::Error;
+use crate::walk::MAX_ROWS;
 use crate::wire::{Reader, Reader8, Writer, Writer8};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -324,8 +325,18 @@ pub fn write_structs8<T: Colbin>(w: &mut Writer8<'_>, key: u8, values: &[T]) {
 
 /// Writes a slice of structs transposed: one keyed column per field of the
 /// element type.
+///
+/// The columns are keyed at the row type's width, not this run's: a wide row
+/// type's keys do not fit four bits, so under a narrow parent its columns are
+/// written by a wide writer onto the same bytes. The Go codec does the same
+/// (codec/table.go), which is what lets one read the other's tables.
 fn write_table<T: Colbin>(w: &mut Writer<'_>, key: u8, values: &[T]) {
     let mark = w.open_table(key, values.len());
+    if T::WIDE_KEYS {
+        write_columns8(&mut Writer8::new(w.buf), values);
+        w.close(mark);
+        return;
+    }
     let mut ints: Vec<i64> = Vec::with_capacity(values.len());
     let mut strings: Vec<&str> = Vec::with_capacity(values.len());
     for (index, spec) in T::COLUMNS.iter().enumerate() {
@@ -352,6 +363,12 @@ fn write_table<T: Colbin>(w: &mut Writer<'_>, key: u8, values: &[T]) {
 /// [`write_table`] for a wide-keyed parent.
 fn write_table8<T: Colbin>(w: &mut Writer8<'_>, key: u8, values: &[T]) {
     let mark = w.open_table(key, values.len());
+    write_columns8(w, values);
+    w.close(mark);
+}
+
+/// A table's columns under eight-bit keys.
+fn write_columns8<T: Colbin>(w: &mut Writer8<'_>, values: &[T]) {
     let mut ints: Vec<i64> = Vec::with_capacity(values.len());
     let mut strings: Vec<&str> = Vec::with_capacity(values.len());
     for (index, spec) in T::COLUMNS.iter().enumerate() {
@@ -368,7 +385,6 @@ fn write_table8<T: Colbin>(w: &mut Writer8<'_>, key: u8, values: &[T]) {
             }
         }
     }
-    w.close(mark);
 }
 
 /// Reads a slice of structs, dispatching on what the writer actually chose: a
@@ -428,9 +444,21 @@ pub fn read_structs8<T: Colbin>(r: &mut Reader8<'_>) -> Vec<T> {
 /// is decoded whole and then scattered across the rows, which is the order the
 /// column codec wants: it fills a run and the scatter is a strided store.
 fn read_table<T: Colbin>(r: &mut Reader<'_>) -> Vec<T> {
-    let Some((rows, mut columns)) = r.counted() else {
+    let Some((rows, body)) = r.table() else {
         return Vec::new();
     };
+    if rows > MAX_ROWS {
+        r.fail(Error::TooManyRows);
+        return Vec::new();
+    }
+    // Wide rows keep their keys in a narrow parent's table; see write_table.
+    if T::WIDE_KEYS {
+        let mut columns = Reader8::new(body);
+        let out = read_columns8(&mut columns, rows);
+        r.fail_with(columns.err());
+        return out;
+    }
+    let mut columns = Reader::new(body);
     let mut out = Vec::with_capacity(rows);
     out.resize_with(rows, T::colbin_zero);
     let mut ints: Vec<i64> = Vec::new();
@@ -465,6 +493,18 @@ fn read_table8<T: Colbin>(r: &mut Reader8<'_>) -> Vec<T> {
     let Some((rows, mut columns)) = r.table() else {
         return Vec::new();
     };
+    if rows > MAX_ROWS {
+        r.fail(Error::TooManyRows);
+        return Vec::new();
+    }
+    let out = read_columns8(&mut columns, rows);
+    r.fail_with(columns.err());
+    out
+}
+
+/// A table's columns under eight-bit keys, into `rows` records. A failure is
+/// left on `columns` for the caller to carry up.
+fn read_columns8<T: Colbin>(columns: &mut Reader8<'_>, rows: usize) -> Vec<T> {
     let mut out = Vec::with_capacity(rows);
     out.resize_with(rows, T::colbin_zero);
     let mut ints: Vec<i64> = Vec::new();
@@ -473,7 +513,6 @@ fn read_table8<T: Colbin>(r: &mut Reader8<'_>) -> Vec<T> {
         let key = columns.key();
         let Some(index) = column_index::<T>(key) else {
             if !columns.skip() {
-                r.fail_with(columns.err());
                 return out;
             }
             continue;
@@ -490,7 +529,6 @@ fn read_table8<T: Colbin>(r: &mut Reader8<'_>) -> Vec<T> {
             }
         }
     }
-    r.fail_with(columns.err());
     out
 }
 

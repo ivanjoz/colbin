@@ -42,7 +42,7 @@ func (t tok) String() string {
 }
 
 // scan is the greedy walk, written as a token producer. It follows the rules in
-// the package documentation directly, with no packing mixed in.
+// encode.go directly, with no packing mixed in.
 func scan(s string, upper bool) []tok {
 	var out []tok
 	cur := upper
@@ -122,7 +122,7 @@ func scan(s string, upper bool) []tok {
 	return out
 }
 
-// units expands tokens to the unit sequence the format defines.
+// unitsOf expands tokens to the unit sequence the format defines.
 func unitsOf(toks []tok) []uint8 {
 	var u []uint8
 	for _, t := range toks {
@@ -147,6 +147,15 @@ func unitsOf(toks []tok) []uint8 {
 				u = append(u, b&31, b>>5)
 			}
 		}
+	}
+	return u
+}
+
+// padToGrid appends the trailing CASE_TOGGLE_SIMPLE the encoder pads with, when
+// the byte rounding leaves room for one more unit.
+func padToGrid(u []uint8) []uint8 {
+	if payloadUnits(payloadBytes(len(u))) > len(u) {
+		return append(u, opCaseSimple)
 	}
 	return u
 }
@@ -180,41 +189,29 @@ func unpackSlow(payload []byte, n int) []uint8 {
 	return u
 }
 
-// referenceAppend builds a whole frame the long way round.
-func referenceAppend(s string) []byte {
+// referencePayload is AppendPayload the long way round: tokens, units, a grid
+// pad, bits one at a time, and the raw fallback decided on the finished payload.
+func referencePayload(s string) (payload []byte, upper, ok bool) {
 	if len(s) == 0 {
-		return []byte{0}
+		return nil, false, false
 	}
-	upper := opensUpper(s)
-	u := unitsOf(scan(s, upper))
-	// The encoder pads to the unit grid with a simple toggle, which decodes to
-	// nothing because no letter follows it.
-	if payloadUnits(payloadBytes(len(u))) > len(u) {
-		u = append(u, opCaseSimple)
+	upper = opensUpper(s)
+	payload = packSlow(padToGrid(unitsOf(scan(s, upper))))
+	if len(payload) >= len(s) {
+		return nil, false, false
 	}
-	payload := packSlow(u)
-	if frameOverhead(len(payload))+len(payload) >= frameOverhead(len(s))+len(s) {
-		return append(appendHeader(nil, 0, len(s)), s...)
-	}
-	flags := byte(flagPacked5)
-	if upper {
-		flags |= flagUppercase
-	}
-	return append(appendHeader(nil, flags, len(payload)), payload...)
+	return payload, upper, true
 }
 
-// disassemble turns a packed frame back into tokens, for tests that want to
-// assert about what the encoder chose rather than about the bytes.
-func disassemble(t *testing.T, frameBytes []byte) []tok {
+// disassemble packs s and turns the payload back into tokens, for tests that
+// want to assert about what the encoder chose rather than about the bytes.
+func disassemble(t *testing.T, s string) []tok {
 	t.Helper()
-	h, err := frame(frameBytes)
-	if err != nil {
-		t.Fatalf("frame: %v", err)
+	buf, n, _, ok := AppendPayload(nil, s)
+	if !ok {
+		t.Fatalf("%q does not pack", s)
 	}
-	if !h.packed {
-		t.Fatalf("frame is raw, not packed")
-	}
-	u := unpackSlow(h.payload, payloadUnits(len(h.payload)))
+	u := unpackSlow(buf[:n], payloadUnits(n))
 
 	var out []tok
 	for i := 0; i < len(u); {
@@ -280,7 +277,8 @@ func countKind(toks []tok, kind string) int {
 }
 
 // TestFusedMatchesReference is the cross-check the whole file exists for: the
-// fused encoder and the three-step reference must produce identical frames.
+// fused encoder and the three-step reference must agree on whether a string
+// packs, on its case mode, and on every payload byte.
 func TestFusedMatchesReference(t *testing.T) {
 	rng := rand.New(rand.NewPCG(31, 32))
 	pools := [][]string{
@@ -299,9 +297,13 @@ func TestFusedMatchesReference(t *testing.T) {
 		}
 	}
 	for _, s := range inputs {
-		got, want := Append(nil, s), referenceAppend(s)
-		if string(got) != string(want) {
-			t.Fatalf("%q:\n fused %x\n  ref  %x", s, got, want)
+		want, wantUpper, wantOK := referencePayload(s)
+		buf, n, upper, ok := AppendPayload(nil, s)
+		if ok != wantOK {
+			t.Fatalf("%q: packed=%v, reference packed=%v", s, ok, wantOK)
+		}
+		if ok && (upper != wantUpper || string(buf[:n]) != string(want)) {
+			t.Fatalf("%q:\n fused %x upper=%v\n  ref  %x upper=%v", s, buf[:n], upper, want, wantUpper)
 		}
 	}
 }
@@ -321,16 +323,12 @@ func TestGroupPackerMatchesBitPacker(t *testing.T) {
 		for _, v := range u {
 			w.put(v)
 		}
-		// finish pads to the grid, so compare against a reference that does too.
-		padded := u
-		if payloadUnits(payloadBytes(len(padded))) > len(padded) {
-			padded = append(append([]uint8(nil), padded...), opCaseSimple)
-		}
 		end, ok := w.finish()
 		if !ok {
 			t.Fatalf("n=%d: writer gave up", n)
 		}
-		if want := packSlow(padded); string(buf[:end]) != string(want) {
+		// finish pads to the grid, so compare against a reference that does too.
+		if want := packSlow(padToGrid(append([]uint8(nil), u...))); string(buf[:end]) != string(want) {
 			t.Fatalf("n=%d:\n group %x\n  bits %x", n, buf[:end], want)
 		}
 	}

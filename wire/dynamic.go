@@ -62,7 +62,7 @@ import (
 )
 
 // The SPECIAL details this file assigns. Details 0..2 are null, true and false;
-// 6 is unspent; 8..15 are the varint integer.
+// 6 is unassigned and refused; 8..15 are the varint integer.
 //
 // # These values are on the wire
 //
@@ -293,11 +293,14 @@ func (r *Reader8) ElementNegative() bool {
 
 // ElementNull steps over a null.
 func (r *Reader8) ElementNull() {
-	if r.at < len(r.buffer) {
+	switch {
+	case r.at >= len(r.buffer):
+		r.fail(ErrTruncated)
+	case r.buffer[r.at] != descriptor(classSpecial, specialNull):
+		r.fail(ErrBadDescriptor)
+	default:
 		r.at++
-		return
 	}
-	r.fail(ErrTruncated)
 }
 
 // ElementBool reads true or false.
@@ -306,9 +309,16 @@ func (r *Reader8) ElementBool() bool {
 		r.fail(ErrTruncated)
 		return false
 	}
-	desc := r.buffer[r.at]
-	r.at++
-	return desc == descriptor(classSpecial, specialTrue)
+	switch r.buffer[r.at] {
+	case descriptor(classSpecial, specialTrue):
+		r.at++
+		return true
+	case descriptor(classSpecial, specialFalse):
+		r.at++
+		return false
+	}
+	r.fail(ErrBadDescriptor)
+	return false
 }
 
 // ElementFloat64 reads a float64 written by ElementFloat64.
@@ -397,37 +407,69 @@ func (r *Reader8) SkipElement() bool {
 }
 
 // specialSize is valueSize's SPECIAL arm: the details that carry nothing, the
-// varint, and the three that are a detail byte in front of an ordinary value.
+// varint, and the four that are a detail in front of an ordinary value.
+//
+// What may follow a detail is checked here rather than sized by valueSize, and
+// that is what keeps this from recursing: a float is followed by an integer, a
+// BYTES by a blob, a TYPED by a composite, and never by another SPECIAL — so a
+// run of detail bytes is refused at the second one instead of descending once
+// per byte until the stack runs out.
 func specialSize(buffer []byte, at int, desc uint8) (int, error) {
 	if desc&specialVarint != 0 {
-		// A varint is self-delimiting, so a reader that does not know the key can
-		// still step over it: walk the continuation bits to their end.
-		_, length, ok := readVarintAt(buffer, at, desc)
-		if !ok {
-			return 0, ErrTruncated
-		}
-		return length, nil
+		return varintSize(buffer, at, desc)
 	}
 	switch desc & 0b1111 {
-	case specialFloat64, specialFloat32, specialBytes:
-		// A detail byte and then one ordinary value, so the size is one plus that
-		// value's — which is what keeps a dynamic field skippable by a reader that
-		// has never heard of these details.
-		size, err := valueSize(buffer, at+1)
-		if err != nil {
-			return 0, err
-		}
-		return 1 + size, nil
+	case specialNull, specialTrue, specialFalse:
+		return 1, nil
+	case specialFloat64, specialFloat32:
+		size, err := floatBitsSize(buffer, at+1)
+		return 1 + size, err
+	case specialBytes:
+		size, err := lengthSize(buffer, at+1, classBlob)
+		return 1 + size, err
 	case specialTyped:
 		_, width, ok := readCount(buffer[at+1:])
 		if !ok {
 			return 0, ErrTruncated
 		}
-		size, err := valueSize(buffer, at+1+width)
-		if err != nil {
-			return 0, err
+		value := at + 1 + width
+		if value >= len(buffer) {
+			return 0, ErrTruncated
 		}
-		return 1 + width + size, nil
+		desc := buffer[value]
+		if desc < descExplicit {
+			return 0, ErrBadDescriptor
+		}
+		switch class := (desc >> 4) & 0b111; class {
+		case classStruct, classList, classMap:
+			size, err := lengthSize(buffer, value, class)
+			return 1 + width + size, err
+		}
+		return 0, ErrBadDescriptor
 	}
-	return 1, nil
+	return 0, ErrBadDescriptor
+}
+
+// varintSize sizes the varint integer: it is self-delimiting, so a reader that
+// does not know the key can still step over it.
+func varintSize(buffer []byte, at int, desc uint8) (int, error) {
+	_, length, err := readVarintAt(buffer, at, desc)
+	return length, err
+}
+
+// floatBitsSize sizes the integer a float detail carries, in any form Uint reads.
+func floatBitsSize(buffer []byte, at int) (int, error) {
+	if at >= len(buffer) {
+		return 0, ErrTruncated
+	}
+	desc := buffer[at]
+	switch {
+	case desc < descExplicit:
+		return 1, nil
+	case (desc>>4)&0b111 == classInt:
+		return intSize(buffer, at, desc)
+	case (desc>>4)&0b111 == classSpecial && desc&specialVarint != 0:
+		return varintSize(buffer, at, desc)
+	}
+	return 0, ErrBadDescriptor
 }

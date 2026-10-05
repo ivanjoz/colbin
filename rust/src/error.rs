@@ -27,6 +27,9 @@ pub enum Error {
     BadBitmap,
     /// A column block declares a width above 64 bits.
     BadWidth,
+    /// A column header with a reserved bit set, or one the encoder never writes
+    /// for its transform: refused rather than read some plausible way.
+    BadColumnHeader,
     /// A column decode was handed an output slice shorter than the row count.
     ShortBuffer,
     /// Byte 0 is not a root descriptor this version writes.
@@ -95,6 +98,9 @@ impl fmt::Display for Error {
             Self::BadDescriptor => out.write_str("colbin: unassigned or mismatched descriptor"),
             Self::BadBitmap => out.write_str("colbin: bad presence bitmap"),
             Self::BadWidth => out.write_str("colbin: column block width above 64 bits"),
+            Self::BadColumnHeader => {
+                out.write_str("colbin: reserved or non-canonical column header")
+            }
             Self::ShortBuffer => out.write_str("colbin: column output slice too short"),
             Self::BadRoot(byte) => write!(
                 out,

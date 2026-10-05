@@ -218,6 +218,10 @@ func appendJSONString(dst []byte, value string) []byte {
 				dst = append(dst, '\\', 'r')
 			case '\t':
 				dst = append(dst, '\\', 't')
+			case '\b':
+				dst = append(dst, '\\', 'b')
+			case '\f':
+				dst = append(dst, '\\', 'f')
 			default:
 				// A control byte, or one of the three HTML-significant ones,
 				// which go the long way round for the same reason: so the output

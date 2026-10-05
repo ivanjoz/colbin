@@ -1,55 +1,30 @@
-// Package narrow implements colbin's wire format for a single record of at
-// most sixteen primitive fields, where a zero-valued field is not written at
-// all.
+package wire
+
+// The four-bit key width, K4. A field's key shares one byte with a four-bit
+// descriptor whose meaning depends on the field's type, which the reader knows
+// from the schema. Keys are 0..15. Every multi-byte quantity is little-endian.
 //
-//	w := wire.Writer{}
-//	w.U32(0, companyID)
-//	w.U16(1, routeID)
-//	w.String(2, name)
-//	send(w.Buffer)
+//	unsigned int   [key:4][code:4]                             [magnitude]
 //
-// This package owns the field framing and nothing else. It has no reflection and
-// no type registry: a caller that already knows the Go type drives it, and
-// colbin.MarshalMinimal is the reflection façade over it.
+//	    code 0..7   the value itself, no payload
+//	    code 8..15  a magnitude of code-7 bytes
 //
-// # Everything is byte-aligned
+//	signed int     [key:4][positive:1][n:3]                    [magnitude: n bytes]
 //
-// Nothing is packed across a byte boundary, so an encode is a header byte and a
-// few stores, a decode is a switch over the key, and a string field is a
-// sub-slice of the message rather than a copy. No size is a varint: a header
-// carries the common size and escalates to a fixed width, so no read is ever a
-// loop whose trip count is data. See BYTE_ALIGNED_PLAN.md for what that buys and
-// what it costs.
-//
-// # Wire format
-//
-// A message is a sequence of fields and ends when its buffer ends — the frame
-// that carries it already states its length. Keys are 0..15. Every multi-byte
-// quantity is little-endian, which is one native load on every machine this runs
-// on. A field whose value is zero, empty or false is omitted, which is where
-// most of the saving comes from.
-//
-//	integer        [key:4][positive:1][n:3]                    [magnitude: n bytes]
-//
-//	    n          0 → no bytes, the value is 1 (which is what makes a true bool
-//	               one byte) · 1..6 → that many bytes · 7 → eight bytes
+//	    n          0 → no bytes, the magnitude is 1 · 1..6 → that many bytes
+//	               · 7 → eight bytes
 //	    positive   1 = the bytes are a magnitude; 0 = negative, bytes are |value|
-//	    an integer needs no continuation flag: n already reaches eight bytes
 //
-//	float          the integer shape, carrying the IEEE-754 bit pattern with its
-//	               bytes reversed
-//
-//	    A float's zero bytes are its low mantissa bytes, where an integer's are
-//	    its high ones, so reversing puts them where n can elide them. 1.0 costs
-//	    two bytes rather than eight, and a float64 that holds an exact float32
-//	    costs five without anything being added to detect it.
+//	float          the unsigned shape, carrying the IEEE-754 bit pattern with its
+//	               bytes reversed, so a float's low zero mantissa bytes land
+//	               where the magnitude trim removes them: 1.0 costs two bytes
 //
 //	string/bytes   [key:4][more:1][size hi:3] [size lo:8]      [bytes: size]
 //	               [key:4][1][escape:3]       [size: 2|4|8]    [bytes: size]
 //
-//	    2047 bytes fit the two header bytes. Past that the three size bits carry
-//	    nothing, so they name the width of the size that follows instead: a 5 KB
-//	    string pays one extra byte, not four.
+//	    2047 bytes fit the two header bytes. Past that the three size bits name
+//	    the width of the size that follows. Escapes 3..6 mark a packed5 string
+//	    (packed.go); 7 is unassigned.
 //
 //	integer array  [key:4][positive:1][width:2][more:1] [count:8]  [count × width]
 //	               ... [count: 4 bytes] instead, when more = 1
@@ -59,14 +34,6 @@
 //
 //	string array   [key:4][more:1][count hi:3] [count lo:8]   then per element
 //	               [size: 1 byte, 0xFF → 4 bytes follow] [bytes: size]
-//
-// # Nothing has a size ceiling
-//
-// Every size escalates to a width that holds it, so the common size costs
-// nothing extra and no size is refused. That is also why **a write cannot
-// fail**: Writer has no error and no Err method. Anything the format could not
-// express would have to be a value that does not fit in memory.
-package wire
 
 import (
 	"encoding/binary"
@@ -75,10 +42,7 @@ import (
 	"math/bits"
 )
 
-// MaxFields is what four key bits buy: keys 0..15. A record needing a
-// seventeenth field needs a different key width, not a wider key — the key
-// shares a byte with the field's own header bits and there is nothing to take
-// them from.
+// MaxFields is what four key bits buy: keys 0..15.
 const MaxFields = 16
 
 // Integer size codes. Code 0 carries no bytes at all and means the magnitude is
@@ -187,14 +151,20 @@ var (
 	// ErrSizeTooLarge is a size this platform cannot address. It is a read-side
 	// error only: a writer cannot produce one, because the value it is
 	// describing is already in memory.
-	ErrSizeTooLarge = errors.New("narrow: a declared size is larger than this platform can address")
+	ErrSizeTooLarge = errors.New("wire: a declared size is larger than this platform can address")
 	// ErrFieldTooWide is a peer writing a field wider than the type this record
 	// says it holds — a schema disagreement, refused rather than truncated into
 	// a different, valid-looking value.
-	ErrFieldTooWide = errors.New("narrow: a field is wider than its declared type")
-	ErrTruncated    = errors.New("narrow: the message ends inside a field")
-	// ErrBadEscape is a size escape code this version does not assign.
-	ErrBadEscape = errors.New("narrow: unassigned size escape code")
+	ErrFieldTooWide = errors.New("wire: a field is wider than its declared type")
+	// ErrTruncated is a field, or a count of fields, that runs past the bytes
+	// that hold it.
+	ErrTruncated = errors.New("wire: the message ends inside a field")
+	// ErrBadEscape is a size escape code this version does not assign, or one
+	// the read at hand does not take — a packed string read as bytes.
+	ErrBadEscape = errors.New("wire: unassigned size escape code")
+	// ErrCannotSkip is Reader.Skip: a four-bit descriptor does not say what
+	// shape a field is, so a field the reader does not know cannot be sized.
+	ErrCannotSkip = errors.New("wire: a narrow field cannot be skipped without knowing its type")
 )
 
 // Writer appends fields to a buffer the caller owns. Build one per message over
@@ -220,11 +190,6 @@ var (
 // record nothing can read back.
 type Writer struct {
 	Buffer []byte
-}
-
-// Reset points the writer at a buffer, keeping its capacity.
-func (w *Writer) Reset(buffer []byte) {
-	w.Buffer = buffer[:0]
 }
 
 // sizeCodeFor is the code that describes a magnitude, and the byte count that
@@ -374,13 +339,12 @@ func (w *Writer) escapedSize(key uint8, size uint64) {
 
 // Array writers, one concrete method per element type.
 //
-// These are not wrappers over the generic WriteInts, and the repetition is not
-// an oversight. A generic function that takes a *Writer is reached through a
-// shape dictionary, and the escape information a *caller in another package*
-// gets for it is conservative enough to put the writer on the heap — measured,
-// an allocation and 3 ns per record on codec's plan walk. Keeping the pointer
-// out of every generic signature is what keeps a plan-driven encode at zero
-// allocations. The generic work below touches slices and values only.
+// The repetition is not an oversight. A generic function that takes a *Writer
+// is reached through a shape dictionary, and the escape information a caller in
+// another package gets for it puts the writer on the heap: an allocation per
+// message. Keeping the pointer out of every generic signature is what keeps a
+// plan-driven encode at zero allocations; the generic work below touches slices
+// and values only.
 
 // Ints writes an array of signed integers at one width, chosen from the widest
 // element, and nothing when the array is empty.
@@ -658,8 +622,22 @@ func (r *Reader) Int() int64 {
 	}
 	positive := header&intPositiveFlag != 0
 	magnitude := r.signedMagnitude()
+	return r.signed(positive, magnitude)
+}
+
+// signed applies a sign to a magnitude, refusing one no int64 holds: past 2^63-1
+// when positive, past 2^63 when negative.
+func (r *Reader) signed(positive bool, magnitude uint64) int64 {
 	if positive {
+		if magnitude > math.MaxInt64 {
+			r.fail(ErrFieldTooWide)
+			return 0
+		}
 		return int64(magnitude)
+	}
+	if magnitude > 1<<63 {
+		r.fail(ErrFieldTooWide)
+		return 0
 	}
 	return -int64(magnitude)
 }
@@ -690,7 +668,8 @@ func (r *Reader) signedMagnitude() uint64 {
 func (r *Reader) Bool() bool { return r.Uint() == 1 }
 
 // Bytes returns the field's bytes as a sub-slice of the message, without
-// copying. It stays valid only as long as the message buffer does.
+// copying. It stays valid only as long as the message buffer does. A packed5
+// string is not bytes and is refused with ErrBadEscape; String reads it.
 func (r *Reader) Bytes() []byte {
 	size, start, ok := r.blobSize()
 	if !ok {
@@ -704,8 +683,23 @@ func (r *Reader) Bytes() []byte {
 	return r.buffer[start : start+size]
 }
 
-// String copies the field into a Go string.
-func (r *Reader) String() string { return string(r.Bytes()) }
+// String reads a string written by String or by PackedString. The header's
+// escape code says which, so a reader needs no configuration and cannot be
+// wrong about it.
+//
+// The common field is a raw string with an inline size, so that path is spelled
+// out here, small enough for the inliner, and everything else is one call away.
+func (r *Reader) String() string {
+	at := r.at
+	if at+2 <= len(r.buffer) && r.buffer[at]&moreSizeFlag == 0 {
+		size := int(r.buffer[at]&0b111)<<8 | int(r.buffer[at+1])
+		if size <= len(r.buffer)-at-2 {
+			r.at = at + 2 + size
+			return string(r.buffer[at+2 : at+2+size])
+		}
+	}
+	return r.stringWide()
+}
 
 // blobSize reads a blob or string-array header and returns the size it declares
 // with the offset just past it.
@@ -858,7 +852,7 @@ func (r *Reader) arrayCount(header uint8) (count, start int, ok bool) {
 // without copying. The slices stay valid only as long as the message buffer
 // does.
 func (r *Reader) StringsBytes(dst [][]byte) [][]byte {
-	count, at, ok := r.blobSize()
+	count, at, ok := r.stringsHeader()
 	if !ok {
 		return dst
 	}
@@ -876,6 +870,17 @@ func (r *Reader) StringsBytes(dst [][]byte) [][]byte {
 	}
 	r.at = at
 	return dst
+}
+
+// stringsHeader reads a string array's count, refusing one larger than the
+// bytes left: every element spends at least its length byte.
+func (r *Reader) stringsHeader() (count, at int, ok bool) {
+	count, at, ok = r.blobSize()
+	if ok && count > len(r.buffer)-at {
+		r.fail(ErrTruncated)
+		return 0, 0, false
+	}
+	return count, at, ok
 }
 
 // elementSize reads one string-array element length: one byte, or four more
@@ -902,7 +907,7 @@ func (r *Reader) elementSize(at int) (size, start int, ok bool) {
 
 // Strings copies each element into a Go string.
 func (r *Reader) Strings(dst []string) []string {
-	count, at, ok := r.blobSize()
+	count, at, ok := r.stringsHeader()
 	if !ok {
 		return dst
 	}
@@ -927,7 +932,7 @@ func (r *Reader) Strings(dst []string) []string {
 // from the key. An unknown key is a record definition the two sides no longer
 // share.
 func (r *Reader) Skip() {
-	r.fail(errors.New("narrow: a field cannot be skipped without knowing its type"))
+	r.fail(ErrCannotSkip)
 }
 
 // Width-typed writers.
@@ -1063,8 +1068,45 @@ func (r *Reader) u32Wide() uint32 {
 	return uint32(value)
 }
 
-// I32 reads a field written by I32.
-func (r *Reader) I32() int32 { return int32(r.Int()) }
+// U8 reads an unsigned field into a byte, refusing a wider one as U16 does.
+func (r *Reader) U8() uint8 {
+	value := r.Uint()
+	if value > 0xFF {
+		r.fail(ErrFieldTooWide)
+		return 0
+	}
+	return uint8(value)
+}
+
+// I8, I16 and I32 read a signed field into a narrower type, refusing a value
+// the type cannot hold for the reason U16 does. Each is written out rather than
+// sharing a range helper, so that it inlines into the caller's loop.
+func (r *Reader) I8() int8 {
+	value := r.Int()
+	if int64(int8(value)) != value {
+		r.fail(ErrFieldTooWide)
+		return 0
+	}
+	return int8(value)
+}
+
+func (r *Reader) I16() int16 {
+	value := r.Int()
+	if int64(int16(value)) != value {
+		r.fail(ErrFieldTooWide)
+		return 0
+	}
+	return int16(value)
+}
+
+func (r *Reader) I32() int32 {
+	value := r.Int()
+	if int64(int32(value)) != value {
+		r.fail(ErrFieldTooWide)
+		return 0
+	}
+	return int32(value)
+}
 
 // Floats ride in the integer field shape, carrying the IEEE-754 bit pattern with
 // its bytes reversed.
@@ -1101,28 +1143,10 @@ func (r *Reader) F64() float64 {
 	return math.Float64frombits(bits.ReverseBytes64(r.Uint()))
 }
 
-// Integer is every integer type an array field can hold. The array writers and
-// readers are package functions rather than methods because a method cannot take
-// a type parameter, and a []int16 should not have to become a []int64 first.
+// Integer is every integer type an array's elements can be.
 type Integer interface {
 	~int | ~int8 | ~int16 | ~int32 | ~int64 |
 		~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64
-}
-
-// WriteInts writes an array of any integer type, for an element type the
-// concrete methods above do not cover — a named type, or a uint.
-//
-// Prefer the concrete method when one exists. This one takes a *Writer into a
-// generic signature, and a caller in another package therefore gets escape
-// information conservative enough to put its writer on the heap: one allocation
-// per message, which is exactly what the concrete methods exist to avoid.
-func WriteInts[T Integer](w *Writer, key uint8, values []T) {
-	if len(values) == 0 {
-		return
-	}
-	header, width := arrayPlan(key, values)
-	w.arrayHeader(header, len(values))
-	w.Buffer = appendElements(w.Buffer, values, width)
 }
 
 // appendElements writes the elements with the width hoisted out of the loop, so
@@ -1162,17 +1186,6 @@ func isSigned[T Integer]() bool {
 	var minusOne T
 	minusOne--
 	return int64(minusOne) < 0
-}
-
-// ReadInts appends an array's elements to dst, for an element type the concrete
-// methods above do not cover. Prefer a concrete method when one exists, for the
-// reason WriteInts gives.
-func ReadInts[T Integer](r *Reader, dst []T) []T {
-	elements, positive, width, ok := r.arrayElements()
-	if !ok {
-		return dst
-	}
-	return appendArray(dst, elements, width, positive)
 }
 
 // appendArray turns an array field's bytes into elements. Generic over the

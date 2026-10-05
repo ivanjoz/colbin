@@ -15,9 +15,8 @@ import (
 //
 // The Rust port asserts against the committed file, so without this a change to
 // the Go wire would leave Rust passing against a corpus that no longer describes
-// anything — which is exactly how the two ports diverged in silence before. Run
-// `go run ./rust/vectors` to regenerate, and expect the Rust side to fail until
-// it is brought over.
+// anything. Run `go run ./rust/vectors` to regenerate, and expect the Rust side
+// to fail until it is brought over.
 func TestCorpusIsCurrent(t *testing.T) {
 	committed, err := os.ReadFile("vectors.json")
 	if err != nil {
@@ -64,11 +63,12 @@ func TestEveryCaseRoundTrips(t *testing.T) {
 		"main.WideWidths":  func() any { return &WideWidths{} },
 		"main.Hashed":      func() any { return &Hashed{} },
 		"main.PackedText":  func() any { return &PackedText{} },
+		"main.Ledger":      func() any { return &Ledger{} },
 	}
 
 	for _, one := range held.Cases {
 		t.Run(one.Name, func(t *testing.T) {
-			make, ok := fresh[one.Type]
+			newValue, ok := fresh[one.Type]
 			if !ok {
 				t.Fatalf("no destination for %s", one.Type)
 			}
@@ -76,7 +76,7 @@ func TestEveryCaseRoundTrips(t *testing.T) {
 			if err != nil {
 				t.Fatalf("the message is not hex: %v", err)
 			}
-			into := make()
+			into := newValue()
 			if err := colbin.Unmarshal(message, into); err != nil {
 				t.Fatalf("decode: %v", err)
 			}

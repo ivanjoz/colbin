@@ -389,14 +389,20 @@ impl SpanWalker {
         node: &mut Node,
         offset: usize,
     ) -> Result<(), Error> {
-        let (rows, mut columns) = reader.counted().ok_or(Error::Truncated)?;
-        let body_end = offset + reader.cursor();
-        let body_at = body_end - columns.buf_len();
+        let (rows, body) = reader.table().ok_or(Error::Truncated)?;
+        let body_at = offset + reader.cursor() - body.len();
         let sub = self.sub_plan(schema, field)?;
         if self.depth == 1 {
             self.rows = i32::try_from(rows).unwrap_or(i32::MAX);
         }
         self.enter()?;
+        // Wide rows keep their eight-bit keys in a narrow parent's table.
+        if sub.is_wide {
+            self.wide_columns(&mut Reader8::new(body), sub, node, body_at)?;
+            self.leave();
+            return Ok(());
+        }
+        let mut columns = Reader::new(body);
         while columns.more() {
             let start = columns.cursor();
             let key = columns.key();
@@ -576,6 +582,20 @@ impl SpanWalker {
             self.rows = i32::try_from(rows).unwrap_or(i32::MAX);
         }
         self.enter()?;
+        self.wide_columns(&mut columns, sub, node, body_at)?;
+        self.leave();
+        Ok(())
+    }
+
+    /// One span per column of a table keyed at eight bits, wherever its body
+    /// begins in the message.
+    fn wide_columns(
+        &mut self,
+        columns: &mut Reader8<'_>,
+        sub: &Plan,
+        node: &mut Node,
+        body_at: usize,
+    ) -> Result<(), Error> {
         while columns.more() {
             let start = columns.cursor();
             let key = columns.key();
@@ -601,9 +621,7 @@ impl SpanWalker {
                 children: Vec::new(),
             });
         }
-        columns.err()?;
-        self.leave();
-        Ok(())
+        columns.err()
     }
 }
 

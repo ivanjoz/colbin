@@ -1,26 +1,6 @@
-// Package colbin is a byte-aligned binary format for Go structs.
-//
-//	data, err := colbin.Marshal(&charge)
-//	err = colbin.Unmarshal(data, &back)
-//
-// There is one format. A message is a sequence of [key][descriptor][payload]
-// fields, nothing is packed across a byte boundary, no size is a varint, and a
-// field holding its zero value is not written at all. What that buys and what it
-// costs is in BYTE_ALIGNED_PLAN.md; the layout itself is in wire/README.md.
-//
-// # Layers
-//
-//	wire     the format: field framing, both key widths, composites, tables
-//	column   the column codec: blocks of 128 residuals at a chosen bit width
-//	codec    the reflection façade over both, which is this package's engine
-//	packed5  an opt-in string packing, off by default (see SetPacked5)
-//
-// A caller that already knows its Go type can skip the reflection entirely and
-// drive wire.Writer directly — that is what Codec.Append does under the hood, and
-// what codec.Generate emits source for. The straight-line form is about three
-// times faster than the reflective one, and the generator exists so that is not
-// a reason to write it by hand.
 package colbin
+
+// The package overview is in doc.go; this file is the API.
 
 import "github.com/ivanjoz/colbin/codec"
 
@@ -28,8 +8,8 @@ import "github.com/ivanjoz/colbin/codec"
 // at the root.
 //
 // A field id comes from its `cb` tag, or from the hash of its name when the tag
-// gives no number, and the ids decide the key width: sixteen or fewer, all under
-// sixteen, and the message uses four-bit keys; otherwise eight-bit ones.
+// gives no number, and the ids decide the key width: when every one is at most
+// sixteen the message uses four-bit keys, and otherwise eight-bit ones.
 //
 // A slice or map root is written as a one-field message holding it under key 0,
 // so the root is still a struct and the blob is still an ordinary message — see
@@ -53,9 +33,11 @@ func Append(dst []byte, v any) ([]byte, error) { return codec.Append(dst, v) }
 // left holding whatever it had.
 func Unmarshal(data []byte, dst any) error { return codec.Unmarshal(data, dst) }
 
-// FieldIDs reports the wire key of every field, for handing to a reader in
-// another language. Reading them out of the tags by hand is how they drift.
-func FieldIDs(v any) (map[string]uint8, error) { return codec.FieldIDs(v) }
+// FieldIDs reports the id of every field, counting from one as the tags do, for
+// handing to a reader in another language. The wire key is the id less one.
+// Reading the ids out of the tags by hand is how they drift — and a field
+// without a numeric tag has one only here.
+func FieldIDs(v any) (map[string]uint16, error) { return codec.FieldIDs(v) }
 
 // RootFirst and RootLast bound the first byte of every colbin message.
 //
@@ -87,9 +69,13 @@ func IsColbin(data []byte) bool { return codec.IsColbin(data) }
 //
 //	buf := make([]byte, 0, 64)
 //	for _, charge := range charges {
-//	    buf = chargeCodec.Append(buf[:0], &charge)
+//	    buf, err = chargeCodec.Append(buf[:0], &charge)
+//	    ...
 //	    send(buf)
 //	}
+//
+// Append fails only on a value the format cannot hold, which the type alone
+// does not rule out: an `any` holding a chan, or nesting past 128 levels.
 //
 // It is safe for concurrent use.
 type Codec[T any] = codec.Codec[T]
@@ -114,7 +100,8 @@ func MustCodec[T any]() *Codec[T] { return codec.MustCodec[T]() }
 //	schema, _ := colbin.SchemaFor[Sale]()
 //	send(schema.Bytes())                      // once
 //	for _, sale := range sales {
-//	    send(colbin.Marshal(&sale))           // unchanged, and unchanged in size
+//	    message, _ := colbin.Marshal(&sale)   // unchanged, and unchanged in size
+//	    send(message)
 //	}
 //
 // and on the other side:
@@ -157,13 +144,16 @@ func ParseSchema(section []byte) (*Schema, error) { return codec.ParseSchema(sec
 func MarshalSelfDescribing(v any) ([]byte, error) { return codec.MarshalSelfDescribing(v) }
 
 // ToJSON renders a message as JSON using schema. Pass a nil schema for a message
-// written by MarshalSelfDescribing, which carries its own.
+// written by MarshalSelfDescribing, which carries its own and is read with it
+// whatever schema is passed.
 //
-// The output is what encoding/json would have written for the same record: every
-// field is present, a []byte is base64, and the numbers are spelled the same
-// way. Two things it cannot match, because the wire cannot: an empty slice or
-// map is indistinguishable from a nil one and comes out as null, and a NaN or an
-// infinity is refused rather than written as null — use DecodeAny to keep one.
+// The output is equivalent to what encoding/json would have written for the same
+// record — every field is present, a []byte is base64, and the numbers are
+// spelled the same way — but the fields come in the message's order, with the
+// ones it omitted at the end of their object. Two things it cannot match,
+// because the wire cannot: an empty slice or map is indistinguishable from a nil
+// one and comes out as null, and a NaN or an infinity is refused rather than
+// written as null — use DecodeAny to keep one.
 func ToJSON(schema *Schema, data []byte) ([]byte, error) { return codec.ToJSON(schema, data) }
 
 // AppendJSON is ToJSON onto dst, for a caller with a buffer to reuse.
@@ -189,8 +179,9 @@ func DecodeAny(schema *Schema, data []byte) (any, error) { return codec.DecodeAn
 // Turn it on for a wire that is size-bound over a slow link. Leave it off for
 // one that is latency-bound, which is what this format is for.
 //
-// It is a process-wide setting and not safe to change concurrently with
-// encoding. Set it once at startup.
+// It is a process-wide setting, and safe to change while encoders run: a
+// message written across the switch holds either form, or both, and any reader
+// reads it.
 func SetPacked5(on bool) { codec.SetPacked5(on) }
 
 // Packed5 reports whether the packed5 string encoding is on.

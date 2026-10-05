@@ -13,6 +13,7 @@ package codec
 // of small structs is smaller than a wide one rather than merely equal.
 
 import (
+	"fmt"
 	"reflect"
 	"unsafe"
 
@@ -20,6 +21,7 @@ import (
 )
 
 // appendNarrowStruct writes a nested key run, at whichever width the child needs.
+// The depth is taken by the run's own walk, writePlan or appendWide.
 func appendNarrowStruct(writer *wire.Writer, field *planField, at unsafe.Pointer, buf *scratch) {
 	if field.sub.isWide {
 		mark := writer.OpenStructWide(field.key)
@@ -56,6 +58,11 @@ func appendNarrowStructs(writer *wire.Writer, field *planField, at unsafe.Pointe
 	if slice.len == 0 {
 		return
 	}
+	// A list or a table is a level of depth of its own, as it is to every reader.
+	if !buf.enter() {
+		return
+	}
+	defer buf.leave()
 	if field.sub.canTable && slice.len >= tableThreshold {
 		appendNarrowTable(writer, field, at, buf)
 		return
@@ -74,33 +81,46 @@ func appendNarrowStructs(writer *wire.Writer, field *planField, at unsafe.Pointe
 	writer.Close(list)
 }
 
+// appendNarrowTable writes a table under a narrow parent, its columns keyed at
+// the row type's width. See table.go.
 func appendNarrowTable(writer *wire.Writer, field *planField, at unsafe.Pointer, buf *scratch) {
 	slice := (*sliceHeader)(at)
-	buf.reserve(slice.len)
 	mark := writer.OpenTable(field.key, slice.len)
+	if field.sub.isWide {
+		wide := wire.Writer8{Buffer: writer.Buffer}
+		appendColumns(&wide, field.sub, slice, field.stride, buf)
+		writer.Buffer = wide.Buffer
+		writer.Close(mark)
+		return
+	}
+	columns := buf.reserve(slice.len, field.sub.hasStringColumn())
 	for index := range field.sub.fields {
 		column := &field.sub.fields[index]
 		if column.op == opString {
-			buf.strings = gatherStrings(buf.strings[:0], slice, field.stride, column.offset)
-			writer.Strings(column.key, buf.strings)
+			columns.strings = gatherStrings(columns.strings[:0], slice, field.stride, column.offset)
+			writer.Strings(column.key, columns.strings)
 			continue
 		}
-		buf.ints = gatherInts(buf.ints[:0], slice, field.stride, column)
-		writer.Column(column.key, buf.ints)
+		columns.ints = gatherInts(columns.ints[:0], slice, field.stride, column)
+		writer.Column(column.key, columns.ints)
 	}
 	writer.Close(mark)
 }
 
-func appendNarrowMap(writer *wire.Writer, field *planField, at unsafe.Pointer) {
+func appendNarrowMap(writer *wire.Writer, field *planField, at unsafe.Pointer, buf *scratch) {
 	value := reflect.NewAt(field.sliceType, at).Elem()
 	count := value.Len()
 	if count == 0 {
 		return
 	}
+	if !buf.enter() {
+		return
+	}
+	defer buf.leave()
 	mark := writer.OpenMap(field.key, count)
-	for entries := value.MapRange(); entries.Next(); {
-		writeNarrowMapValue(writer, field.keyKind, entries.Key())
-		writeNarrowMapValue(writer, field.valueKind, entries.Value())
+	for _, key := range sortedMapKeys(value) {
+		writeNarrowMapValue(writer, field.keyKind, key)
+		writeNarrowMapValue(writer, field.valueKind, value.MapIndex(key))
 	}
 	writer.Close(mark)
 }
@@ -157,10 +177,18 @@ func readNarrowBody(parent *wire.Reader, body []byte, wideKeys bool, plan *typeP
 // readNarrowRun is the narrow twin of readRun. An unknown key ends it rather
 // than being stepped over, which is what four descriptor bits cost.
 func readNarrowRun(reader *wire.Reader, plan *typePlan, record unsafe.Pointer, buf *scratch) {
+	if !buf.enter() {
+		reader.Fail(buf.err)
+		return
+	}
+	defer buf.leave()
 	for reader.More() {
-		field := plan.find(reader.Key())
+		key := reader.Key()
+		field := plan.find(key)
 		if field == nil {
-			reader.Fail(wire.ErrBadDescriptor)
+			reader.Fail(fmt.Errorf(
+				"message holds field id %d, which the type does not declare, "+
+					"and a narrow key cannot be skipped", int(key)+1))
 			return
 		}
 		readField(reader, field, record, buf)
@@ -168,11 +196,16 @@ func readNarrowRun(reader *wire.Reader, plan *typePlan, record unsafe.Pointer, b
 }
 
 func readNarrowStructs(reader *wire.Reader, field *planField, at unsafe.Pointer, buf *scratch) {
+	if !buf.enter() {
+		reader.Fail(buf.err)
+		return
+	}
+	defer buf.leave()
 	if reader.IsTable() {
 		readNarrowTable(reader, field, at, buf)
 		return
 	}
-	count, elements, ok := reader.Counted()
+	count, elements, ok := reader.List()
 	if !ok {
 		return
 	}
@@ -184,55 +217,75 @@ func readNarrowStructs(reader *wire.Reader, field *planField, at unsafe.Pointer,
 			reader.Fail(elements.Err())
 			return
 		}
-		elementAt := unsafe.Add(data, uintptr(index)*field.stride)
-		if field.sub.isWide {
-			sub := wire.NewReader8(body)
-			readRun(&sub, field.sub, elementAt, buf)
-			reader.Fail(sub.Err())
-			continue
+		readNarrowBody(reader, body, field.sub.isWide, field.sub,
+			unsafe.Add(data, uintptr(index)*field.stride), buf)
+		if reader.Err() != nil {
+			return
 		}
-		sub := wire.NewReader(body)
-		readNarrowRun(&sub, field.sub, elementAt, buf)
-		reader.Fail(sub.Err())
 	}
 }
 
+// readNarrowTable reads a table under a narrow parent, whose columns are keyed
+// at the row type's width. See table.go.
 func readNarrowTable(reader *wire.Reader, field *planField, at unsafe.Pointer, buf *scratch) {
-	rows, columns, ok := reader.Counted()
+	rows, body, ok := reader.Table()
 	if !ok {
 		return
 	}
-	if rows > maxTableRows {
-		reader.Fail(errTooManyRows)
+	if field.sub.isWide {
+		columns := wire.NewReader8(body)
+		readColumns(&columns, field, at, rows, buf)
+		reader.Fail(columns.Err())
 		return
 	}
-	buf.reserve(rows)
+	if err := takeRows(&buf.rowsLeft, rows, len(field.sub.fields)); err != nil {
+		reader.Fail(err)
+		return
+	}
+	scratchColumns := buf.reserve(rows, field.sub.hasStringColumn())
 	newSlice(field, at, rows)
 	data := (*sliceHeader)(at).data
+	columns := wire.NewReader(body)
 	for columns.More() {
-		column := field.sub.find(columns.Key())
+		key := columns.Key()
+		column := field.sub.find(key)
 		if column == nil {
 			// A narrow key cannot be skipped, so an unknown column ends the
 			// table rather than being stepped over.
-			reader.Fail(wire.ErrBadDescriptor)
+			reader.Fail(fmt.Errorf(
+				"a table holds column id %d, which the row type does not declare, "+
+					"and a narrow key cannot be skipped", int(key)+1))
 			return
 		}
 		if column.op == opString {
-			buf.strings = columns.Strings(buf.strings[:0])
-			scatterStrings(buf.strings, data, field.stride, column.offset, rows)
+			scratchColumns.strings = columns.Strings(scratchColumns.strings[:0])
+			if columns.Err() == nil && len(scratchColumns.strings) != rows {
+				columns.Fail(errColumnLength)
+			}
+			scatterStrings(scratchColumns.strings, data, field.stride, column.offset, rows)
 			continue
 		}
-		buf.ints = columns.Column(rows, buf.ints[:0])
-		scatterInts(buf.ints, data, field.stride, column, rows)
+		scratchColumns.ints = columns.Column(rows, scratchColumns.ints[:0])
+		scatterInts(scratchColumns.ints, data, field.stride, column, rows)
 	}
 	reader.Fail(columns.Err())
 }
 
-func readNarrowMap(reader *wire.Reader, field *planField, at unsafe.Pointer) {
-	count, entries, ok := reader.Counted()
+func readNarrowMap(reader *wire.Reader, field *planField, at unsafe.Pointer, buf *scratch) {
+	if field.valueKind == mapAny {
+		// A map of dynamic values is always wide. See errBadMapValue.
+		reader.Fail(errBadMapValue(field.valueKind))
+		return
+	}
+	count, entries, ok := reader.Map()
 	if !ok {
 		return
 	}
+	if !buf.enter() {
+		reader.Fail(buf.err)
+		return
+	}
+	defer buf.leave()
 	target := reflect.NewAt(field.sliceType, at).Elem()
 	built := reflect.MakeMapWithSize(field.sliceType, count)
 	key := reflect.New(field.sliceType.Key()).Elem()
@@ -254,12 +307,14 @@ func readNarrowMapValue(reader *wire.Reader, kind mapKind, into reflect.Value) {
 	case mapString:
 		into.SetString(reader.ElementString())
 	case mapInt:
-		into.SetInt(reader.ElementInt())
+		reader.Fail(setInt(into, reader.ElementInt()))
 	case mapUint:
-		into.SetUint(reader.ElementUint())
+		reader.Fail(setUint(into, reader.ElementUint()))
 	case mapFloat32, mapFloat64:
 		setFloatFromReversed(into, reader.ElementUint())
 	case mapBool:
 		into.SetBool(reader.ElementUint() == 1)
+	default:
+		reader.Fail(errBadMapValue(kind))
 	}
 }

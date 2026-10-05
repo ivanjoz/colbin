@@ -4,28 +4,22 @@ package codec
 // took.
 //
 // A message is one value: a descriptor byte, then its payload. The root
-// descriptor names the class — always a struct, here — and the key width used
-// inside it. Everything the old format's four version bytes carried is either in
-// that byte or gone: the mode bit, because there is one format; the shape bits,
-// because the class says it; the omit-empty flag, because omission is
-// unconditional; ALL_POSITIVE, because sign is a bit of each integer's own
-// descriptor.
+// descriptor names the class — always a struct, here — the key width used
+// inside it, and whether a schema section comes first.
 //
 // # Choosing the width
 //
-// Narrow keys are the default and the fast path, though what that now means is
-// the read and the byte count rather than the write: on a ten-field record the
-// two widths encode in 5.3 ns and 5.4, and narrow decodes in 14.8 against 25.4
-// and writes 9 bytes against 11. A type goes wide when it has to:
+// Narrow keys are the default: a byte less per field, and a faster decode. A
+// type goes wide when it has to:
 //
 //   - a field id above sixteen, whose key four bits cannot carry;
+//   - an untagged field, whose key is derived from its name and lands anywhere
+//     in 0..255; or
 //   - a dynamic value, whose descriptor has to name its own class and cannot do
-//     that in four bits (dynamic.go); or
-//   - packed5 on and a string field to spend it on, because the encoding code
-//     lives in the wide descriptor and a narrow one has no room for it.
+//     that in four bits (dynamic.go).
 //
-// The choice is a property of the type and the process setting, not of the
-// values, so it is resolved once per type and then read from the plan.
+// The choice is a property of the type, not of the values, so it is resolved
+// once per type and then read from the plan.
 
 import (
 	"fmt"
@@ -49,72 +43,21 @@ const (
 )
 
 // wide reports whether a plan must use eight-bit keys.
-//
-// packed5 used to force it. A narrow blob header has no enc field, so a packed
-// string had nowhere on the wire to say it was packed, and the whole message
-// paid a byte per key to get one. It says so in the blob header's escape code
-// now (wire.Writer.PackedString), so the encoding costs what it weighs and
-// nothing else.
 func (plan *typePlan) wide() bool {
 	return plan.anyKeyPastNarrow || plan.derivedKeys || plan.hasDynamic
 }
 
-// appendWide is writePlan for the wide key width. It is a separate function
-// rather than a flag inside one, for the reason wire keeps the two widths in
-// separate files: a width the compiler cannot see is a width it cannot fold, and
-// that measured 11.7 ns against 8.7 on a ten-field record.
+// appendWide is writePlan for the wide key width.
 func appendWide(writer *wire.Writer8, plan *typePlan, record unsafe.Pointer, buf *scratch) {
+	if !buf.enter() {
+		return
+	}
+	defer buf.leave()
 	packed := Packed5()
 	for index := range plan.fields {
 		field := &plan.fields[index]
 		at := unsafe.Add(record, field.offset)
 		switch field.op {
-		case opBool:
-			writer.Bool(field.key, *(*bool)(at))
-		case opInt8:
-			writer.Int(field.key, int64(*(*int8)(at)))
-		case opInt16:
-			writer.Int(field.key, int64(*(*int16)(at)))
-		case opInt32:
-			writer.I32(field.key, *(*int32)(at))
-		case opInt64:
-			writer.Int(field.key, *(*int64)(at))
-		case opUint8:
-			writer.U16(field.key, uint16(*(*uint8)(at)))
-		case opUint16:
-			writer.U16(field.key, *(*uint16)(at))
-		case opUint32:
-			writer.U32(field.key, *(*uint32)(at))
-		case opUint64:
-			writer.Uint(field.key, *(*uint64)(at))
-		case opFloat32:
-			writer.F32(field.key, *(*float32)(at))
-		case opFloat64:
-			writer.F64(field.key, *(*float64)(at))
-		case opString:
-			if packed {
-				writer.PackedString(field.key, *(*string)(at))
-			} else {
-				writer.String(field.key, *(*string)(at))
-			}
-		case opBytes:
-			writer.Bytes(field.key, *(*[]byte)(at))
-		case opInt8s:
-			writer.Int8s(field.key, *(*[]int8)(at))
-		case opInt16s:
-			writer.Int16s(field.key, *(*[]int16)(at))
-		case opInt32s:
-			writer.Int32s(field.key, *(*[]int32)(at))
-		case opInt64s:
-			writer.Ints(field.key, *(*[]int64)(at))
-		case opUint16s:
-			writer.Uint16s(field.key, *(*[]uint16)(at))
-		case opUint32s:
-			writer.Uint32s(field.key, *(*[]uint32)(at))
-		case opUint64s:
-			writer.Uint64s(field.key, *(*[]uint64)(at))
-		case opStrings:
-			writer.Strings(field.key, *(*[]string)(at))
 		case opStruct:
 			appendStructField(writer, field, at, buf)
 		case opStructs:
@@ -122,13 +65,17 @@ func appendWide(writer *wire.Writer8, plan *typePlan, record unsafe.Pointer, buf
 		case opMap:
 			appendMapField(writer, field, at, buf)
 		case opPointer:
-			appendPointerWide(writer, field, at)
+			appendPointerWide(writer, field, at, packed)
 		case opPointerStruct:
 			appendPointerStructField(writer, field, at, buf)
 		case opAny:
 			appendAnyField(writer, field, at, buf)
 		case opAnys:
 			appendAnysField(writer, field, at, buf)
+		default:
+			if !writeValueWide(writer, field.key, field.op, at, packed) {
+				buf.fail(errNotValueOp(field.op))
+			}
 		}
 	}
 }
@@ -137,50 +84,6 @@ func appendWide(writer *wire.Writer8, plan *typePlan, record unsafe.Pointer, buf
 func readWideField(reader *wire.Reader8, field *planField, record unsafe.Pointer, buf *scratch) {
 	at := unsafe.Add(record, field.offset)
 	switch field.op {
-	case opBool:
-		*(*bool)(at) = reader.Bool()
-	case opInt8:
-		*(*int8)(at) = int8(reader.Int())
-	case opInt16:
-		*(*int16)(at) = int16(reader.Int())
-	case opInt32:
-		*(*int32)(at) = reader.I32()
-	case opInt64:
-		*(*int64)(at) = reader.Int()
-	case opUint8:
-		*(*uint8)(at) = uint8(reader.U16())
-	case opUint16:
-		*(*uint16)(at) = reader.U16()
-	case opUint32:
-		*(*uint32)(at) = reader.U32()
-	case opUint64:
-		*(*uint64)(at) = reader.Uint()
-	case opFloat32:
-		*(*float32)(at) = reader.F32()
-	case opFloat64:
-		*(*float64)(at) = reader.F64()
-	case opString:
-		// PackedString reads either encoding: the descriptor says which, so a
-		// message written with packed5 on reads back with it off.
-		*(*string)(at) = reader.PackedString()
-	case opBytes:
-		*(*[]byte)(at) = append([]byte(nil), reader.Bytes()...)
-	case opInt8s:
-		*(*[]int8)(at) = reader.Int8s(nil)
-	case opInt16s:
-		*(*[]int16)(at) = reader.Int16s(nil)
-	case opInt32s:
-		*(*[]int32)(at) = reader.Int32s(nil)
-	case opInt64s:
-		*(*[]int64)(at) = reader.Ints(nil)
-	case opUint16s:
-		*(*[]uint16)(at) = reader.Uint16s(nil)
-	case opUint32s:
-		*(*[]uint32)(at) = reader.Uint32s(nil)
-	case opUint64s:
-		*(*[]uint64)(at) = reader.Uint64s(nil)
-	case opStrings:
-		*(*[]string)(at) = reader.Strings(nil)
 	case opStruct:
 		readStructField(reader, field, at, buf)
 	case opStructs:
@@ -192,9 +95,19 @@ func readWideField(reader *wire.Reader8, field *planField, record unsafe.Pointer
 	case opPointerStruct:
 		readPointerStructField(reader, field, at, buf)
 	case opAny:
-		*(*any)(at) = readAnyValue(reader, buf)
+		// The key is a field's and everything behind it is a key-less value's,
+		// so the cursor steps onto the value first.
+		if reader.Payload() {
+			*(*any)(at) = readAnyValue(reader, buf)
+		}
 	case opAnys:
-		*(*[]any)(at) = readAnyList(reader, buf)
+		if reader.Payload() {
+			*(*[]any)(at) = readAnyList(reader, buf)
+		}
+	default:
+		if !readValueWide(reader, field.op, at) {
+			reader.Fail(errNotValueOp(field.op))
+		}
 	}
 }
 
@@ -203,27 +116,26 @@ func readWideField(reader *wire.Reader8, field *planField, record unsafe.Pointer
 // A key the plan does not declare is *skipped* rather than refused, which is the
 // whole point of the wide width: the descriptor sizes the field, so a reader can
 // step over something a newer peer added. The narrow path cannot, and says so.
-func unmarshalWide(
-	body, section []byte, plan *typePlan, record unsafe.Pointer, what reflect.Type,
-) error {
+func unmarshalWide(body, section []byte, plan *typePlan, record unsafe.Pointer) error {
 	// A separate reader per branch, for the reason appendPlan declares a separate
 	// writer: escape analysis is per variable, and sharing one with the composite
 	// walk would heap it on the flat path too.
 	if plan.simple {
 		reader := wire.NewReader8(body)
 		readScalarsWide(&reader, plan, record)
-		if err := reader.Err(); err != nil {
-			return fmt.Errorf("colbin: %s: %w", what, err)
-		}
-		return nil
+		return reader.Err()
 	}
+	return unmarshalWideRun(body, section, plan, record)
+}
+
+// unmarshalWideRun is unmarshalWide for a plan that nests, out of line for the
+// reason unmarshalNarrowRun is.
+func unmarshalWideRun(body, section []byte, plan *typePlan, record unsafe.Pointer) error {
 	reader := wire.NewReader8(body)
-	buf := scratch{rawSection: section}
+	buf := scratch{rawSection: section, rowsLeft: rowBudget(len(body))}
+	defer buf.release()
 	readRun(&reader, plan, record, &buf)
-	if err := reader.Err(); err != nil {
-		return fmt.Errorf("colbin: %s: %w", what, err)
-	}
-	return nil
+	return reader.Err()
 }
 
 // rootOf reads a message's root descriptor and returns the body after it.

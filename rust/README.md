@@ -50,7 +50,9 @@ the rule Go's `codec` uses:
 ```
 
 **Ids start at 1**, as Go's do: `#[cb(1)]` is the first field, a narrow type
-numbers 1..=16 and a wide one 1..=256. The key on the wire is the id minus one,
+numbers 1..=16 and a wide one 1..=255. (Go goes on past 255 by splitting a type
+into pages; the derive does not, and the Rust reader renders a paged message's
+JSON.) The key on the wire is the id minus one,
 because a key is a bare nibble or byte with no value to spare for a reserved
 zero, so `#[cb(1)]` writes key 0.
 
@@ -161,11 +163,11 @@ go test ./rust/vectors                     # fail if the committed corpus is sta
 ```
 
 `rust/vectors/vectors.json` is written by the Go codecs — every message by
-`colbin.Marshal` on a real Go value, every field id out of `colbin.FieldIDs`,
-every column by `column.AppendArray`. `rust/tests/vectors.rs` holds the same
-values and asserts **both directions**: that this port decodes those bytes to
-those values, and that it encodes those values to those bytes. So neither port
-can move without the other failing.
+`colbin.Marshal` on a real Go value, every field key from `colbin.FieldIDs` (the
+id less one), every column by `column.AppendArray`. `rust/tests/vectors.rs`
+holds the same values and asserts **both directions**: that this port decodes
+those bytes to those values, and that it encodes those values to those bytes.
+So neither port can move without the other failing.
 
 The corpus covers every scalar at its extremes, every slice kind, the blob and
 string-array size escapes, optionals against their explicit zeros, nested

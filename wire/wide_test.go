@@ -181,15 +181,26 @@ func TestWideSkipsAnUnknownField(t *testing.T) {
 	}
 }
 
-// Every prefix of a valid message must fail rather than decode something, and
-// never panic.
+// Every prefix of a valid message must fail rather than decode something,
+// unless it ends between two fields, and never panic.
 func TestWideTruncatedMessagesAreRefused(t *testing.T) {
 	writer := Writer8{}
+	between := map[int]bool{}
 	writer.Int(1, 1767225600123)
+	between[len(writer.Buffer)] = true
 	writer.String(2, "responses.go:539")
+	between[len(writer.Buffer)] = true
 	writer.Int32s(3, []int32{1234567, 7654321})
+	between[len(writer.Buffer)] = true
 	writer.Strings(4, []string{"product-stock.go:1204"})
 	full := writer.Buffer
+	refusedUnlessBetween := func(cut int, err error) {
+		t.Helper()
+		if refused := err != nil; refused == between[cut] {
+			t.Fatalf("a cut at %d of %d: refused %v, between fields %v",
+				cut, len(full), refused, between[cut])
+		}
+	}
 
 	for cut := 1; cut < len(full); cut++ {
 		reader := NewReader8(full[:cut])
@@ -198,7 +209,7 @@ func TestWideTruncatedMessagesAreRefused(t *testing.T) {
 				break
 			}
 		}
-		_ = reader.Err()
+		refusedUnlessBetween(cut, reader.Err())
 	}
 	// And typed reads over every prefix, which take different paths.
 	for cut := 1; cut < len(full); cut++ {
@@ -219,7 +230,7 @@ func TestWideTruncatedMessagesAreRefused(t *testing.T) {
 				}
 			}
 		}
-		_ = reader.Err()
+		refusedUnlessBetween(cut, reader.Err())
 	}
 }
 

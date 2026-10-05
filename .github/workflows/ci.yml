@@ -20,12 +20,12 @@ on:
   pull_request:
   workflow_dispatch:
 
-# One deploy at a time, and never cancel one half-done: a cancelled Pages
-# deployment can leave the site serving a partial build. Pull requests share the
-# group, so they queue behind a deploy rather than racing it.
+# One run per ref. A newer push to a pull request makes the older run moot, so
+# it is cancelled; on main they queue instead, so a run that has started always
+# finishes and deploys land in push order. The deploy has its own group below.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -100,8 +100,6 @@ jobs:
           GOFLAGS=-mod=readonly GOPROXY=off go build ./...
 
       # Cheapest signal first: none of it needs the browser toolchain.
-      - run: go vet ./...
-      - run: go test ./...
       - name: gofmt
         # gofmt -l exits 0 whether or not it lists anything, so the check is the
         # emptiness of its output, not its status.
@@ -110,12 +108,16 @@ jobs:
           if [ -n "$unformatted" ]; then
             echo "not gofmt'd:"; echo "$unformatted"; exit 1
           fi
+      - run: go vet ./...
+      # The one full run of the Go suite in this job, so it is the race one: the
+      # codecs keep package-level caches that every caller's goroutines share.
+      - run: go test -race ./...
 
       # The Rust crate (rust/) and the wasm module (rust/wasm). The corpus is
-      # generated from the Go codecs
-      # that just passed, so regenerating it here and failing on a diff is what
-      # catches a Go-side format change nobody ported — the committed vectors
-      # are only as good as the day they were written.
+      # generated from the Go codecs that just passed, so regenerating it here
+      # and failing on a diff is what catches a Go-side format change nobody
+      # ported — the committed vectors are only as good as the day they were
+      # written.
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -131,6 +133,16 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      # Reading the corpus back with Go is part of `go test -race ./...` above,
+      # which ran against the committed file; the diff proves it is current.
+      #
+      # What nothing checks is the other direction: `cargo run --example
+      # emit_vectors` wrote a corpus from the *Rust* derive for the Go decoder
+      # to read — byte equality covers the cases where the two encoders agree
+      # exactly, and a string that packs smaller than raw is deliberately not
+      # one of them. The example and its corpus went in the byte-aligned
+      # refactor (8b2bd7d). Rebuilding it is worth doing; asserting it here
+      # while it does not exist is not.
       - name: Regenerate the Rust vectors from the Go codecs
         run: |
           go run ./rust/vectors
@@ -179,20 +191,6 @@ jobs:
           # rust/wasm/Cargo.toml.)
           test "$decode" -lt $((encode * 2 / 3))
 
-      # The corpus reader, which also asserts the committed file is what the Go
-      # codecs produce today.
-      #
-      # This step used to do more: `cargo run --example emit_vectors` wrote a
-      # corpus from the *Rust* derive for the Go decoder to read, which is the
-      # only check of that direction — byte equality covers the cases where the
-      # two encoders agree exactly, and a string that packs smaller than raw is
-      # deliberately not one of them. The example and its corpus went in the
-      # byte-aligned refactor (8b2bd7d) and the step has been failing on a
-      # missing target ever since. Rebuilding it is worth doing; asserting it
-      # here while it does not exist is not.
-      - name: Read the Rust corpus back with Go
-        run: go test ./rust/vectors
-
       # Installs both workspace members (js/, web/) from the one root lockfile.
       - name: Install
         run: bun install --frozen-lockfile
@@ -234,10 +232,11 @@ jobs:
       # module encodes, Go decodes. Byte equality only covers the cases where
       # two encoders agree exactly, and the one that matters to a caller — a
       # JavaScript client writing for a Go service — is not one of them.
+      #
+      # The Go half already ran: `go test -race ./...` decoded the committed
+      # file. The diff proves `bun run test` (its `emit`) just wrote the same.
       - name: Verify the module's encoder against the Go decoder
-        run: |
-          git diff --exit-code js/vectors/web_encoded.json
-          go test ./js/vectors
+        run: git diff --exit-code js/vectors/web_encoded.json
 
       - name: Type-check
         working-directory: web
@@ -304,6 +303,57 @@ jobs:
         with:
           path: web/build-site
 
+  # The Go checks that need nothing but Go and would only lengthen `build`. They
+  # run beside it, and deploy and release wait for both.
+  go-checks:
+    runs-on: ubuntu-latest
+    # It runs a tool fetched from the module proxy, and needs none of the Pages
+    # or OIDC permissions the workflow grants.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # Pinned, and run as `go run pkg@version`, which builds the tool outside
+      # this module: go.mod gains no `require` and no go.sum appears. The last
+      # two lines check that rather than trust it.
+      - name: staticcheck
+        run: |
+          go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+          git diff --exit-code go.mod
+          test ! -e go.sum
+
+      # `int` is 32 bits here, which is where a length or count that only fits
+      # on amd64 overflows. The runner executes 386 binaries natively.
+      - name: Test on 32-bit
+        run: GOARCH=386 go test ./...
+
+      # Ten seconds a target finds nothing deep; it catches a target that
+      # crashes on its first mutations. Targets are discovered, so a new one
+      # needs no edit here; the loop is because `-fuzz` takes one package and
+      # one target per run.
+      - name: Fuzz, briefly
+        run: |
+          list="$(go test -list '^Fuzz' ./...)" || { echo "$list"; exit 1; }
+          # `-list` prints a package's targets, then its `ok <package>` line.
+          targets="$(echo "$list" | awk '/^Fuzz/ { t[n++] = $1 } /^ok/ { for (i = 0; i < n; i++) print $2 ":" t[i]; n = 0 }')"
+          if [ -z "$targets" ]; then
+            echo "found no fuzz targets in:"; echo "$list"; exit 1
+          fi
+          for target in $targets; do
+            pkg="${target%:*}" name="${target#*:}"
+            echo "== $name ($pkg)"
+            if ! go test -run '^$' -fuzz "^${name}\$" -fuzztime 10s "$pkg"; then
+              # A fuzz run cannot be replayed from its log, so print the input
+              # it saved.
+              git ls-files --others --exclude-standard '*testdata/fuzz/*' | xargs -r tail -v -n +1
+              exit 1
+            fi
+          done
+
   # Only from main, which is what the github-pages environment itself allows: a
   # tag push carries the same commit main already deployed, so letting the job
   # start only to have the environment refuse it fails the run for a deploy
@@ -313,9 +363,14 @@ jobs:
   # on main still deploys, while a pull request (refs/pull/N/merge) and a tag
   # (refs/tags/v*) do not.
   deploy:
-    needs: build
+    needs: [build, go-checks]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # One deploy at a time, and never cancel one half-done: a cancelled Pages
+    # deployment can leave the site serving a partial build.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -328,7 +383,7 @@ jobs:
   # the tests ran against. If a tag push is ever swallowed by the paths-ignore
   # filter above, running this workflow by hand on the tag reaches the same job.
   release:
-    needs: build
+    needs: [build, go-checks]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

@@ -300,7 +300,10 @@ type wideKeyed struct {
 // TestNonColbinFirstBytesAreRejected is the other half: a byte an application
 // claimed must not be mistaken for a message.
 func TestNonColbinFirstBytesAreRejected(t *testing.T) {
-	body := colbin.MustCodec[Metric]().Encode(&Metric{SeriesID: 1, At: 2, Value: 3})
+	body, err := colbin.MustCodec[Metric]().Encode(&Metric{SeriesID: 1, At: 2, Value: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for value := range 256 {
 		first := byte(value)
 		data := append([]byte{first}, body[1:]...)

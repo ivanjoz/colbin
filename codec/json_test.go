@@ -38,18 +38,35 @@ func toJSON(t *testing.T, value any) []byte {
 // sameJSON compares two documents by value, so that key order does not matter.
 // It cannot: colbin writes the fields a record carries and omits the rest, so
 // the ones that were absent come out at the end.
+//
+// Numbers are compared as the text they were written as, not as float64,
+// which would call two int64s a few units apart past 2^53 the same.
 func sameJSON(t *testing.T, got, want []byte) {
 	t.Helper()
-	var gotValue, wantValue any
-	if err := json.Unmarshal(got, &gotValue); err != nil {
+	gotValue, err := decodeExact(got)
+	if err != nil {
 		t.Fatalf("the walk produced invalid JSON: %v\n%s", err, got)
 	}
-	if err := json.Unmarshal(want, &wantValue); err != nil {
+	wantValue, err := decodeExact(want)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(gotValue, wantValue) {
 		t.Fatalf("JSON mismatch\n got %s\nwant %s", got, want)
 	}
+}
+
+func decodeExact(text []byte) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(text))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	if decoder.More() {
+		return nil, errors.New("text after the document")
+	}
+	return value, nil
 }
 
 func matchesEncodingJSON(t *testing.T, value any) {
@@ -534,7 +551,9 @@ func TestJSONSkipsAnUnknownWideKey(t *testing.T) {
 	sameJSON(t, out, []byte(`{"Head":7,"Tail":"tail"}`))
 }
 
-// Whatever arrives, the walk answers with an error rather than a panic.
+// Whatever arrives, the walk answers with an error rather than a panic — and
+// for a truncated message, it refuses exactly the cuts the typed decode does,
+// because the two read the same bytes by the same rules.
 func TestJSONHandlesGarbageWithoutPanicking(t *testing.T) {
 	values := []any{
 		&everyShape{Name: "uno", IDs: []int32{1, 2}, Words: []string{"a"}},
@@ -553,8 +572,13 @@ func TestJSONHandlesGarbageWithoutPanicking(t *testing.T) {
 						t.Fatalf("%T cut to %d panicked: %v", value, cut, panicked)
 					}
 				}()
-				_, _ = ToJSON(schema, message[:cut])
-				_, _ = DecodeAny(schema, message[:cut])
+				_, textErr := ToJSON(schema, message[:cut])
+				_, anyErr := DecodeAny(schema, message[:cut])
+				typedErr := Unmarshal(message[:cut], reflect.New(reflect.TypeOf(value).Elem()).Interface())
+				if (textErr == nil) != (typedErr == nil) || (anyErr == nil) != (typedErr == nil) {
+					t.Fatalf("%T cut to %d: ToJSON %v, DecodeAny %v, Unmarshal %v",
+						value, cut, textErr, anyErr, typedErr)
+				}
 			}()
 		}
 		// The schema of one type over the message of another, which is the
@@ -621,7 +645,9 @@ func TestTableRowCountIsNotTrusted(t *testing.T) {
 	// what 300 rows looks like on the wire. Patching it in place is deliberate:
 	// finding the offset by decoding would test the thing being corrupted.
 	count := []byte{0xFF, 0x2C, 0x01, 0x00, 0x00}
-	huge := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+	// 2^31-1 rows: far over the budget, and still an int on a 32-bit platform, so
+	// the budget is what refuses it there too rather than the size check.
+	huge := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0x7F}
 
 	for _, one := range []struct {
 		name  string

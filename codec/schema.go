@@ -22,7 +22,7 @@ package codec
 //
 //	section   := [byteLength] [structCount] structDef{structCount}
 //	structDef := [flags:1] [fieldCount] field{fieldCount}
-//	flags     := [wideKeys:1] [envelope:1] [reserved:6]
+//	flags     := [wideKeys:1] [envelope:1] [page:1] [reserved:5]
 //	field     := [key:1] [nameLen] name [desc]
 //	desc      := [op:1] extra
 //
@@ -57,9 +57,6 @@ package codec
 // struct rather than only that one, because one rule is cheaper to hold than an
 // exception.
 //
-// That is also why SetPacked5 drops this cache: packed5 is one of the two things
-// that decide a type's key width.
-//
 // # What it costs
 //
 // The `fieldOp` constants and the `mapKind` constants stop being an
@@ -86,6 +83,10 @@ const (
 	// the key width is: one rule per definition is cheaper to hold than a rule
 	// plus an exception about which definition it applies to.
 	schemaEnvelope uint8 = 0x02
+	// schemaPage says this def is a page of a paged type, linked under key 255 of
+	// the page before, so a reader building a document should write its fields
+	// into the object that links it rather than into one of its own. See pages.go.
+	schemaPage uint8 = 0x04
 )
 
 // Schema is a type described in bytes rather than in Go: what a decoder needs to
@@ -103,7 +104,6 @@ const (
 //
 // A Schema is immutable and safe for concurrent use.
 type Schema struct {
-	plan *typePlan
 	// plans is the struct table, root first, in the order the section names
 	// them. A walk needs it because a dynamic value can carry a struct *index*
 	// rather than a type — that is what keeps an array of records inside an
@@ -121,6 +121,9 @@ func (schema *Schema) Bytes() []byte {
 
 // Size is len(Bytes()) without the copy, for a caller counting bytes.
 func (schema *Schema) Size() int { return len(schema.section) }
+
+// root is the plan of the message's root, which the table always holds first.
+func (schema *Schema) root() *typePlan { return schema.plans[0] }
 
 // schemaCache holds one section per root type. Building it walks the plan and
 // allocates, and a section is a property of the type alone.
@@ -166,7 +169,7 @@ func schemaForRoot(rootType reflect.Type) (*Schema, error) {
 		return nil, err
 	}
 	builder := newSectionBuilder(plan)
-	schema := &Schema{plan: plan, plans: builder.plans, section: builder.bytes()}
+	schema := &Schema{plans: builder.plans, section: builder.bytes()}
 	schemaCache.Store(rootType, schema)
 	return schema, nil
 }
@@ -223,6 +226,9 @@ func (builder *sectionBuilder) structIndex(plan *typePlan) int {
 	if plan.envelope {
 		flags |= schemaEnvelope
 	}
+	if plan.page {
+		flags |= schemaPage
+	}
 	def := wire.AppendLength([]byte{flags}, len(plan.fields))
 	for index := range plan.fields {
 		field := &plan.fields[index]
@@ -236,15 +242,18 @@ func (builder *sectionBuilder) structIndex(plan *typePlan) int {
 
 // appendDesc writes one field's type: the op, and whatever the op does not say
 // by itself.
+//
+// A platform-width integer is named by its 64-bit op, so a section is the same
+// bytes whichever platform wrote it. See schemaOp.
 func (builder *sectionBuilder) appendDesc(dst []byte, field *planField) []byte {
-	dst = append(dst, uint8(field.op))
+	dst = append(dst, uint8(schemaOp(field.op, field.native)))
 	switch field.op {
 	case opStruct, opStructs, opPointerStruct:
 		return wire.AppendLength(dst, builder.structIndex(field.sub))
 	case opMap:
 		return append(dst, uint8(field.keyKind), uint8(field.valueKind))
 	case opPointer:
-		return append(dst, uint8(field.elemOp))
+		return append(dst, uint8(schemaOp(field.elemOp, field.native)))
 	}
 	// Everything else is named by its op alone: an array's element type is in
 	// the op, and a string and a blob are different ops.
@@ -326,10 +335,12 @@ func appendRun(dst []byte, plan *typePlan, record unsafe.Pointer) ([]byte, error
 }
 
 // appendRunInto is appendRun with the caller's scratch, which is what carries
-// the section table a dynamic value writes into.
+// the section table a dynamic value writes into. Every encode that is not the
+// flat one ends here, so this is where the scratch's column buffers go back.
 func appendRunInto(
 	dst []byte, plan *typePlan, record unsafe.Pointer, buf *scratch,
 ) ([]byte, error) {
+	defer buf.release()
 	out := appendRunBytes(dst, plan, record, buf)
 	if buf.err != nil {
 		return nil, buf.err

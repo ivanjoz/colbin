@@ -95,7 +95,7 @@ func BenchmarkCorpusSalesAppend(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		for index := range sales {
-			buffer = codec.Append(buffer[:0], &sales[index])
+			buffer, _ = codec.Append(buffer[:0], &sales[index])
 		}
 	}
 	b.ReportMetric(float64(len(sales)), "sales/op")
@@ -106,7 +106,11 @@ func BenchmarkCorpusSalesUnmarshal(b *testing.B) {
 	codec := colbin.MustCodec[Sale]()
 	encoded := make([][]byte, len(sales))
 	for index := range sales {
-		encoded[index] = codec.Encode(&sales[index])
+		message, err := codec.Encode(&sales[index])
+		if err != nil {
+			b.Fatal(err)
+		}
+		encoded[index] = message
 	}
 	var into Sale
 	b.ReportAllocs()
@@ -129,7 +133,7 @@ func BenchmarkCorpusUsersAppend(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		for index := range users {
-			buffer = codec.Append(buffer[:0], &users[index])
+			buffer, _ = codec.Append(buffer[:0], &users[index])
 		}
 	}
 	b.ReportMetric(float64(len(users)), "users/op")
@@ -143,7 +147,7 @@ func BenchmarkCorpusMetricsAppend(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		for index := range metrics {
-			buffer = codec.Append(buffer[:0], &metrics[index])
+			buffer, _ = codec.Append(buffer[:0], &metrics[index])
 		}
 	}
 	b.ReportMetric(float64(len(metrics)), "rows/op")

@@ -12,22 +12,13 @@ import "slices"
 //   - a byte with no token of its own is escaped, merged with the following
 //     unrepresentable bytes up to the escape's four-byte limit.
 //
-// There is no planning pass. The format it replaced had two behavioural header
-// flags — a default case and a number mode — which changed what the scan emitted
-// and so had to be priced before it ran, in a second full walk of the string
-// that measured 32% to 46% of encode time. Both are gone: the number token is
-// unconditional, and the case mode is carried by an ordinary CASE_TOGGLE_LONG
-// that opensUpper hoists into the header bit when it would have landed first.
-//
-// This is not a size-optimal encoder. The optimum is a shortest path over
-// (offset, case mode) nodes, which is exact but several times slower; measured
-// against it, this scan is byte-for-byte identical on every corpus of realistic
-// short strings tried, and loses a little on synthetic input where case changes
-// are dense and interleaved with symbols. encode_test.go keeps a brute-force
-// reference and pins that gap.
+// It is not size-optimal: the optimum is a shortest path over (offset, case
+// mode) nodes, several times slower. encode_test.go keeps that as an oracle and
+// bounds the gap, which is zero on realistic strings and small on synthetic
+// input where case changes are dense and interleaved with symbols.
 
-// opensUpper picks the case mode the stream starts in, which the header carries
-// for free in one bit.
+// opensUpper picks the case mode the stream starts in, which the container
+// carries in one bit.
 //
 // The rule is the first letter's case, and it is never worse than starting
 // lower. Take the leading run of k letters in the opposite case to lower: paying
@@ -35,10 +26,6 @@ import "slices"
 // where starting in that mode costs k plus the one toggle that returns. Those
 // are equal at k>=3 and strictly better below it, and after the run both
 // encoders are in the same mode with the same string left.
-//
-// What it replaces is a header flag whose value could only be found by pricing
-// the whole string twice. A scan to the first letter is a few bytes on anything
-// this codec is for.
 func opensUpper(s string) bool {
 	for i := range len(s) {
 		if isLetter(s[i]) {
@@ -156,18 +143,17 @@ func (w *writer) tokenize(s string, upper bool) {
 	}
 }
 
-// AppendPayload appends the packed unit stream for s onto out — no header, no
-// length — and reports the payload's byte length and the case mode it opens in.
+// AppendPayload appends the packed unit stream for s onto out and reports the
+// payload's byte length and the case mode it opens in. The caller stores both:
+// AppendString needs them to read the payload back.
 //
 // ok is false when the packed form would not be smaller than the raw bytes, in
-// which case out is returned with nothing appended. The encoder discovers that
-// by writing into a buffer bounded at len(s) and noticing when it runs out, so
-// the answer costs a bounds test per group rather than a pass of its own.
+// which case out is returned with nothing appended and the caller writes s raw.
+// The encoder finds that out by writing into a buffer bounded at len(s) and
+// noticing when it runs out, so the answer costs a bounds test per group rather
+// than a pass of its own.
 //
-// It exists for a container that already carries a length and a place to record
-// the case mode — a colbin BLOB descriptor does both — so that an embedded
-// string need not repeat them in a frame header of its own. Append is this plus
-// that header.
+// With eight bytes of spare capacity past len(out)+len(s), it does not allocate.
 func AppendPayload(out []byte, s string) (buf []byte, n int, upper, ok bool) {
 	if len(s) == 0 {
 		return out, 0, false, false
@@ -185,90 +171,4 @@ func AppendPayload(out []byte, s string) (buf []byte, n int, upper, ok bool) {
 		return out, 0, false, false
 	}
 	return w.buf[:end], end - start, upper, true
-}
-
-// Append encodes s as one self-delimiting frame appended to out and returns the
-// extended slice.
-//
-// The packed form is used only when its frame is strictly smaller than the raw
-// frame, so Append never inflates a string: the result is never longer than
-// len(s) plus the framing bytes.
-func Append(out []byte, s string) []byte {
-	if len(s) == 0 {
-		return append(out, 0) // raw, empty payload
-	}
-	// One byte of header is reserved before the payload so that the stream can
-	// be written straight into the caller's slice. Reserving is what a fused
-	// encoder trades for the planning pass it does not run: the length is known
-	// after the walk rather than before it, and the rare payload that outgrows
-	// the header's five length bits pays a memmove for the uvarint.
-	start := len(out)
-	out = append(out, 0)
-	// ok already means the payload is strictly shorter than the raw bytes, and
-	// frameOverhead never shrinks as a length grows, so the packed frame is
-	// smaller whenever the payload is.
-	out, n, upper, ok := AppendPayload(out, s)
-	if !ok {
-		return append(appendHeader(out[:start], 0, len(s)), s...)
-	}
-
-	flags := byte(flagPacked5)
-	if upper {
-		flags |= flagUppercase
-	}
-	if n <= lenInline {
-		out[start] = flags | byte(n)<<lenShift
-		return out
-	}
-	k := uvarintLen(n)
-	out = slices.Grow(out, k)[:len(out)+k]
-	copy(out[start+1+k:], out[start+1:len(out)-k])
-	out[start] = flags | lenEscape<<lenShift
-	appendUvarint(out[start+1:start+1], n)
-	return out
-}
-
-// Size returns the number of bytes Append would add for s.
-//
-// The walk is the encoding, so this packs into a scratch buffer and keeps only
-// the length. A caller that wants the size and then the bytes should use
-// AppendPayload, which produces both from one pass.
-func Size(s string) int {
-	if len(s) == 0 {
-		return 1
-	}
-	raw := frameOverhead(len(s)) + len(s)
-	// The walk is the encoding, so this packs the payload and keeps only its
-	// length. It builds its own writer rather than calling AppendPayload so that
-	// the scratch stays on the stack: a buffer handed to a function that returns
-	// it escapes, and a 256-byte allocation per call is not what Size is for.
-	var stack [sizeScratchBytes]byte
-	buf := stack[:]
-	if need := len(s) + 8; need > len(buf) {
-		buf = make([]byte, need)
-	}
-	w := writer{buf: buf, limit: len(s)}
-	w.tokenize(s, opensUpper(s))
-	n, ok := w.finish()
-	if !ok {
-		return raw
-	}
-	if packed := frameOverhead(n) + n; packed < raw {
-		return packed
-	}
-	return raw
-}
-
-// sizeScratchBytes is the stack buffer Size packs into. A payload is never
-// larger than the string, so this covers every string up to 248 bytes.
-const sizeScratchBytes = 256
-
-// appendHeader writes the header byte and, when the payload length outgrows the
-// header's five length bits, the uvarint that carries it.
-func appendHeader(out []byte, flags byte, payloadLen int) []byte {
-	if payloadLen <= lenInline {
-		return append(out, flags|byte(payloadLen)<<lenShift)
-	}
-	out = append(out, flags|lenEscape<<lenShift)
-	return appendUvarint(out, payloadLen)
 }

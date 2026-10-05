@@ -24,11 +24,13 @@
 //
 // A field id is four bits or eight, chosen per key run rather than per message.
 // Four is the default and the fast path. Eight costs a byte per present field
-// and buys 256 ids, the ability to skip a field the reader has never heard of,
-// and the packed5 string encoding.
+// and buys 255 ids, and the ability to skip a field the reader has never heard
+// of. A type numbered past 255 is split into pages of 255, each linking the next
+// under key 255 (codec/pages.go).
 //
-// A type goes wide when it has a field id above sixteen, or when SetPacked5 is
-// on and it has a string to spend it on. Nothing else changes.
+// A type goes wide when it has a field id above sixteen, a field without a
+// numeric tag (whose id is a hash of its name), or an `any`. Nothing else
+// changes.
 //
 // # Layers
 //

@@ -467,7 +467,7 @@ func TestADynamicCycleIsRefused(t *testing.T) {
 
 	// And nesting that is merely deep still goes.
 	var deep any = 1
-	for range maxDynamicDepth / 2 {
+	for range maxSchemaDepth / 2 {
 		deep = map[string]any{"d": deep}
 	}
 	if _, err := MarshalSelfDescribing(map[string]any{"deep": deep}); err != nil {
@@ -523,11 +523,17 @@ func TestATypedValueWithoutATableIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The out-of-band schema for this type describes the map and nothing else —
-	// the struct only exists in the value — so it cannot resolve the tag.
+	// the struct only exists in the value — so it cannot resolve the tag. The
+	// message's own section would, and would be preferred, so it is cut off.
 	schema, err := SchemaOf(value)
 	if err != nil {
 		t.Fatal(err)
 	}
+	section, body, _, ok := rootParts(data)
+	if !ok || section == nil {
+		t.Fatalf("not a self-describing message: %x", data)
+	}
+	data = append([]byte{data[0] &^ rootSchema}, body...)
 	if _, err := ToJSON(schema, data); err == nil {
 		t.Fatal("a tag was resolved against a table that does not hold it")
 	} else if !strings.Contains(err.Error(), "names struct") {
@@ -535,21 +541,24 @@ func TestATypedValueWithoutATableIsRefused(t *testing.T) {
 	}
 }
 
-// AppendChecked is where a Codec[T] hears about a dynamic failure, since Append
-// has nowhere to put one.
-func TestCodecAppendChecked(t *testing.T) {
+// A Codec[T] hears about a dynamic failure, and leaves the buffer it was handed
+// as it was rather than holding half a message.
+func TestCodecAppendReportsADynamicFailure(t *testing.T) {
 	codec := MustCodec[carrier]()
 	good := carrier{Name: "ok", One: 1}
-	if _, err := codec.AppendChecked(nil, &good); err != nil {
+	if _, err := codec.Append(nil, &good); err != nil {
 		t.Fatalf("a carriable value failed: %v", err)
 	}
 	bad := carrier{One: make(chan int)}
-	if _, err := codec.AppendChecked(nil, &bad); err == nil {
+	prefix := []byte("kept")
+	data, err := codec.Append(prefix, &bad)
+	if err == nil {
 		t.Fatal("a chan was encoded")
 	}
-	// Append still writes something, and what it writes still decodes — it is
-	// the error that is lost, not the message.
-	if data := codec.Append(nil, &bad); len(data) == 0 {
-		t.Fatal("Append wrote nothing at all")
+	if string(data) != "kept" {
+		t.Fatalf("a failed Append returned %q, not the buffer it was given", data)
+	}
+	if _, err := codec.Encode(&bad); err == nil {
+		t.Fatal("Encode encoded a chan")
 	}
 }

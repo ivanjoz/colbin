@@ -106,6 +106,19 @@ pub(crate) const SIZE_CODE_8BYTES: u8 = 7;
 /// Maps a size code to its byte count.
 pub(crate) const MAGNITUDE_WIDTH: [usize; 8] = [0, 1, 2, 3, 4, 5, 6, 8];
 
+/// Applies a sign to a magnitude, or `None` when the result is past `i64`: a
+/// magnitude of 2^63 is `i64::MIN` when negative and too wide when positive.
+#[allow(clippy::cast_possible_wrap)]
+pub(crate) fn signed(positive: bool, magnitude: u64) -> Option<i64> {
+    if positive {
+        return i64::try_from(magnitude).ok();
+    }
+    if magnitude > 1 << 63 {
+        return None;
+    }
+    Some((magnitude as i64).wrapping_neg())
+}
+
 // Array element width codes.
 pub(crate) const WIDTH_CODE_1BYTE: u8 = 0;
 pub(crate) const WIDTH_CODE_2BYTES: u8 = 1;

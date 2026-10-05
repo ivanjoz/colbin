@@ -2,9 +2,52 @@ package codec
 
 import (
 	"bytes"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+// must unwraps an encode a test expects to succeed. A panic fails the test, and
+// keeps the call a single expression.
+func must[T any](value T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return value
+}
+
+// checkPrefixes decodes every proper prefix of original's message into a fresh
+// T, with decode. A prefix has to be refused unless it ends between two
+// top-level fields — and then it is a message in its own right, holding the
+// original's first fields exactly and nothing after them. Anything else is a
+// decode that read a field the bytes did not hold.
+func checkPrefixes[T any](t *testing.T, original *T, decode func([]byte, *T) error) {
+	t.Helper()
+	message, err := Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := reflect.ValueOf(original).Elem()
+	for cut := range len(message) {
+		var back T
+		if decode(message[:cut], &back) != nil {
+			continue
+		}
+		got := reflect.ValueOf(&back).Elem()
+		ended := false
+		for index := range got.NumField() {
+			if got.Field(index).IsZero() {
+				ended = ended || !want.Field(index).IsZero()
+				continue
+			}
+			if ended || !reflect.DeepEqual(got.Field(index).Interface(), want.Field(index).Interface()) {
+				t.Fatalf("a cut at %d of %d decoded without an error, to %+v", cut, len(message), back)
+			}
+		}
+	}
+}
+
+func unmarshalInto[T any](data []byte, into *T) error { return Unmarshal(data, into) }
 
 type charge struct {
 	CompanyID    int32  `cb:"1"`
@@ -137,10 +180,6 @@ func TestAppendsOntoTheCallersBuffer(t *testing.T) {
 	}
 }
 
-type untagged struct {
-	CompanyID int32
-}
-
 type tooManyFields struct {
 	First int32 `cb:"1"`
 	Last  int32 `cb:"17"`
@@ -159,9 +198,9 @@ type zeroID struct {
 	First int32 `cb:"0"`
 }
 
-// pastOneByte is one id past what a key holds — 256 of them, counted from one.
-type pastOneByte struct {
-	First int32 `cb:"257"`
+// pastThePages is one id past what the last page holds. See pages.go.
+type pastThePages struct {
+	First int32 `cb:"4081"`
 }
 
 // sixteenFields is the widest a narrow record gets: ids 1..16 over keys 0..15.
@@ -182,10 +221,6 @@ type sixteenFields struct {
 	F14 int32 `cb:"14"`
 	F15 int32 `cb:"15"`
 	F16 int32 `cb:"16"`
-}
-
-type nested struct {
-	Inner charge `cb:"1"`
 }
 
 // A pointer to a scalar is carried — see pointer.go. A pointer to a composite
@@ -234,15 +269,15 @@ func TestManyFieldsGoWideRatherThanBeingRefused(t *testing.T) {
 }
 
 // Ids count from one and keys count from zero, and assignKeys is the only place
-// the two meet. So the sixteen a nibble holds are ids 1..16, the first of them
-// writes key 0, and the type still takes the narrow path at its sixteenth field.
+// the two meet. So the sixteen a nibble holds are ids 1..16, FieldIDs reports
+// them as such, and the type still takes the narrow path at its sixteenth field.
 func TestFieldIDsCountFromOne(t *testing.T) {
 	ids, err := FieldIDs(sixteenFields{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ids) != 16 || ids["F1"] != 0 || ids["F16"] != 15 {
-		t.Fatalf("ids 1..16 resolved to keys %v", ids)
+	if len(ids) != 16 || ids["F1"] != 1 || ids["F16"] != 16 {
+		t.Fatalf("ids 1..16 reported as %v", ids)
 	}
 	message, err := Marshal(&sixteenFields{F16: 9})
 	if err != nil {
@@ -269,7 +304,7 @@ func TestRefusesIDsOutsideTheOneBasedRange(t *testing.T) {
 		wants string
 	}{
 		{zeroID{}, "one-based"},
-		{pastOneByte{}, "1..256"},
+		{pastThePages{}, "1..4080"},
 	} {
 		_, err := Marshal(testCase.value)
 		if err == nil {
@@ -308,12 +343,12 @@ func TestRefusesAKeyTheTypeDoesNotDeclare(t *testing.T) {
 	}
 }
 
-func TestFieldIDsReportsTheWireKeys(t *testing.T) {
+func TestFieldIDsReportsTheTagIDs(t *testing.T) {
 	ids, err := FieldIDs(charge{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ids["CompanyID"] != 0 || ids["Access2"] != 7 || len(ids) != 8 {
+	if ids["CompanyID"] != 1 || ids["Access2"] != 8 || len(ids) != 8 {
 		t.Fatalf("ids are %v", ids)
 	}
 }

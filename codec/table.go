@@ -16,9 +16,16 @@ package codec
 // classes — so the reader dispatches on what it finds and never has to be told
 // which was chosen.
 //
-// That is the old standard-vs-compact mode decision, except that it is now made
-// per field rather than per message. A record can hold a three-element list and
-// a ten-thousand-row table and get both right.
+// A record can hold a three-element list and a ten-thousand-row table and get
+// both right.
+//
+// # Column keys take the wider of two widths
+//
+// A table's columns are a key run, and its width is the wider of the enclosing
+// run's and the row type's: under a wide parent the columns are always wide, and
+// under a narrow one they are as wide as the row type needs — a row with an id
+// past sixteen has a column key four bits cannot hold. A reader takes the row
+// type's width from the schema, as it does a narrow list element's.
 //
 // # Not every slice can be a table
 //
@@ -28,7 +35,9 @@ package codec
 // it gets. That is a property of the element type, so the plan resolves it once.
 
 import (
+	"errors"
 	"math"
+	"sync"
 	"unsafe"
 
 	"github.com/ivanjoz/colbin/wire"
@@ -64,19 +73,19 @@ func (plan *typePlan) transposable() bool {
 	return len(plan.fields) > 0
 }
 
-// scratch is what an encode carries beside the buffer it is writing into. One
-// per message, threaded down the whole walk.
+// scratch is what an encode or a decode carries beside its buffer. One per
+// message, threaded down the whole walk.
 //
-// Most of it is the transposition buffer: one column, reused across the columns
-// of a table and across tables in the same message, because a column is read out
-// of it and into the wire before the next is gathered.
-//
-// The rest is what a dynamic value needs, and it is here rather than in a second
-// parameter because this is already the thing every writer is handed. See
-// dynamic.go.
+// It holds the transposition buffer — one column, reused across the columns of
+// a table and across tables in the same message, because a column goes out of
+// it before the next comes in — and the bounds a walk is held to: its depth, and
+// on decode the rows its tables may still declare. The rest is what a dynamic
+// value needs, and it is here rather than in a second parameter because this is
+// already the thing every walk is handed. See dynamic.go.
 type scratch struct {
-	ints    []int64
-	strings []string
+	columns *columnBuffers
+	// rowsLeft is a decode's row budget. See rowBudget.
+	rowsLeft int
 	// section is the struct table being built, when the message is carrying one.
 	// A dynamic struct adds itself to it and writes the index; nil means there is
 	// nowhere to put a def, and such a struct goes out as a map of names.
@@ -87,13 +96,45 @@ type scratch struct {
 	rawSection []byte
 	plans      []*typePlan
 	planned    bool
-	// depth bounds how far a dynamic value is followed, because `m["self"] = m`
-	// is a value a caller can build.
+	// depth bounds how far a walk descends, because nesting is data: a decode
+	// nests as deep as the message says, and an encode as deep as the value,
+	// which `n.Next = n` or `m["self"] = m` makes forever.
 	depth int
-	// err is the first failure. The writers cannot return one — they are shaped
-	// around never needing to — so it is recorded here and the entry points in
-	// codec.go hand it back.
+	// err is an encode's first failure. The writers cannot return one — they are
+	// shaped around never needing to — so it is recorded here and the entry
+	// points in codec.go hand it back. A decode records its failures on the
+	// reader instead, and mirrors them here so that enter stops it too.
 	err error
+}
+
+// columnBuffers is the transposition buffer, pooled across messages: a table of
+// a thousand rows needs 24 KB of it, which a handle encoding one message after
+// another would otherwise allocate per call.
+type columnBuffers struct {
+	ints    []int64
+	strings []string
+}
+
+var columnPool sync.Pool // *columnBuffers
+
+// maxPooledRows is the largest buffer the pool keeps, so that one huge table
+// does not pin its memory for the life of the process.
+const maxPooledRows = 1 << 16
+
+// release hands the transposition buffer back. Every scratch that may have
+// reserved one is released when its message is done.
+func (buf *scratch) release() {
+	columns := buf.columns
+	if columns == nil {
+		return
+	}
+	buf.columns = nil
+	if cap(columns.ints) > maxPooledRows || cap(columns.strings) > maxPooledRows {
+		return
+	}
+	// The strings are the caller's, and a pooled buffer must not keep them alive.
+	clear(columns.strings[:cap(columns.strings)])
+	columnPool.Put(columns)
 }
 
 // structPlans is the struct table a TYPED value indexes into, parsed from the
@@ -125,12 +166,17 @@ func (buf *scratch) fail(err error) {
 	}
 }
 
-// enter and leave bound a dynamic value's nesting. enter answers false at the
-// limit, and the caller writes a null in place of what it could not follow —
-// the message is abandoned anyway, since err is set.
+// enter and leave bound a walk's nesting. enter answers false at the limit, and
+// once anything has failed: a walk that has failed is unwinding, and descending
+// further would only do work — exponential work, for a value that reaches one
+// thing twice. A caller that cannot follow writes nothing, or a null, in place;
+// the message is abandoned anyway.
 func (buf *scratch) enter() bool {
-	if buf.depth >= maxDynamicDepth {
-		buf.fail(errDynamicDepth)
+	if buf.err != nil {
+		return false
+	}
+	if buf.depth >= maxSchemaDepth {
+		buf.fail(errTooDeep)
 		return false
 	}
 	buf.depth++
@@ -139,38 +185,65 @@ func (buf *scratch) enter() bool {
 
 func (buf *scratch) leave() { buf.depth-- }
 
-// reserve grows the transposition buffers to hold one column of rows rows.
+// reserve grows the transposition buffers to hold one column of rows rows, the
+// strings one only when the table has a string column.
 //
 // Growing them column by column instead cost twenty-one allocations on a
 // thousand-row table — the buffers are reused across columns and across tables,
 // so the only growth that should ever happen is the first one.
-func (buf *scratch) reserve(rows int) {
-	if cap(buf.ints) < rows {
-		buf.ints = make([]int64, 0, rows)
+func (buf *scratch) reserve(rows int, strings bool) *columnBuffers {
+	columns := buf.columns
+	if columns == nil {
+		columns, _ = columnPool.Get().(*columnBuffers)
+		if columns == nil {
+			columns = &columnBuffers{}
+		}
+		buf.columns = columns
 	}
-	if cap(buf.strings) < rows {
-		buf.strings = make([]string, 0, rows)
+	if cap(columns.ints) < rows {
+		columns.ints = make([]int64, 0, rows)
 	}
+	if strings && cap(columns.strings) < rows {
+		columns.strings = make([]string, 0, rows)
+	}
+	return columns
+}
+
+// hasStringColumn says a row type has a string field, which is what needs the
+// strings half of the transposition buffer.
+func (plan *typePlan) hasStringColumn() bool {
+	for index := range plan.fields {
+		if plan.fields[index].op == opString {
+			return true
+		}
+	}
+	return false
 }
 
 // appendTableField writes a slice of structs transposed: one keyed column per
 // field of the element type.
 func appendTableField(writer *wire.Writer8, field *planField, at unsafe.Pointer, buf *scratch) {
 	slice := (*sliceHeader)(at)
-	rows := slice.len
-	buf.reserve(rows)
-	mark := writer.OpenTable(field.key, rows)
-	for index := range field.sub.fields {
-		column := &field.sub.fields[index]
+	mark := writer.OpenTable(field.key, slice.len)
+	appendColumns(writer, field.sub, slice, field.stride, buf)
+	writer.Close(mark)
+}
+
+// appendColumns writes a table's columns with eight-bit keys, which is every
+// table under a wide parent, one under a narrow parent whose rows are wide, and
+// one in a dynamic value.
+func appendColumns(writer *wire.Writer8, plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratch) {
+	columns := buf.reserve(slice.len, plan.hasStringColumn())
+	for index := range plan.fields {
+		column := &plan.fields[index]
 		if column.op == opString {
-			buf.strings = gatherStrings(buf.strings[:0], slice, field.stride, column.offset)
-			writer.StringColumn(column.key, buf.strings)
+			columns.strings = gatherStrings(columns.strings[:0], slice, stride, column.offset)
+			writer.StringColumn(column.key, columns.strings)
 			continue
 		}
-		buf.ints = gatherInts(buf.ints[:0], slice, field.stride, column)
-		writer.Column(column.key, buf.ints)
+		columns.ints = gatherInts(columns.ints[:0], slice, stride, column)
+		writer.Column(column.key, columns.ints)
 	}
-	writer.Close(mark)
 }
 
 // gatherInts reads one field out of every row, widened to int64. A float's bit
@@ -227,33 +300,40 @@ func readTableField(reader *wire.Reader8, field *planField, at unsafe.Pointer, b
 	if !ok {
 		return
 	}
-	if rows > maxTableRows {
-		reader.Fail(errTooManyRows)
+	readColumns(&columns, field, at, rows, buf)
+	reader.Fail(columns.Err())
+}
+
+// readColumns fills a slice of structs from a table's eight-bit-keyed columns,
+// after spending its rows from the message's budget.
+func readColumns(columns *wire.Reader8, field *planField, at unsafe.Pointer, rows int, buf *scratch) {
+	if err := takeRows(&buf.rowsLeft, rows, len(field.sub.fields)); err != nil {
+		columns.Fail(err)
 		return
 	}
-	buf.reserve(rows)
+	scratchColumns := buf.reserve(rows, field.sub.hasStringColumn())
 	newSlice(field, at, rows)
 	data := (*sliceHeader)(at).data
-
 	for columns.More() {
 		column := field.sub.find(columns.Key())
 		if column == nil {
-			if !columns.Skip() {
-				reader.Fail(columns.Err())
-				return
-			}
+			columns.Skip()
 			continue
 		}
 		if column.op == opString {
-			buf.strings = columns.Strings(buf.strings[:0])
-			scatterStrings(buf.strings, data, field.stride, column.offset, rows)
+			scratchColumns.strings = columns.Strings(scratchColumns.strings[:0])
+			if columns.Err() == nil && len(scratchColumns.strings) != rows {
+				columns.Fail(errColumnLength)
+			}
+			scatterStrings(scratchColumns.strings, data, field.stride, column.offset, rows)
 			continue
 		}
-		buf.ints = columns.Column(rows, buf.ints[:0])
-		scatterInts(buf.ints, data, field.stride, column, rows)
+		scratchColumns.ints = columns.Column(rows, scratchColumns.ints[:0])
+		scatterInts(scratchColumns.ints, data, field.stride, column, rows)
 	}
-	reader.Fail(columns.Err())
 }
+
+var errColumnLength = errors.New("colbin: a table column holds a different number of values than the table has rows")
 
 func scatterInts(values []int64, data unsafe.Pointer, stride uintptr, column *planField, rows int) {
 	if len(values) < rows {

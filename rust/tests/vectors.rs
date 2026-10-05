@@ -251,6 +251,36 @@ fn lines(count: usize) -> Vec<Line> {
         .collect()
 }
 
+/// A row type with an id past sixteen, so eight-bit keys, under a parent with
+/// four-bit ones: its table's columns keep the rows' width.
+#[derive(Colbin, Debug, PartialEq, Clone)]
+struct WideLine {
+    #[cb(1)]
+    sku: String,
+    #[cb(2)]
+    quantity: i32,
+    #[cb(20)]
+    cents: i64,
+}
+
+#[derive(Colbin, Debug, PartialEq)]
+struct Ledger {
+    #[cb(1)]
+    id: u32,
+    #[cb(2)]
+    lines: Vec<WideLine>,
+}
+
+fn wide_lines(count: usize) -> Vec<WideLine> {
+    (0..count)
+        .map(|index| WideLine {
+            sku: format!("W-{index}"),
+            quantity: index as i32 + 1,
+            cents: index as i64 * 1001,
+        })
+        .collect()
+}
+
 #[test]
 fn charge_cases() {
     check("charge.zero", &Charge::colbin_zero());
@@ -398,6 +428,20 @@ fn composite_cases() {
         &Order {
             id: 2,
             ..Order::colbin_zero()
+        },
+    );
+    check(
+        "ledger.wide rows table",
+        &Ledger {
+            id: 3,
+            lines: wide_lines(20),
+        },
+    );
+    check(
+        "ledger.wide rows list",
+        &Ledger {
+            id: 4,
+            lines: wide_lines(3),
         },
     );
 }

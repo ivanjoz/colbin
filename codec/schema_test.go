@@ -115,15 +115,15 @@ func TestSchemaRoundTripsThroughItsSection(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseSchema(%T): %v", value, err)
 		}
-		samePlan(t, fmt.Sprintf("%T", value), parsed.plan, built.plan,
+		samePlan(t, fmt.Sprintf("%T", value), parsed.root(), built.root(),
 			map[[2]*typePlan]bool{})
-		if !parsed.plan.fromSchema {
+		if !parsed.root().fromSchema {
 			t.Fatalf("%T: a parsed plan is not marked as one, and its offsets are zero",
 				value)
 		}
 		// Serialising what was parsed has to give the bytes back, or the two
 		// sides do not agree on what the section says.
-		if again := newSectionBuilder(parsed.plan).bytes(); !bytes.Equal(again, built.section) {
+		if again := newSectionBuilder(parsed.root()).bytes(); !bytes.Equal(again, built.section) {
 			t.Fatalf("%T: re-serialising the parsed plan gave\n%x\nwant\n%x",
 				value, again, built.section)
 		}

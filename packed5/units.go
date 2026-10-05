@@ -10,22 +10,22 @@ import "encoding/binary"
 // overshoots are the three the next group rewrites. The reader is the mirror:
 // one unaligned load, eight shifts, advance five.
 //
-// Measured against the bit accumulator this replaces — which drained 32 bits at
-// a time, so it was already writing whole bytes — that is 3.4x on the write side
-// and 5.5x on the read side, for byte-identical output. See
-// experiments/stringpack for the isolated kernel benchmark.
-//
 // The cost is slack. A writer needs eight spare bytes past the payload it is
-// building, which slices.Grow supplies; a reader needs up to seven readable past
-// the payload, which in a column of back-to-back frames comes from the next
-// frame and at the very end comes from the bounded tail path below.
+// building, which AppendPayload reserves; a reader wants up to seven readable
+// past the payload, which AppendString takes from whatever follows it in src and
+// otherwise supplies with a bounded copy of the last few bytes.
 
-// writer packs units into a caller-supplied buffer.
+// writer packs units into a caller-supplied buffer, which must leave eight bytes
+// past limit for the final store to overshoot into.
 //
 // limit is the byte position the payload may not pass. The packed form is only
-// ever used when it beats the raw bytes, so bounding the buffer by the raw
-// length is both the allocation bound and the early-out: a stream that would not
-// have been kept stops being written the moment it grows past its own budget.
+// used when it beats the raw bytes, so bounding the buffer by the raw length is
+// both the allocation bound and the early-out: a stream that would not be kept
+// stops being written the moment it passes its budget.
+//
+// Build it as a literal rather than through a reset method: storing a slice into
+// a struct through a pointer receiver leaks it as far as escape analysis is
+// concerned, which would push a caller's stack buffer onto the heap.
 type writer struct {
 	buf   []byte
 	p     int // next byte to write
@@ -35,14 +35,6 @@ type writer struct {
 	units int
 	over  bool // the packed form passed limit; the caller must fall back to raw
 }
-
-// A writer is built as a literal rather than through a reset method: storing a
-// slice into a struct through a pointer receiver is an unconditional leak as far
-// as escape analysis is concerned, and that is enough to push a caller's stack
-// scratch onto the heap. See Size, which depends on it staying there.
-//
-// The caller owns the buffer and must leave eight bytes past limit for the final
-// store to overshoot into.
 
 // put appends one unit. Every eighth one stores a group; the rest are a shift,
 // an or and an increment.
@@ -65,10 +57,9 @@ func (w *writer) put(v uint8) {
 // the payload byte length. It reports false when the stream passed its budget,
 // in which case nothing it wrote may be used.
 func (w *writer) finish() (int, bool) {
-	// One trailing CASE_TOGGLE_SIMPLE lands the stream on the grid when the byte
-	// rounding leaves room for a unit the tokens did not fill. It applies to no
-	// letter, so it decodes to nothing, and it cannot grow the payload: the gap
-	// exists exactly when 5*(units+1) still fits in the same number of bytes.
+	// The grid pad: a trailing CASE_TOGGLE_SIMPLE applies to no letter, so it
+	// decodes to nothing, and it is only added when 5*(units+1) bits still fit in
+	// the same number of bytes.
 	if payloadUnits(payloadBytes(w.units)) > w.units {
 		w.put(opCaseSimple)
 	}

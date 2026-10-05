@@ -1,12 +1,11 @@
 package codec
 
-// Nested structs and slices of them, over the composites in wire/composite.go.
+// Nested structs and slices of them under eight-bit keys, over the composites in
+// wire/composite.go. narrow_composite.go is the same under four.
 //
-// A composite carries a byte length, and a byte length is a wide-key idea: four
-// descriptor bits have no room for a class, so nothing narrow can size a field
-// it cannot classify. A type with a nested struct therefore goes wide, the same
-// way a type with a field id past sixteen does — it is not a mode, it is the
-// width the type needs.
+// The key width is a property of each run, not of the message: a nested run
+// says its own in the descriptor that opens it, so a wide record can hold a
+// narrow struct and the other way round.
 //
 // # Recursion
 //
@@ -26,17 +25,22 @@ import (
 
 // appendStructField writes a nested struct under key.
 func appendStructField(writer *wire.Writer8, field *planField, at unsafe.Pointer, buf *scratch) {
+	var mark wire.Mark
 	if field.sub.isWide {
-		mark := writer.OpenStructWide(field.key)
+		mark = writer.OpenStructWide(field.key)
 		appendWide(writer, field.sub, at, buf)
-		writer.Close(mark)
+	} else {
+		// A nested run whose ids all fit four bits uses them, which is a byte per
+		// present field: the key width is a property of the scope, so the outer
+		// run being wide says nothing about the inner one.
+		mark = writer.OpenStruct(field.key)
+		appendNarrowInto(writer, field.sub, at, buf)
+	}
+	// A page is the one struct an empty body leaves out. See pages.go.
+	if field.sub.page {
+		writer.CloseNonEmpty(mark)
 		return
 	}
-	// A nested run whose ids all fit four bits uses them, which is a byte per
-	// present field: the key width is a property of the scope, so the outer run
-	// being wide says nothing about the inner one.
-	mark := writer.OpenStruct(field.key)
-	appendNarrowInto(writer, field.sub, at, buf)
 	writer.Close(mark)
 }
 
@@ -88,6 +92,11 @@ func appendStructsField(writer *wire.Writer8, field *planField, at unsafe.Pointe
 	if slice.len == 0 {
 		return
 	}
+	// A list or a table is a level of depth of its own, as it is to every reader.
+	if !buf.enter() {
+		return
+	}
+	defer buf.leave()
 	if field.sub.canTable && slice.len >= tableThreshold {
 		appendTableField(writer, field, at, buf)
 		return
@@ -127,22 +136,18 @@ func readBody(parent *wire.Reader8, body []byte, wideKeys bool, plan *typePlan, 
 		return
 	}
 	sub := wire.NewReader(body)
-	for sub.More() {
-		field := plan.find(sub.Key())
-		if field == nil {
-			// A narrow key cannot be skipped, so an unknown one ends the run
-			// rather than being stepped over. See unmarshalNarrow.
-			parent.Fail(wire.ErrBadDescriptor)
-			return
-		}
-		readField(&sub, field, at, buf)
-	}
+	readNarrowRun(&sub, plan, at, buf)
 	parent.Fail(sub.Err())
 }
 
 // readStructsField reads a slice of nested structs, allocating it at the count
 // the message declares.
 func readStructsField(reader *wire.Reader8, field *planField, at unsafe.Pointer, buf *scratch) {
+	if !buf.enter() {
+		reader.Fail(buf.err)
+		return
+	}
+	defer buf.leave()
 	// The writer chose between a list and a table on the row count, and the two
 	// are different classes, so the reader dispatches on what is actually there
 	// rather than on anything it was told.
@@ -164,10 +169,16 @@ func readStructsField(reader *wire.Reader8, field *planField, at unsafe.Pointer,
 		}
 		readBody(reader, body, wideKeys, field.sub,
 			unsafe.Add(data, uintptr(index)*field.stride), buf)
+		if reader.Err() != nil {
+			return
+		}
 	}
 }
 
-// newSlice allocates a slice of count elements into the field.
+// newSlice allocates a slice of count elements into the field. The count has
+// been checked against the message — wire refuses a list declaring more
+// elements than its bytes hold, and a table's rows come out of the message's
+// budget — so what this allocates is bounded by the message and the type.
 //
 // It is published into the field before it is filled, not after: a
 // reflect.MakeSlice result is not addressable, and the field is what keeps the
@@ -182,6 +193,11 @@ func newSlice(field *planField, at unsafe.Pointer, count int) {
 // readRun fills a record from a key run, which is what a nested struct's body
 // is. It is the shared body of unmarshalWide and of every nested read under it.
 func readRun(reader *wire.Reader8, plan *typePlan, record unsafe.Pointer, buf *scratch) {
+	if !buf.enter() {
+		reader.Fail(buf.err)
+		return
+	}
+	defer buf.leave()
 	for reader.More() {
 		field := plan.find(reader.Key())
 		if field == nil {

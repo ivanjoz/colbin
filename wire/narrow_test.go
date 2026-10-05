@@ -147,21 +147,20 @@ func TestNothingHasASizeCeiling(t *testing.T) {
 // escape code this version does not assign, and a size the message does not
 // contain.
 func TestARunawaySizeIsRefused(t *testing.T) {
-	if maxInt == math.MaxInt64 {
-		// Key 1, more flag, the eight-byte escape, then a size filling all of it.
-		message := []byte{0b0001_1000 | escape8Bytes}
-		for range 8 {
-			message = append(message, 0xFF)
-		}
-		reader := NewReader(message)
-		reader.Bytes()
-		if reader.Err() != ErrSizeTooLarge {
-			t.Fatalf("a size past the address space gave %v", reader.Err())
-		}
+	// Key 1, more flag, the eight-byte escape, then a size filling all of it —
+	// past the address space at either int width.
+	message := []byte{0b0001_1000 | escape8Bytes}
+	for range 8 {
+		message = append(message, 0xFF)
+	}
+	reader := NewReader(message)
+	reader.Bytes()
+	if reader.Err() != ErrSizeTooLarge {
+		t.Fatalf("a size past the address space gave %v", reader.Err())
 	}
 
 	// An escape code this version does not assign.
-	reader := NewReader([]byte{0b0001_1000 | 5, 0, 0, 0, 0})
+	reader = NewReader([]byte{0b0001_1000 | 5, 0, 0, 0, 0})
 	reader.Bytes()
 	if reader.Err() != ErrBadEscape {
 		t.Fatalf("an unassigned escape gave %v", reader.Err())
@@ -281,18 +280,18 @@ func TestStringArrayRoundTrip(t *testing.T) {
 	}
 }
 
-// The compile-time assertion the writer's doc comment prescribes, standing in for
-// the runtime check it deliberately does not do.
-const _ = uint(15 - 15)
-
-// Every prefix of a valid message must fail rather than decode something: a
-// length that runs past the buffer is the one thing a wire parser must never
-// act on.
+// Every prefix of a valid message must fail rather than decode something,
+// unless it ends between two fields: a length that runs past the buffer is the
+// one thing a wire parser must never act on.
 func TestTruncatedMessagesAreRefused(t *testing.T) {
 	writer := Writer{}
+	between := map[int]bool{}
 	writer.Int(1, 1767225600123)
+	between[len(writer.Buffer)] = true
 	writer.String(2, "responses.go:539")
+	between[len(writer.Buffer)] = true
 	writer.Int32s(3, []int32{1234567, 7654321})
+	between[len(writer.Buffer)] = true
 	writer.Strings(4, []string{"product-stock.go:1204"})
 	full := writer.Buffer
 
@@ -313,8 +312,10 @@ func TestTruncatedMessagesAreRefused(t *testing.T) {
 			}
 		}
 		// Either the message ended cleanly on a field boundary, or it was refused.
-		// What must never happen is a read past the end, which would panic.
-		_ = reader.Err()
+		if refused := reader.Err() != nil; refused == between[cut] {
+			t.Fatalf("a cut at %d of %d: refused %v, between fields %v",
+				cut, len(full), refused, between[cut])
+		}
 	}
 }
 
@@ -453,37 +454,38 @@ func TestFloatsRideInTheIntegerShape(t *testing.T) {
 	}
 }
 
-func TestGenericIntArrays(t *testing.T) {
+func TestIntArrays(t *testing.T) {
 	writer := Writer{}
-	WriteInts(&writer, 1, []int16{-300, 42})
-	WriteInts(&writer, 2, []uint64{1, 1 << 40})
-	WriteInts(&writer, 3, []uint8{1, 2, 255})
+	writer.Int16s(1, []int16{-300, 42})
+	writer.Uint64s(2, []uint64{1, 1 << 40})
+	writer.Uint16s(3, []uint16{1, 2, 65535})
 
 	reader := NewReader(writer.Buffer)
-	small := ReadInts(&reader, []int16(nil))
+	small := reader.Int16s(nil)
 	if len(small) != 2 || small[0] != -300 || small[1] != 42 {
 		t.Fatalf("[]int16 round-tripped as %v", small)
 	}
-	big := ReadInts(&reader, []uint64(nil))
+	big := reader.Uint64s(nil)
 	if len(big) != 2 || big[1] != 1<<40 {
 		t.Fatalf("[]uint64 round-tripped as %v", big)
 	}
-	bytes := ReadInts(&reader, []uint8(nil))
-	if len(bytes) != 3 || bytes[2] != 255 {
-		t.Fatalf("[]uint8 round-tripped as %v", bytes)
+	halves := reader.Uint16s(nil)
+	if len(halves) != 3 || halves[2] != 65535 {
+		t.Fatalf("[]uint16 round-tripped as %v", halves)
 	}
 	if err := reader.Err(); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// A uint64 past 2^63 reads as a negative int64, and must not be mistaken for one:
-// the array would be written as two's complement and come back wrong.
+// A uint64 past 2^63 is the bit pattern of a negative int64, and must not be
+// mistaken for one: the array would be written as two's complement and come back
+// wrong.
 func TestALargeUnsignedElementIsNotMistakenForNegative(t *testing.T) {
 	writer := Writer{}
-	WriteInts(&writer, 1, []uint64{1 << 63, 5})
+	writer.Uint64s(1, []uint64{1 << 63, 5})
 	reader := NewReader(writer.Buffer)
-	back := ReadInts(&reader, []uint64(nil))
+	back := reader.Uint64s(nil)
 	if len(back) != 2 || back[0] != 1<<63 || back[1] != 5 {
 		t.Fatalf("round-tripped as %v", back)
 	}
@@ -556,7 +558,7 @@ func TestNarrowListElementWidths(t *testing.T) {
 		if !r.More() || r.Key() != 3 {
 			t.Fatalf("size %d: no list at key 3", size)
 		}
-		count, elements, ok := r.Counted()
+		count, elements, ok := r.List()
 		if !ok || count != 1 {
 			t.Fatalf("size %d: count %d, ok %v", size, count, ok)
 		}

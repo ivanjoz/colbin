@@ -1,6 +1,10 @@
-// Package varint implements colbin's column codec for arrays of int8, int16,
+// Package column implements colbin's column codec for arrays of int8, int16,
 // int32 and int64: a transform, then blocks of 128 residuals packed at an exact
 // bit width chosen per block.
+//
+// The encoding depends only on the values, never on the element type: the same
+// values encode to the same bytes as []int8 or as []int64, and decode into any
+// element type that can hold them.
 //
 // # Why blocks of 128
 //
@@ -9,12 +13,6 @@
 // both ends, no padding is ever wasted, and no state crosses a block boundary.
 // The width leaves the element loop, which is what keeps the read fast, and the
 // ladder is still one bit fine, which is what keeps it small.
-//
-// That combination is why this replaced the (k, M) bit varint that used to live
-// here: measured over five column shapes, it is smaller on every one of them —
-// from −59% to +1% — and 2–3× faster to decode, 2–4× faster to encode. The old
-// codec spent a continuation flag per byte and reclaimed some of them with two
-// declared parameters; this one spends nothing per value and one byte per 128.
 //
 // # Reading a value is one load
 //
@@ -32,13 +30,16 @@
 //	column := [header:1] [base: 8 bytes]? block*
 //
 //	header  bits 0-1  transform: raw / delta / frame-of-reference / constant
-//	        bit  2    zigzag applied to residuals
-//	        bits 3-7  reserved
+//	        bit  2    zigzag applied to residuals: set for delta, set for raw
+//	                  when the column has a negative, clear otherwise
+//	        bits 3-7  reserved, zero
+//
+//	        An empty column is the header 0 alone. The decoder refuses any
+//	        other header the encoder does not write.
 //
 //	base    the delta's first value or the frame's minimum, zigzagged, in the
 //	        clear at full width. Folding it into the residuals instead would set
-//	        the first block's width from one element, which measured +97% on a
-//	        column of timestamps.
+//	        the first block's width from one element.
 //
 //	block  := [width: 1 byte, in bits 0..64] [16 × width bytes]
 //
@@ -48,8 +49,8 @@
 //
 //	constant columns have no blocks: the header is followed by the one value.
 //
-// The element count is not stored; it is known from the record count, matching
-// the convention of the other colbin column codecs.
+// The element count is not stored: the caller knows it, from a table's row
+// count.
 //
 // This file holds the packing primitives; array.go holds the transforms, the
 // block planner and the exported array codec.
@@ -62,10 +63,12 @@ import (
 )
 
 var (
-	ErrTruncated     = errors.New("colbin: varint array truncated")
-	ErrNegativeCount = errors.New("colbin: negative varint array count")
-	ErrShortBuffer   = errors.New("colbin: varint array output slice too short")
-	ErrBadWidth      = errors.New("colbin: varint block width above 64 bits")
+	errTruncated     = errors.New("column: truncated")
+	errNegativeCount = errors.New("column: negative count")
+	errShortBuffer   = errors.New("column: output slice shorter than the count")
+	errBadWidth      = errors.New("column: block width above 64 bits")
+	errBadHeader     = errors.New("column: reserved or non-canonical header")
+	errOutOfRange    = errors.New("column: value out of range for the element type")
 )
 
 // blockSize is how many residuals share one width byte. 128 is what makes every
@@ -165,13 +168,8 @@ func unpackRun(buf []byte, dst []uint64, w int) {
 
 // unpackTail is unpackRun where the eight-byte load could read past the buffer,
 // which is only ever the last block of a column. It gathers each value from the
-// bytes that are actually there.
-//
-// Splitting this — computing how many values still fit a whole load and running
-// those through the fast path — was tried and reverted. It measured within noise
-// on both a 1024-element column, where the tail is one block in eight, and a
-// 16-element one, where the tail is the whole thing. The profiler attributes 9%
-// to this function; recovering it is not worth a division and two loops.
+// bytes that are actually there. (Running the values a whole load still covers
+// through the fast path instead measured within noise; see RATIONALE.md.)
 func unpackTail(buf []byte, dst []uint64, w int, mask uint64) {
 	position := 0
 	for index := range dst {

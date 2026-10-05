@@ -71,7 +71,8 @@ Numbering the fields is how a type asks for the four-bit key, and the number is
 what a reader in another language has to agree on.
 
 **Field ids start at 1.** Four key bits hold sixteen fields, so a narrow type
-numbers 1..16 and a wide one 1..256.
+numbers 1..16 and a wide one 1..255. Past that a type is split into pages of 255
+fields, up to id 4080 — see [Pages](#more-than-255-fields-pages).
 
 ```go
 type Charge struct {
@@ -90,10 +91,10 @@ reserve for a zero that means "absent". `cb:"1"` writes key 0 and `cb:"16"`
 writes key 15.
 
 That subtraction is the only place the two numbers differ, and it is worth
-knowing about in exactly one situation — reading bytes. `colbin.FieldIDs(v)` and
-the schema section both report the **key**, because both describe a message that
-already exists rather than the tags that produced it. So `CompanyID` above is
-`cb:"1"` in source and `0` everywhere you inspect the encoding.
+knowing about in exactly one situation — reading bytes. `colbin.FieldIDs(v)`
+reports the **id**, as the tags do, and the schema section and the bytes carry
+the **key**. So `CompanyID` above is `cb:"1"` in source and in `FieldIDs`, and
+`0` everywhere you inspect the encoding.
 
 ### A hot path should hold a handle
 
@@ -111,15 +112,16 @@ for _, charge := range charges {
 
 ### A hotter one should generate the codec
 
-`codec.Generate` emits the straight-line calls, which is about three times
-faster than the reflective walk:
+`codec.Generate` emits the straight-line calls you would write by hand against
+`wire`, and measures the same. It encodes three times faster than the handle;
+decode gains less, because the handle already ends in the same reader calls:
 
 | ten-field record | encode | decode |
 |---|---:|---:|
-| hand-written against `wire` | **5.1 ns** | **14.8 ns** |
-| generated | 8.8 ns | 21.1 ns |
-| `Codec[T]` handle | 22.3 ns | 25.3 ns |
-| `Marshal` / `Unmarshal` | 50.9 ns | 43.3 ns |
+| hand-written against `wire` | 7.6 ns | 22.4 ns |
+| generated | **6.9 ns** | 22.9 ns |
+| `Codec[T]` handle | 23.5 ns | 27.6 ns |
+| `Marshal` / `Unmarshal` | 52.7 ns | 48.5 ns |
 
 Taken in one run; absolute figures move ±20% between runs on this machine, so
 compare rows against each other rather than against a number taken elsewhere.
@@ -135,8 +137,8 @@ A field id is four bits or eight, chosen **per key run** rather than per message
 
 | | cost | buys |
 |---|---|---|
-| 4-bit | — | the fast path: 5.3 ns encode, 14.8 ns decode |
-| 8-bit | a byte per present field | 256 ids, `Skip` over an unknown field, packed5 |
+| 4-bit | — | the fast path |
+| 8-bit | a byte per present field | 256 ids, `Skip` over an unknown field |
 
 ### The three ways to hand colbin a struct
 
@@ -144,28 +146,28 @@ Same six-field sensor reading, same run, protobuf through its generated code:
 
 | | encode | decode | bytes |
 |---|---:|---:|---:|
-| protobuf | 123 ns | 116 ns | 32 |
-| **colbin + tags** (4-bit keys) | **40.6 ns** | **62.3 ns** | **27** |
-| colbin untagged (8-bit keys) | 44.2 ns | 70.5 ns | 33 |
-| colbin + packed5 (8-bit keys) | 52.1 ns | 69.4 ns | 33 |
+| protobuf | 114 ns | 107 ns | 32 |
+| **colbin + tags** (4-bit keys) | **37.4 ns** | 71.2 ns | **27** |
+| colbin untagged (8-bit keys) | 43.4 ns | 71.3 ns | 33 |
+| colbin + tags + packed5 | 44.8 ns | 69.8 ns | **27** |
 
-Untagged costs 9% on encode and 13% on decode, and six bytes — one per present
-field. All of that is the key width, not the hashing, which happens once when the
-plan is built.
+Untagged costs 16% on encode and six bytes — one per present field; its decode
+is within noise of the tagged one. All of that is the key width, not the
+hashing, which happens once when the plan is built.
 
-packed5 on this record is pure loss: its only string is `"C"`. On a record that
-plays to it — a product with a SKU, a name and three category strings — it is
-still close to a wash:
+packed5 on this record is pure cost: its only string is `"C"`, which it cannot
+shorten, so the bytes stay at 27 and the encode pays 20% for trying. On a
+record that plays to it — a product with a SKU, a name and three category
+strings — it saves real bytes at a real price:
 
 | string-heavy product | encode | decode | bytes |
 |---|---:|---:|---:|
-| protobuf | 170 ns | 389 ns | 81 |
-| **colbin + tags** | **43.1 ns** | **230 ns** | 81 |
-| colbin + packed5 | 282 ns | 427 ns | **80** |
+| protobuf | 158 ns | 350 ns | 81 |
+| **colbin + tags** | **40.3 ns** | **190 ns** | 81 |
+| colbin + tags + packed5 | 123 ns | 405 ns | **72** |
 
-One byte, for six times the encode cost. The packing saves 7 bytes and the wide
-key it forces costs 6. **Turn it on only when strings dominate the record and
-size matters more than speed.**
+Nine bytes, 11%, for three times the encode cost and twice the decode. **Turn it
+on only when strings dominate the record and size matters more than speed.**
 
 ### The two widths encode integers differently
 
@@ -196,8 +198,9 @@ safe for the same reason the K4 split is: the schema picks the reader. An
 unknown field stays skippable either way — the varint is self-delimiting and
 lives under a class, which is what `Skip` walks.
 
-A type goes wide when it has an id above fifteen, or `SetPacked5` on and a
-string to spend it on. A nested struct, slice of structs, map or table does
+A type goes wide when it has an id above sixteen, an untagged field, or an
+`any` — whose descriptor has to name its own class, which four bits cannot. A
+nested struct, slice of structs, map or table does
 *not* force it: a narrow descriptor carries the byte length those need, with the
 class coming from the schema. Nothing else changes, and a
 narrow-keyed struct can hold a wide-keyed one or the reverse — the width is in
@@ -207,6 +210,24 @@ the descriptor that opens each run.
 room for a class, so a reader that does not know a key cannot size it. Adding a
 field is a coordinated deploy of both sides unless the type is on the wide path.
 
+### More than 255 fields: pages
+
+A key is a byte, so one key run holds 256 of them. A type numbered past 255 is
+split into **pages** of 255 fields — `page = (id-1)/255`, `key = (id-1)%255` —
+and key 255 of each page holds the next page as an ordinary nested struct. The
+wire needs nothing new, and the cost of a field is the same on every page.
+
+- Every field of a paged type needs a `cb` number; a hashed key could land on
+  the link.
+- A page with nothing set is not written, and nor is the link to it, so pages
+  past the last field in use cost nothing.
+- The JSON and `DecodeAny` walks write every page's fields into one object; the
+  schema section flags each page so that a reader in another language does the
+  same.
+- `FieldIDs` reports each field's id as tagged, up to 4080 (sixteen pages).
+- `codec.Generate` refuses a paged type, and so does the Rust derive past id
+  255; use `Codec[T]`.
+
 ## packed5
 
 `colbin.SetPacked5(true)` turns on a string encoding worth about five bits per
@@ -215,15 +236,19 @@ character on upper-case alphanumerics. It is **off by default** and it is a
 decoder reads either form without being told.
 
 The encoder chooses per string, so turning it on can never make a message
-larger. It costs a pass over every string on both sides, and it puts the type on
-the wide key path.
+larger. It costs a pass over every string on both sides, and leaves the key
+width alone.
+
+The setting is process-wide: two libraries in one binary share it. It is safe to
+change while other goroutines encode — a message written across the switch
+holds either form, or both, and every reader reads it.
 
 ## Supported types
 
 | | |
 |---|---|
-| yes | `bool`, every sized `int`/`uint`, `float32/64`, `string`, `[]byte`, slices of integers and of strings, nested structs, `[]struct`, recursive types, `map` with string or integer keys, pointers to any scalar or string, `any`, `[]any`, `map[string]any` |
-| not yet | arrays, pointers to composites, maps of structs, `map[any]T` |
+| yes | `bool`, every sized `int`/`uint`, `float32/64`, `string`, `[]byte`, slices of integers and of strings, nested structs, `[]struct`, recursive types, `map` with string or integer keys, pointers to any scalar, string or struct, `any`, `[]any`, `map[string]any` |
+| not yet | arrays, pointers to slices and maps, maps of structs, `map[any]T` |
 
 `int` and `uint` encode as their 64-bit forms, so a message written on one
 platform reads on another.
@@ -242,8 +267,10 @@ type Patch struct {
 }
 ```
 
-Pointers to structs, slices and maps are refused: those carry a length already,
-and what a nil one should mean is not settled.
+A pointer to a struct needs no explicit zero: a struct is written whether or not
+it is empty, so an absent key is nil and an empty one is a pointer to a zero
+struct. Pointers to slices and maps are refused — on this wire a nil one and an
+empty one are the same bytes, and what `*[]T` nil should mean is not settled.
 
 ## A slice of structs picks its own layout
 
@@ -385,7 +412,9 @@ packed5/  the opt-in string packing
 corpus/   a reproducible, real-shaped dataset: users, products, sales
 ```
 
-That is the whole module. The comparison against protocol buffers is not here —
+Those are the Go packages, beside the Rust and JavaScript ports in `rust/` and
+`js/` and the vector generators that pin them. The comparison against protocol
+buffers is not here —
 it lives in [colbin-benchmarks][bench-repo], for the reasons in
 [Benchmarks](#benchmarks) below.
 
@@ -572,7 +601,8 @@ of the published package rather than a copy of it.
 
 Alpha. The wire format is settled, the Go façade covers everything in the table
 above, and the Rust port covers the same ground — including the schema section,
-which it now both writes and reads. Interfaces have no form on the wire yet.
+which it now both writes and reads. An `any` is carried as a dynamic value; an
+interface with methods is not.
 
 One tag drives all three implementations, and while on `0.x` there is no
 wire-compatibility promise across minor versions: a Go service on 0.3 and a

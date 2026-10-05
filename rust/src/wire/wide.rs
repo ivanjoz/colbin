@@ -756,10 +756,13 @@ impl<'a> Reader8<'a> {
             && (desc >> 4) & 0b111 == CLASS_INT
             && desc & INT_POSITIVE_FLAG == 0;
         let magnitude = self.uint_wide();
-        if negative {
-            return (magnitude as i64).wrapping_neg();
+        match super::signed(!negative, magnitude) {
+            Some(value) => value,
+            None => {
+                self.fail(Error::FieldTooWide);
+                0
+            }
         }
-        magnitude as i64
     }
 
     /// Reads a field written by [`Writer8::bool`].
@@ -800,22 +803,31 @@ impl<'a> Reader8<'a> {
         value as u32
     }
 
-    /// Reads an `i32` field.
-    #[allow(clippy::cast_possible_truncation)]
+    /// Reads an `i32` field, refusing anything wider.
     pub fn i32(&mut self) -> i32 {
-        self.i64() as i32
+        let value = self.i64();
+        self.within(value)
     }
 
-    /// Reads an `i16` field.
-    #[allow(clippy::cast_possible_truncation)]
+    /// Reads an `i16` field, refusing anything wider.
     pub fn i16(&mut self) -> i16 {
-        self.i64() as i16
+        let value = self.i64();
+        self.within(value)
     }
 
-    /// Reads an `i8` field.
-    #[allow(clippy::cast_possible_truncation)]
+    /// Reads an `i8` field, refusing anything wider.
     pub fn i8(&mut self) -> i8 {
-        self.i64() as i8
+        let value = self.i64();
+        self.within(value)
+    }
+
+    /// Narrows a signed value to its field's type, or fails the read: a value
+    /// past the type is a schema disagreement, not one to truncate.
+    fn within<T: TryFrom<i64> + Default>(&mut self, value: i64) -> T {
+        T::try_from(value).unwrap_or_else(|_| {
+            self.fail(Error::FieldTooWide);
+            T::default()
+        })
     }
 
     /// Reads a field written by [`Writer8::f32`].
@@ -950,29 +962,34 @@ impl<'a> Reader8<'a> {
     }
 
     /// Appends each element of a string list as a sub-slice of the message.
+    ///
+    /// The elements are read inside the list's declared length and the cursor
+    /// then moves past all of it, as Go's reader does — so a length that
+    /// disagrees with the elements lands the next key somewhere it fails,
+    /// rather than being quietly corrected by where the elements ended.
     pub fn strings_bytes(&mut self) -> Vec<&'a [u8]> {
         let mut dst = Vec::new();
-        let Some((count, mut at)) = self.list_header() else {
+        let Some((count, mut at, end)) = self.list_header() else {
             return dst;
         };
         for _ in 0..count {
-            let Some((size, next)) = self.element_size(at) else {
+            let Some((size, next)) = self.element_size(at, end) else {
                 return dst;
             };
-            if size > self.buf.len() - next {
+            if size > end - next {
                 self.fail(Error::Truncated);
                 return dst;
             }
             dst.push(&self.buf[next..next + size]);
             at = next + size;
         }
-        self.at = at;
+        self.at = end;
         dst
     }
 
     /// Reads a list's byte length and count and returns the count with the
-    /// offset of the first element.
-    fn list_header(&mut self) -> Option<(usize, usize)> {
+    /// offset of the first element and the offset just past the list.
+    fn list_header(&mut self) -> Option<(usize, usize, usize)> {
         let (length, start) = self.length_of(CLASS_LIST)?;
         if length > self.buf.len() - start {
             self.fail(Error::Truncated);
@@ -982,19 +999,20 @@ impl<'a> Reader8<'a> {
             self.fail(Error::Truncated);
             return None;
         };
-        Some((count, start + consumed))
+        Some((count, start + consumed, start + length))
     }
 
-    /// Reads one list element length: one byte, or four more behind the escape.
-    fn element_size(&mut self, at: usize) -> Option<(usize, usize)> {
-        let Some(size) = self.buf.get(at).copied() else {
+    /// Reads one list element length, which must lie before `end`: one byte,
+    /// or four more behind the escape.
+    fn element_size(&mut self, at: usize, end: usize) -> Option<(usize, usize)> {
+        let Some(size) = self.buf[..end].get(at).copied() else {
             self.fail(Error::Truncated);
             return None;
         };
         if size != ELEMENT_SIZE_ESCAPE {
             return Some((usize::from(size), at + 1));
         }
-        let Some(bytes) = self.buf.get(at + 1..at + 5) else {
+        let Some(bytes) = self.buf[..end].get(at + 1..at + 5) else {
             self.fail(Error::Truncated);
             return None;
         };

@@ -2,70 +2,84 @@ package packed5
 
 // What the decoder does with input the encoder did not write.
 //
-// Every frame here is hand-built from units, because the encoder cannot produce
-// the shapes that matter: a reserved table index, an escape count past four, a
-// length prefix in its non-canonical form. The rule the whole file holds the
-// decoder to is that any byte string either decodes to some string or returns an
-// error — never a panic, never a read past the buffer, never an allocation
-// driven by an attacker's length.
+// Most payloads here are hand-built from units, because the encoder cannot
+// produce the shapes that matter: a reserved table index, an escape count past
+// four, a token cut off by the end of the stream. The rule the whole file holds
+// AppendString to is that any src, size and case mode either decode to some
+// string or return an error — never a panic, never a read past src, never output
+// that is not bounded by the payload's length.
 
 import (
-	"bytes"
 	"errors"
+	"math"
 	"math/rand/v2"
 	"strings"
 	"testing"
 )
 
-// packFrame builds a packed frame from a unit sequence, padding to the grid the
-// way the encoder does so the unit count is recoverable from the length.
-func packFrame(units []uint8, upper bool) []byte {
-	u := append([]uint8(nil), units...)
-	if payloadUnits(payloadBytes(len(u))) > len(u) {
-		u = append(u, opCaseSimple)
-	}
-	flags := byte(flagPacked5)
-	if upper {
-		flags |= flagUppercase
-	}
-	return append(appendHeader(nil, flags, payloadBytes(len(u))), packSlow(u)...)
+// packUnits builds a payload from a unit sequence, padding to the grid the way
+// the encoder does so the unit count is recoverable from the length.
+func packUnits(units []uint8) []byte {
+	return packSlow(padToGrid(append([]uint8(nil), units...)))
 }
 
-func TestDecodeErrors(t *testing.T) {
+// decodeUnits packs units and decodes them with no slack after the payload.
+func decodeUnits(units []uint8, upper bool) (string, error) {
+	payload := packUnits(units)
+	out, err := AppendString(nil, payload, len(payload), upper)
+	return string(out), err
+}
+
+// maxDecodedLen is the expansion bound AppendString documents. The densest token
+// is the three-byte '€' in two units, which is 2.4 bytes per payload byte; a
+// number is next at four bytes per three units, and every other token is at most
+// one byte per unit.
+func maxDecodedLen(payload int) int { return payload*12/5 + 4 }
+
+func TestAppendStringRejectsBadSize(t *testing.T) {
+	payload, n, upper, ok := AppendPayload(nil, "el niño comió jamón")
+	if !ok {
+		t.Fatal("expected the sample to pack")
+	}
 	for _, c := range []struct {
 		name string
-		in   []byte
+		src  []byte
+		size int
 		want error
 	}{
-		{"empty buffer", nil, ErrTruncated},
-		{"raw payload truncated", []byte{0<<0 | 5<<lenShift, 'a', 'b'}, ErrTruncated},
-		{"packed payload truncated", []byte{flagPacked5 | 5<<lenShift, 0x01}, ErrTruncated},
-		{"reserved header bit", []byte{flagPacked5 | flagReserved | 1<<lenShift, 0}, ErrBadHeader},
-		{"uvarint truncated", []byte{flagPacked5 | lenEscape<<lenShift, 0x80}, ErrTruncated},
-		{"uvarint overlong", append([]byte{flagPacked5 | lenEscape<<lenShift},
-			append([]byte{0x80}, bytes.Repeat([]byte{0x80}, 9)...)...), ErrBadLength},
-		{"uvarint re-encodes an inline length",
-			[]byte{flagPacked5 | lenEscape<<lenShift, 5, 0, 0, 0, 0, 0}, ErrBadLength},
+		{"negative", payload, -1, ErrBadLength},
+		{"most negative", payload, math.MinInt, ErrBadLength},
+		{"one past the buffer", payload[:n-1], n, ErrTruncated},
+		{"empty buffer", nil, 1, ErrTruncated},
+		{"largest", payload, math.MaxInt, ErrTruncated},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if _, _, err := Decode(c.in); !errors.Is(err, c.want) {
+			dst := []byte("kept")
+			got, err := AppendString(dst, c.src, c.size, upper)
+			if !errors.Is(err, c.want) {
 				t.Errorf("got %v, want %v", err, c.want)
 			}
+			if string(got) != "kept" {
+				t.Errorf("dst changed on error: %q", got)
+			}
 		})
+	}
+	// Size zero is the empty payload, which decodes to nothing.
+	if got, err := AppendString([]byte("x"), nil, 0, true); err != nil || string(got) != "x" {
+		t.Errorf("size 0: %q, %v", got, err)
 	}
 }
 
 func TestDecodeReservedSymbol(t *testing.T) {
 	for idx := extReserved; idx < extEscape; idx++ {
-		buf := packFrame([]uint8{'a' - 'a', opExt, uint8(idx)}, false)
-		if _, _, err := Decode(buf); !errors.Is(err, ErrReservedSymbol) {
+		// A letter first, so the reserved index is met mid-stream.
+		if _, err := decodeUnits([]uint8{letterIndex('a'), opExt, uint8(idx)}, false); !errors.Is(err, ErrReservedSymbol) {
 			t.Errorf("extTable[%d]: got %v, want ErrReservedSymbol", idx, err)
 		}
 	}
 	// Every assigned index must decode instead.
 	for idx := range extReserved {
-		buf := packFrame([]uint8{opExt, uint8(idx)}, false)
-		got, _, err := Decode(buf)
+		got, err := decodeUnits([]uint8{opExt, uint8(idx)}, false)
 		if err != nil {
 			t.Errorf("extTable[%d]: %v", idx, err)
 		} else if got != extTable[idx] {
@@ -74,8 +88,7 @@ func TestDecodeReservedSymbol(t *testing.T) {
 	}
 	// symTable has no reserved entries: all 32 operands are characters.
 	for idx := range 32 {
-		buf := packFrame([]uint8{opSymbol, uint8(idx)}, false)
-		got, _, err := Decode(buf)
+		got, err := decodeUnits([]uint8{opSymbol, uint8(idx)}, false)
 		if err != nil || got != string(symTable[idx]) {
 			t.Errorf("symTable[%d]: %q, %v", idx, got, err)
 		}
@@ -91,7 +104,7 @@ func TestDecodeBadEscape(t *testing.T) {
 		{"count past four", []uint8{opExt, extEscape, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, ErrBadEscape},
 		{"count at maximum", []uint8{opExt, extEscape, 31, 0, 0, 0, 0, 0, 0}, ErrBadEscape},
 		{"high half out of range", []uint8{opExt, extEscape, 0, 1, 8}, ErrBadEscape},
-		// A truncation has to be built on the unit grid, or packFrame's pad
+		// A truncation has to be built on the unit grid, or packUnits's pad
 		// supplies the very unit the case is meant to be missing.
 		{"truncated bytes", []uint8{opExt, extEscape, 3, 1, 0}, ErrTruncated},
 		{"truncated count", []uint8{0, opExt, extEscape}, ErrTruncated},
@@ -100,7 +113,7 @@ func TestDecodeBadEscape(t *testing.T) {
 		{"truncated number", []uint8{0, 0, opNumber, 1}, ErrTruncated},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if _, _, err := Decode(packFrame(c.units, false)); !errors.Is(err, c.want) {
+			if _, err := decodeUnits(c.units, false); !errors.Is(err, c.want) {
 				t.Errorf("got %v, want %v", err, c.want)
 			}
 		})
@@ -113,7 +126,7 @@ func TestDecodeBadEscape(t *testing.T) {
 			want[k] = byte(0x80 + k)
 			units = append(units, want[k]&31, want[k]>>5)
 		}
-		got, _, err := Decode(packFrame(units, false))
+		got, err := decodeUnits(units, false)
 		if err != nil || got != string(want) {
 			t.Errorf("escape of %d: %q, %v", n, got, err)
 		}
@@ -138,7 +151,7 @@ func TestGridPadDecodesToNothing(t *testing.T) {
 					want[i] = 'a' + units[i]
 				}
 			}
-			got, _, err := Decode(packFrame(units, upper))
+			got, err := decodeUnits(units, upper)
 			if err != nil || got != string(want) {
 				t.Fatalf("upper=%v n=%d: %q, %v", upper, n, got, err)
 			}
@@ -146,54 +159,64 @@ func TestGridPadDecodesToNothing(t *testing.T) {
 	}
 }
 
-func TestRawModeIgnoresCaseFlag(t *testing.T) {
-	for _, flags := range []byte{0, flagUppercase} {
-		buf := append([]byte{flags | 3<<lenShift}, "abc"...)
-		got, n, err := Decode(buf)
-		if err != nil || got != "abc" || n != 4 {
-			t.Errorf("flags %#02x: %q, %d, %v", flags, got, n, err)
+// TestSlackIsNeverDecoded: bytes after the payload are read by the group loader
+// but must never reach the output, whatever they hold.
+func TestSlackIsNeverDecoded(t *testing.T) {
+	for _, s := range []string{"hello world", "el niño comió jamón", strings.Repeat("ab ", 40)} {
+		buf, n, upper, ok := AppendPayload(nil, s)
+		if !ok {
+			t.Fatalf("%q did not pack", s)
 		}
-	}
-}
-
-func TestDecodeIgnoresTrailingBytes(t *testing.T) {
-	buf := Append(nil, "hello world")
-	want := len(buf)
-	buf = append(buf, "trailing garbage"...)
-	got, n, err := Decode(buf)
-	if err != nil || got != "hello world" || n != want {
-		t.Errorf("%q, %d, %v; want %q, %d", got, n, err, "hello world", want)
-	}
-}
-
-// TestDecodeTruncatedAtEveryPrefix walks every prefix of a valid frame. Each one
-// must fail cleanly rather than return a short string.
-func TestDecodeTruncatedAtEveryPrefix(t *testing.T) {
-	for _, s := range []string{"hello", "el niño comió jamón", "SKU-4217-hola",
-		"\x01\x02\x03\x04", strings.Repeat("ab ", 60)} {
-		buf := Append(nil, s)
-		for n := range len(buf) {
-			got, _, err := Decode(buf[:n])
-			if err == nil && got == s {
-				t.Errorf("%q: prefix of %d bytes decoded in full", s, n)
+		for _, trailing := range []string{"", "x", slackBytes, "trailing garbage of some length"} {
+			got, err := AppendString(nil, append(buf[:n:n], trailing...), n, upper)
+			if err != nil || string(got) != s {
+				t.Errorf("%q with %q after it: %q, %v", s, trailing, got, err)
 			}
 		}
 	}
 }
 
-// TestDecodeBitFlipsDoNotPanic flips every bit of a set of valid frames. A
-// corrupt frame may decode to anything or fail; it may not panic or read out of
-// bounds, which the race and bounds checks catch.
+// TestDecodeTruncatedAtEveryPrefix walks every prefix of a valid payload. With
+// the original size it must be refused; read at its own shorter size it must not
+// come back as the original string.
+func TestDecodeTruncatedAtEveryPrefix(t *testing.T) {
+	for _, s := range []string{"hello", "el niño comió jamón", "SKU-4217-hola",
+		strings.Repeat("a", 20) + "\x01\x02\x03\x04", strings.Repeat("ab ", 60)} {
+		buf, n, upper, ok := AppendPayload(nil, s)
+		if !ok {
+			t.Fatalf("%q did not pack", s)
+		}
+		for k := range n {
+			prefix := buf[:k:k]
+			if _, err := AppendString(nil, prefix, n, upper); !errors.Is(err, ErrTruncated) {
+				t.Errorf("%q: %d of %d bytes at the full size: got %v, want ErrTruncated", s, k, n, err)
+			}
+			if got, err := AppendString(nil, prefix, k, upper); err == nil && string(got) == s {
+				t.Errorf("%q: a %d-byte prefix of %d decoded in full", s, k, n)
+			}
+		}
+	}
+}
+
+// TestDecodeBitFlipsDoNotPanic flips every bit of a set of valid payloads and
+// decodes each in both case modes, with and without slack. A corrupt payload may
+// decode to anything or fail; it may not panic or read out of bounds.
 func TestDecodeBitFlipsDoNotPanic(t *testing.T) {
 	for _, s := range []string{"hello", "helloWorld", "el niño comió jamón",
-		"SKU-4217-hola", "\x01\x02\x03\x04", "1023", strings.Repeat("ab ", 20)} {
-		buf := Append(nil, s)
-		for i := range buf {
+		"SKU-4217-hola", strings.Repeat("a", 20) + "\x01\x02\x03\x04", "1023 1023",
+		strings.Repeat("ab ", 20)} {
+		buf, n, _, ok := AppendPayload(nil, s)
+		if !ok {
+			t.Fatalf("%q did not pack", s)
+		}
+		for i := range n {
 			for bit := range 8 {
-				bad := append([]byte(nil), buf...)
+				bad := append([]byte(nil), buf[:n]...)
 				bad[i] ^= 1 << bit
-				_, _, _ = Decode(bad)
-				_, _, _ = AppendDecoded(nil, bad)
+				for _, upper := range []bool{false, true} {
+					_, _ = AppendString(nil, bad, n, upper)
+					_, _ = AppendString(nil, append(bad, slackBytes...), n, upper)
+				}
 			}
 		}
 	}
@@ -201,30 +224,27 @@ func TestDecodeBitFlipsDoNotPanic(t *testing.T) {
 
 func TestDecodeGarbageDoesNotPanic(t *testing.T) {
 	rng := rand.New(rand.NewPCG(21, 22))
-	decoded, packedPath := 0, 0
+	decoded, refused := 0, 0
 	for range 200000 {
 		buf := make([]byte, rng.IntN(40))
 		for i := range buf {
 			buf[i] = byte(rng.IntN(256))
 		}
-		if _, _, err := Decode(buf); err == nil {
+		size := rng.IntN(len(buf) + 1)
+		if _, err := AppendString(nil, buf, size, rng.IntN(2) == 1); err == nil {
 			decoded++
-			if len(buf) > 0 && buf[0]&flagPacked5 != 0 {
-				packedPath++
-			}
+		} else {
+			refused++
 		}
 	}
-	t.Logf("%d of 200000 random buffers decoded, %d through the packed path",
-		decoded, packedPath)
-	if packedPath == 0 {
-		t.Error("no random buffer exercised the packed path")
+	if decoded == 0 || refused == 0 {
+		t.Errorf("%d random payloads decoded and %d were refused; want some of each", decoded, refused)
 	}
 }
 
-// TestMaxDecodedLenIsSound is the bound Decode sizes its scratch from. If a
-// payload could ever decode to more than this, that scratch would have to grow
-// and the single-allocation claim would be wrong.
-func TestMaxDecodedLenIsSound(t *testing.T) {
+// TestExpansionIsBounded is the decompression-bomb check: the output is bounded
+// by the payload, so the work a peer can ask for is bounded by the bytes it sent.
+func TestExpansionIsBounded(t *testing.T) {
 	// The densest token is an ext carrying the three-byte '€': two units for
 	// three bytes. Build payloads made only of those.
 	for pairs := 1; pairs <= 200; pairs++ {
@@ -232,16 +252,12 @@ func TestMaxDecodedLenIsSound(t *testing.T) {
 		for range pairs {
 			units = append(units, opExt, uint8(extEuro))
 		}
-		buf := packFrame(units, false)
-		h, err := frame(buf)
+		payload := packUnits(units)
+		got, err := decodeUnits(units, false)
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, _, err := Decode(buf)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if bound := maxDecodedLen(len(h.payload)); len(got) > bound {
+		if bound := maxDecodedLen(len(payload)); len(got) > bound {
 			t.Fatalf("%d pairs: decoded %d bytes, bound is %d", pairs, len(got), bound)
 		}
 	}
@@ -252,92 +268,41 @@ func TestMaxDecodedLenIsSound(t *testing.T) {
 		for i := range units {
 			units[i] = uint8(rng.IntN(32))
 		}
-		buf := packFrame(units, false)
-		h, err := frame(buf)
+		got, err := decodeUnits(units, false)
 		if err != nil {
 			continue
 		}
-		got, _, err := Decode(buf)
-		if err != nil {
-			continue
-		}
-		if bound := maxDecodedLen(len(h.payload)); len(got) > bound {
+		if bound := maxDecodedLen(len(packUnits(units))); len(got) > bound {
 			t.Fatalf("units %v: decoded %d bytes, bound is %d", units, len(got), bound)
 		}
 	}
 }
 
-// TestDecodeExpansionIsBounded is the decompression-bomb check: a frame cannot
-// name a payload larger than the buffer, so the work a peer can ask for is
-// bounded by the bytes it sent.
-func TestDecodeExpansionIsBounded(t *testing.T) {
-	// A uvarint claiming a huge payload must be refused, not allocated for.
-	buf := append([]byte{flagPacked5 | lenEscape<<lenShift}, 0xFF, 0xFF, 0xFF, 0xFF, 0x07)
-	if _, _, err := Decode(buf); !errors.Is(err, ErrTruncated) {
-		t.Errorf("oversized length: got %v, want ErrTruncated", err)
-	}
-	// And the honest bound holds for real frames.
-	for _, s := range []string{"€€€€€€€€", "1023102310231023", strings.Repeat("ñ", 40)} {
-		b := Append(nil, s)
-		h, err := frame(b)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if h.packed && len(s) > maxDecodedLen(len(h.payload)) {
-			t.Errorf("%q: %d bytes from a %d-byte payload, bound is %d",
-				s, len(s), len(h.payload), maxDecodedLen(len(h.payload)))
-		}
-	}
-}
-
-// TestAppendStringRejectsShortBuffer pins the embedded decoder's own bound.
-func TestAppendStringRejectsShortBuffer(t *testing.T) {
-	payload, n, upper, ok := AppendPayload(nil, "el niño comió jamón")
-	if !ok {
-		t.Fatal("expected the sample to pack")
-	}
-	if _, err := AppendString(nil, payload[:n-1], n, upper); !errors.Is(err, ErrTruncated) {
-		t.Errorf("short buffer: got %v, want ErrTruncated", err)
-	}
-}
-
-func FuzzDecode(f *testing.F) {
-	for _, s := range []string{"", "a", "hello", "el niño comió jamón", "SKU-4217-hola",
+func FuzzAppendString(f *testing.F) {
+	for _, s := range []string{"a", "hello", "el niño comió jamón", "SKU-4217-hola",
 		"\x01\x02\x03\x04", strings.Repeat("ab ", 40)} {
-		f.Add(Append(nil, s))
+		buf, n, upper, _ := AppendPayload(nil, s)
+		f.Add(buf, n, upper)
 	}
-	f.Add([]byte{flagPacked5 | lenEscape<<lenShift, 0x80, 0x01})
-	f.Fuzz(func(t *testing.T, buf []byte) {
-		got, n, err := Decode(buf)
+	f.Add([]byte{}, 0, false)
+	f.Add([]byte{0xFF, 0xFF}, -1, true)
+	f.Add([]byte{0x01}, 5, false)
+	f.Fuzz(func(t *testing.T, src []byte, size int, upper bool) {
+		got, err := AppendString(nil, src, size, upper)
 		if err != nil {
 			return
 		}
-		if n > len(buf) {
-			t.Fatalf("consumed %d of %d", n, len(buf))
+		if bound := maxDecodedLen(size); len(got) > bound {
+			t.Fatalf("%d-byte payload decoded to %d bytes, bound is %d", size, len(got), bound)
 		}
-		// Whatever came out must be something the frame really said: re-encoding
-		// it and decoding that again has to give the same string back.
-		again, _, err := Decode(Append(nil, got))
-		if err != nil || again != got {
-			t.Fatalf("%q did not survive a re-encode: %q, %v", got, again, err)
+		// The slack after the payload must not change what it says.
+		exact, err := AppendString(nil, src[:size:size], size, upper)
+		if err != nil || string(exact) != string(got) {
+			t.Fatalf("without slack: %q, %v; with it: %q", exact, err, got)
 		}
+		// And whatever came out must survive a round trip of its own.
+		roundtrip(t, string(got))
 	})
-}
-
-func TestUvarintRoundtrip(t *testing.T) {
-	for _, v := range []int{0, 1, 127, 128, 300, 16383, 16384, 1 << 20, maxLen} {
-		buf := appendUvarint(nil, v)
-		if got := uvarintLen(v); got != len(buf) {
-			t.Errorf("%d: uvarintLen = %d, wrote %d", v, got, len(buf))
-		}
-		back, n, err := readUvarint(buf)
-		if err != nil || back != v || n != len(buf) {
-			t.Errorf("%d: got %d, %d, %v", v, back, n, err)
-		}
-	}
-	if _, _, err := readUvarint(nil); !errors.Is(err, ErrTruncated) {
-		t.Errorf("empty: got %v", err)
-	}
 }
 
 // TestPayloadGeometry pins the two length functions against each other, which is

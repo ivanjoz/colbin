@@ -5,34 +5,39 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"strings"
-	"sync"
 	"testing"
 	"unicode/utf8"
 )
 
-// roundtrip encodes s, decodes it back, and checks every invariant the frame is
-// supposed to hold: byte-exact recovery, an exact consumed-byte count, Size
-// agreeing with Append, and the never-inflate guarantee.
-func roundtrip(t *testing.T, s string) []byte {
+// slackBytes is eight bytes of garbage to put after a payload. 0xFF decodes to
+// units of every kind, so a reader that took any of it as payload would show.
+const slackBytes = "\xff\xff\xff\xff\xff\xff\xff\xff"
+
+// roundtrip packs s and reads it back twice — with slack after the payload, the
+// way a container hands it over, and with the buffer ending exactly at it, which
+// sends the last group down the tail path — and checks that the packed form is
+// only used when it is smaller than s.
+func roundtrip(t *testing.T, s string) {
 	t.Helper()
-	buf := Append(nil, s)
-	got, n, err := Decode(buf)
-	if err != nil {
-		t.Fatalf("Decode(%q): %v (frame %x)", s, err, buf)
+	buf, n, upper, ok := AppendPayload(nil, s)
+	if !ok {
+		if len(buf) != 0 {
+			t.Fatalf("%q: did not pack, but appended %d bytes", s, len(buf))
+		}
+		return
 	}
-	if got != s {
-		t.Fatalf("roundtrip %q -> %q (frame %x)", s, got, buf)
+	if n != len(buf) || n >= len(s) {
+		t.Fatalf("%q: payload %d bytes in a %d-byte buffer, raw is %d", s, n, len(buf), len(s))
 	}
-	if n != len(buf) {
-		t.Fatalf("%q: consumed %d of %d bytes", s, n, len(buf))
+	exact := bytes.Clone(buf)
+	slack := append(bytes.Clone(buf), slackBytes...)
+	for _, src := range [][]byte{exact, slack} {
+		got, err := AppendString(nil, src, n, upper)
+		if err != nil || string(got) != s {
+			t.Fatalf("%q: decoded %q, %v (payload %x upper=%v, %d bytes of slack)",
+				s, got, err, buf, upper, len(src)-n)
+		}
 	}
-	if want := Size(s); want != len(buf) {
-		t.Fatalf("%q: Size = %d, Append wrote %d", s, want, len(buf))
-	}
-	if max := frameOverhead(len(s)) + len(s); len(buf) > max {
-		t.Fatalf("%q: frame %d bytes, raw framing would be %d", s, len(buf), max)
-	}
-	return buf
 }
 
 func TestRoundtripTable(t *testing.T) {
@@ -108,20 +113,15 @@ func TestRoundtripEverySingleByte(t *testing.T) {
 }
 
 // TestRoundtripEveryBytePair is exhaustive over all 65536 two-byte inputs. Two
-// bytes is where the case-toggle choice, the two-digit NUMBER_0_1023 token and
-// the two-byte escape run all first become reachable.
+// bytes is where the case-toggle choice, the two-digit number token and the
+// two-byte escape run all first become reachable.
 func TestRoundtripEveryBytePair(t *testing.T) {
 	var buf [2]byte
 	for a := range 256 {
 		buf[0] = byte(a)
 		for b := range 256 {
 			buf[1] = byte(b)
-			s := string(buf[:])
-			out := Append(nil, s)
-			got, n, err := Decode(out)
-			if err != nil || got != s || n != len(out) {
-				t.Fatalf("pair %02x %02x: got %q n=%d err=%v (frame %x)", a, b, got, n, err, out)
-			}
+			roundtrip(t, string(buf[:]))
 		}
 	}
 }
@@ -141,12 +141,7 @@ func TestRoundtripEveryTriple(t *testing.T) {
 	for _, x := range alphabet {
 		for _, y := range alphabet {
 			for _, z := range alphabet {
-				s := x + y + z
-				out := Append(nil, s)
-				got, n, err := Decode(out)
-				if err != nil || got != s || n != len(out) {
-					t.Fatalf("%q: got %q n=%d err=%v (frame %x)", s, got, n, err, out)
-				}
+				roundtrip(t, x+y+z)
 			}
 		}
 	}
@@ -161,19 +156,27 @@ func randString(rng *rand.Rand, pool []string, n int) string {
 	return b.String()
 }
 
+// pool is a named set of symbols for randString. Tests range over a slice of
+// them and seed one generator per pool, so every pool sees the same strings on
+// every run, whatever else the test does.
+type pool struct {
+	name    string
+	symbols []string
+}
+
 func TestRoundtripRandom(t *testing.T) {
-	pools := map[string][]string{
-		"alphabet": alphabet,
-		"letters":  {"a", "b", "c", "X", "Y", "Z"},
-		"digits":   {"0", "1", "2", "9"},
-		"symbols":  {"<", ">", "/", "@", "€", "ñ", "-", "."},
-		"words":    {"hola", " ", "mundo", "Test", "123", "-", "ABC"},
+	pools := []pool{
+		{"alphabet", alphabet},
+		{"letters", []string{"a", "b", "c", "X", "Y", "Z"}},
+		{"digits", []string{"0", "1", "2", "9"}},
+		{"symbols", []string{"<", ">", "/", "@", "€", "ñ", "-", "."}},
+		{"words", []string{"hola", " ", "mundo", "Test", "123", "-", "ABC"}},
 	}
-	rng := rand.New(rand.NewPCG(1, 2))
-	for name, pool := range pools {
-		t.Run(name, func(t *testing.T) {
+	for i, p := range pools {
+		t.Run(p.name, func(t *testing.T) {
+			rng := rand.New(rand.NewPCG(1, uint64(i)))
 			for range 2000 {
-				roundtrip(t, randString(rng, pool, rng.IntN(40)))
+				roundtrip(t, randString(rng, p.symbols, rng.IntN(40)))
 			}
 		})
 	}
@@ -207,8 +210,8 @@ func TestRoundtripRandomRunes(t *testing.T) {
 	}
 }
 
-// TestRoundtripAllLengths walks every length across the stack/heap boundary and
-// both length-prefix forms, for several character mixes.
+// TestRoundtripAllLengths walks every length up to 600 bytes for several
+// character mixes, so every position of the final group is the last one.
 func TestRoundtripAllLengths(t *testing.T) {
 	units := []string{"a", "aB", "a1", "ñ", "x-", "\xff", "abc def "}
 	for _, u := range units {
@@ -222,66 +225,61 @@ func TestRoundtripAllLengths(t *testing.T) {
 	}
 }
 
-// TestLengthPrefixForms pins the two length encodings: inline in the header's
-// five length bits up to 30 payload bytes, then a uvarint, growing to two bytes
-// past 127.
-func TestLengthPrefixForms(t *testing.T) {
-	for _, tc := range []struct {
-		n          int
-		overInline bool
-	}{{1, false}, {14, false}, {30, false}, {31, true}, {32, true}, {127, true}, {128, true}, {1000, true}} {
-		s := strings.Repeat("\xff", tc.n) // never packs, so payload == n
-		buf := roundtrip(t, s)
-		if got := buf[0]>>lenShift == lenEscape; got != tc.overInline {
-			t.Fatalf("n=%d: escape length prefix = %v, want %v", tc.n, got, tc.overInline)
-		}
-		if want := frameOverhead(tc.n) + tc.n; len(buf) != want {
-			t.Fatalf("n=%d: frame %d bytes, want %d", tc.n, len(buf), want)
-		}
-	}
-}
-
-// TestAppendPreservesPrefix checks Append is a true appender and that frames
-// read back one after another from a shared buffer.
-func TestAppendPreservesPrefix(t *testing.T) {
-	inputs := []string{"hello", "", "WORLD", "a-b-c", "ñandú", "\xff\xfe", "product123", strings.Repeat("z", 300)}
+// TestPayloadsBackToBack lays payloads end to end after a prefix, the way wire
+// writes string fields, and reads each one back with the rest of the buffer as
+// its slack.
+func TestPayloadsBackToBack(t *testing.T) {
+	inputs := []string{"hello", "WORLD", "ab-cd-ef", "ñandú", "product123",
+		strings.Repeat("z", 300), "el niño comió jamón"}
 	prefix := []byte("PREFIX")
-	buf := append([]byte(nil), prefix...)
+	buf := bytes.Clone(prefix)
+	type entry struct {
+		at, n int
+		upper bool
+	}
+	var entries []entry
 	for _, s := range inputs {
-		buf = Append(buf, s)
+		at := len(buf)
+		var n int
+		var upper, ok bool
+		buf, n, upper, ok = AppendPayload(buf, s)
+		if !ok {
+			t.Fatalf("%q did not pack", s)
+		}
+		entries = append(entries, entry{at, n, upper})
 	}
 	if !bytes.Equal(buf[:len(prefix)], prefix) {
 		t.Fatalf("prefix clobbered: %q", buf[:len(prefix)])
 	}
-	rest := buf[len(prefix):]
-	for _, want := range inputs {
-		got, n, err := Decode(rest)
-		if err != nil {
-			t.Fatalf("%q: %v", want, err)
+	for i, e := range entries {
+		got, err := AppendString(nil, buf[e.at:], e.n, e.upper)
+		if err != nil || string(got) != inputs[i] {
+			t.Fatalf("payload %d: %q, %v; want %q", i, got, err, inputs[i])
 		}
-		if got != want {
-			t.Fatalf("got %q want %q", got, want)
-		}
-		rest = rest[n:]
 	}
-	if len(rest) != 0 {
-		t.Fatalf("%d bytes left over", len(rest))
+	if last := entries[len(entries)-1]; last.at+last.n != len(buf) {
+		t.Fatalf("%d bytes past the last payload", len(buf)-last.at-last.n)
 	}
 }
 
-// TestNeverInflates is the headline guarantee: a frame never costs more than
-// the raw bytes plus their framing, whatever the input.
+// TestNeverInflates is the headline guarantee: a payload is only produced when
+// it is strictly smaller than the string, and otherwise nothing is appended.
 func TestNeverInflates(t *testing.T) {
 	rng := rand.New(rand.NewPCG(7, 8))
+	prefix := []byte("xy")
 	check := func(s string) {
 		t.Helper()
-		if got, max := Size(s), frameOverhead(len(s))+len(s); got > max {
-			t.Fatalf("%q: %d bytes vs raw %d", s, got, max)
+		buf, n, _, ok := AppendPayload(prefix, s)
+		if ok && (n >= len(s) || len(buf) != len(prefix)+n) {
+			t.Fatalf("%q: %d-byte payload (buffer %d) against %d raw", s, n, len(buf), len(s))
+		}
+		if !ok && len(buf) != len(prefix) {
+			t.Fatalf("%q: did not pack, but the buffer grew to %d", s, len(buf))
 		}
 	}
-	for _, pool := range [][]string{alphabet, {"日", "🌍", "\xff"}, {"a", "A"}} {
+	for _, symbols := range [][]string{alphabet, {"日", "🌍", "\xff"}, {"a", "A"}} {
 		for range 3000 {
-			check(randString(rng, pool, rng.IntN(50)))
+			check(randString(rng, symbols, rng.IntN(50)))
 		}
 	}
 	for n := range 300 {
@@ -289,63 +287,69 @@ func TestNeverInflates(t *testing.T) {
 	}
 }
 
-// TestNoAllocations pins the encoder's heap-free path: with room in the output
-// slice, Append must not touch the heap at any length. It has no scratch of its
-// own — the walk is fused with the packer and writes straight into the caller's
-// slice — so there is no length past which it starts allocating.
+// TestNoAllocations pins both directions as heap-free given room in the caller's
+// buffers: the encoder has no scratch of its own, and the decoder appends.
 func TestNoAllocations(t *testing.T) {
 	for _, s := range []string{"hello", "helloWorld", "product123", "el niño comió jamón",
 		strings.Repeat("ab", 200), strings.Repeat("Lima norte ", 400)} {
 		out := make([]byte, 0, 16<<10)
-		got := testing.AllocsPerRun(100, func() {
-			out = Append(out[:0], s)
-		})
-		if got != 0 {
-			t.Errorf("Append(%q...): %.1f allocs, want 0", s[:min(len(s), 12)], got)
+		var n int
+		var upper, ok bool
+		if got := testing.AllocsPerRun(100, func() {
+			out, n, upper, ok = AppendPayload(out[:0], s)
+		}); got != 0 {
+			t.Errorf("AppendPayload(%q...): %.1f allocs, want 0", s[:min(len(s), 12)], got)
 		}
-		if _, _, err := Decode(out); err != nil {
+		if !ok {
+			t.Fatalf("%q did not pack", s)
+		}
+		dst := make([]byte, 0, len(s))
+		var err error
+		if got := testing.AllocsPerRun(100, func() {
+			dst, err = AppendString(dst[:0], out, n, upper)
+		}); got != 0 {
+			t.Errorf("AppendString(%q...): %.1f allocs, want 0", s[:min(len(s), 12)], got)
+		}
+		if err != nil || string(dst) != s {
 			t.Fatalf("%q: %v", s, err)
 		}
 	}
 }
 
-// TestSizeNoAllocations pins Size's scratch on the stack for the strings this
-// codec targets. Size has to run the encoding to know its length, so it packs
-// into a fixed buffer and keeps only the count; past that buffer it allocates
-// once, which is why AppendPayload exists for callers that want both.
-func TestSizeNoAllocations(t *testing.T) {
-	for _, s := range []string{"hello", "el niño comió jamón",
-		strings.Repeat("ab", sizeScratchBytes/2-8)} {
-		if got := testing.AllocsPerRun(100, func() { _ = Size(s) }); got != 0 {
-			t.Errorf("Size(%d bytes): %.1f allocs, want 0", len(s), got)
+// TestPayloadSizes pins what representative strings cost, packed or raw, and
+// the case mode each opens in. packed5/README.md quotes this table.
+func TestPayloadSizes(t *testing.T) {
+	for _, c := range []struct {
+		in    string
+		size  int  // bytes stored: the payload, or len(in) when raw
+		mode  byte // 'l' or 'U' when packed, 'r' when raw
+		units int  // what the scan spends, before the grid pad
+	}{
+		{"hello", 4, 'l', 5},
+		{"helloWorld", 7, 'l', 11},
+		{"fooBARTest", 8, 'l', 12},
+		{"product123", 7, 'l', 10},
+		{"SKU-00042-XL", 12, 'r', 18},
+		{"el niño comió jamón", 14, 'l', 22},
+		{"the quick brown fox", 12, 'l', 19},
+		{"THE QUICK BROWN FOX", 12, 'U', 19},
+		{"user.name@example.com", 15, 'l', 24},
+		{`{"id":1023,"name":"ana"}`, 22, 'l', 34},
+		{"€1023.45", 7, 'l', 10},
+		{"Bogotá", 5, 'U', 8},
+		{"Móvil Samsung Galaxy S23", 19, 'U', 30},
+		{"Factura 2024-1023", 12, 'U', 19},
+	} {
+		size, mode := len(c.in), byte('r')
+		if _, n, upper, ok := AppendPayload(nil, c.in); ok {
+			size, mode = n, 'l'
+			if upper {
+				mode = 'U'
+			}
 		}
-	}
-}
-
-func TestSizeMatchesAppendExhaustively(t *testing.T) {
-	rng := rand.New(rand.NewPCG(9, 10))
-	for range 5000 {
-		s := randString(rng, alphabet, rng.IntN(30))
-		if got, want := Size(s), len(Append(nil, s)); got != want {
-			t.Fatalf("%q: Size = %d, Append = %d", s, got, want)
-		}
-	}
-}
-
-// TestDecodeDoesNotAliasInput mutates the source buffer after decoding; the
-// returned string must be unaffected in both raw and packed mode.
-func TestDecodeDoesNotAliasInput(t *testing.T) {
-	for _, s := range []string{"hello world", "\xff\xfe\xfd"} {
-		buf := Append(nil, s)
-		got, _, err := Decode(buf)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for i := range buf {
-			buf[i] = 0x5A
-		}
-		if got != s {
-			t.Fatalf("decoded string aliased the buffer: %q", got)
+		if units := scanUnits(c.in); size != c.size || mode != c.mode || units != c.units {
+			t.Errorf("%q: %d bytes, mode %c, %d units; want %d, %c, %d",
+				c.in, size, mode, units, c.size, c.mode, c.units)
 		}
 	}
 }
@@ -356,121 +360,44 @@ func FuzzRoundtrip(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
-		buf := Append(nil, s)
-		got, n, err := Decode(buf)
+		// No spare capacity anywhere: the prefix AppendPayload appends to, the
+		// payload AppendString reads and the dst it appends to all end exactly
+		// at their length, so every growth path and the tail path run.
+		prefix := []byte{0xAA}
+		buf, n, upper, ok := AppendPayload(prefix[:1:1], s)
+		if buf[0] != 0xAA {
+			t.Fatalf("prefix clobbered: %x", buf[0])
+		}
+		if !ok {
+			if len(buf) != 1 {
+				t.Fatalf("%q: did not pack, but appended %d bytes", s, len(buf)-1)
+			}
+			return
+		}
+		if n >= len(s) || len(buf) != 1+n {
+			t.Fatalf("%q: %d-byte payload in a %d-byte buffer, raw is %d", s, n, len(buf), len(s))
+		}
+		src := make([]byte, n)
+		copy(src, buf[1:])
+		dst := []byte{0xBB}
+		got, err := AppendString(dst[:1:1], src, n, upper)
 		if err != nil {
-			t.Fatalf("Decode: %v", err)
+			t.Fatalf("%q: %v (payload %x upper=%v)", s, err, src, upper)
 		}
-		if got != s {
-			t.Fatalf("roundtrip %q -> %q", s, got)
-		}
-		if n != len(buf) {
-			t.Fatalf("consumed %d of %d", n, len(buf))
-		}
-		if max := frameOverhead(len(s)) + len(s); len(buf) > max {
-			t.Fatalf("inflated %q: %d > %d", s, len(buf), max)
-		}
-		if Size(s) != len(buf) {
-			t.Fatalf("Size %d != %d", Size(s), len(buf))
+		if got[0] != 0xBB || string(got[1:]) != s {
+			t.Fatalf("%q -> %q (payload %x upper=%v)", s, got, src, upper)
 		}
 	})
 }
 
-// TestSizeReport is informational: it prints the packed size against the raw
-// byte length for representative inputs.
-func TestSizeReport(t *testing.T) {
-	samples := []string{
-		"hello", "helloWorld", "fooBARTest", "product123", "SKU-00042-XL",
-		"el niño comió jamón", "the quick brown fox", "THE QUICK BROWN FOX",
-		"user.name@example.com", `{"id":1023,"name":"ana"}`, "€1023.45",
-		"Bogotá", "Móvil Samsung Galaxy S23", "Factura 2024-1023",
-	}
-	t.Log(" raw  enc  ratio  flags  input")
-	for _, s := range samples {
-		buf := Append(nil, s)
-		flags := "raw"
-		if buf[0]&flagPacked5 != 0 {
-			flags = "p5"
-			if buf[0]&flagUppercase != 0 {
-				flags += "+U"
-			}
-		}
-		t.Log(fmt.Sprintf("%4d %4d  %.2f  %-6s %q", len(s), len(buf),
-			float64(len(buf))/float64(max(len(s), 1)), flags, s))
-	}
-}
-
-func BenchmarkAppend(b *testing.B) {
-	for _, s := range []string{"hello", "helloWorld", "product123", "el niño comió jamón",
-		"the quick brown fox jumps over the lazy dog"} {
-		b.Run(fmt.Sprintf("len%d", len(s)), func(b *testing.B) {
-			out := make([]byte, 0, 256)
-			b.ReportAllocs()
-			for b.Loop() {
-				out = Append(out[:0], s)
-			}
-		})
-	}
-}
-
-func BenchmarkDecode(b *testing.B) {
-	for _, s := range []string{"hello", "helloWorld", "product123", "el niño comió jamón",
-		"the quick brown fox jumps over the lazy dog"} {
-		buf := Append(nil, s)
-		b.Run(fmt.Sprintf("len%d", len(s)), func(b *testing.B) {
-			b.ReportAllocs()
-			for b.Loop() {
-				if _, _, err := Decode(buf); err != nil {
-					b.Fatal(err)
-				}
-			}
-		})
-	}
-}
-
-// TestConcurrentUse exercises the long-string scratch pool from many goroutines
-// at once. Run under -race, this is what says the pooled buffers are never
-// shared between two in-flight encodes.
-func TestConcurrentUse(t *testing.T) {
-	inputs := []string{
-		strings.Repeat("the quick brown fox jumps over the lazy dog ", 6),
-		strings.Repeat("el niño comió jamón en Bogotá ", 9),
-		strings.Repeat("SKU-1023-XL ", 20),
-		strings.Repeat("\xff\x00 mixed Case 42 ", 15),
-		"short",
-	}
-	var wg sync.WaitGroup
-	for g := range 16 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range 500 {
-				s := inputs[(g+i)%len(inputs)]
-				got, n, err := Decode(Append(nil, s))
-				if err != nil || got != s {
-					t.Errorf("goroutine %d: %v (n=%d)", g, err, n)
-					return
-				}
-				if Size(s) != len(Append(nil, s)) {
-					t.Errorf("goroutine %d: Size disagrees with Append", g)
-					return
-				}
-			}
-		}()
-	}
-	wg.Wait()
-}
-
-// corpus builds roughly a megabyte of short strings of one shape, which is the
-// workload this codec is actually for.
-func corpus(kind string) ([]string, int) {
+// realistic builds n short strings of one shape: the workload this codec is for.
+func realistic(kind string, n int) []string {
 	rng := rand.New(rand.NewPCG(42, 43))
 	words := []string{"hola", "mundo", "producto", "cliente", "factura", "norte", "sur",
 		"Lima", "Bogota", "Santiago", "activo", "pendiente", "azul", "rojo"}
 	word := func() string { return words[rng.IntN(len(words))] }
-	var out []string
-	total := 0
-	for total < 1<<20 {
+	out := make([]string, 0, n)
+	for range n {
 		var s string
 		switch kind {
 		case "name":
@@ -485,58 +412,44 @@ func corpus(kind string) ([]string, int) {
 			s = strings.Repeat("the quick brown fox jumps over the lazy dog ", 6)
 		}
 		out = append(out, s)
-		total += len(s)
 	}
-	return out, total
+	return out
 }
 
-var corpusKinds = []string{"name", "sku", "spanish", "sentence", "paragraph"}
+var realisticKinds = []string{"name", "sku", "spanish", "sentence", "paragraph"}
 
-// msPerMB converts the benchmark's own timing into the throughput figure the
-// README quotes.
-func msPerMB(b *testing.B, bytes int) {
-	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(bytes)*(1<<20)/1e6, "ms/MB")
-}
+var benchStrings = []string{"hello", "helloWorld", "product123", "el niño comió jamón",
+	"the quick brown fox jumps over the lazy dog"}
 
-func BenchmarkThroughputEncode(b *testing.B) {
-	for _, kind := range corpusKinds {
-		c, n := corpus(kind)
-		b.Run(kind, func(b *testing.B) {
-			out := make([]byte, 0, 2<<20)
-			b.SetBytes(int64(n))
+func BenchmarkAppendPayload(b *testing.B) {
+	for _, s := range benchStrings {
+		b.Run(fmt.Sprintf("len%d", len(s)), func(b *testing.B) {
+			out := make([]byte, 0, 256)
 			b.ReportAllocs()
 			for b.Loop() {
-				out = out[:0]
-				for _, s := range c {
-					out = Append(out, s)
-				}
+				out, _, _, _ = AppendPayload(out[:0], s)
 			}
-			b.ReportMetric(float64(len(out))/float64(n), "ratio")
-			msPerMB(b, n)
 		})
 	}
 }
 
-func BenchmarkThroughputDecode(b *testing.B) {
-	for _, kind := range corpusKinds {
-		c, n := corpus(kind)
-		var enc []byte
-		for _, s := range c {
-			enc = Append(enc, s)
+// BenchmarkAppendString reads with slack after the payload, as wire does.
+func BenchmarkAppendString(b *testing.B) {
+	for _, s := range benchStrings {
+		buf, n, upper, ok := AppendPayload(nil, s)
+		if !ok {
+			b.Fatalf("%q did not pack", s)
 		}
-		b.Run(kind, func(b *testing.B) {
-			b.SetBytes(int64(n))
+		buf = append(buf, slackBytes...)
+		b.Run(fmt.Sprintf("len%d", len(s)), func(b *testing.B) {
+			dst := make([]byte, 0, 256)
 			b.ReportAllocs()
 			for b.Loop() {
-				for rest := enc; len(rest) > 0; {
-					_, k, err := Decode(rest)
-					if err != nil {
-						b.Fatal(err)
-					}
-					rest = rest[k:]
+				var err error
+				if dst, err = AppendString(dst[:0], buf, n, upper); err != nil {
+					b.Fatal(err)
 				}
 			}
-			msPerMB(b, n)
 		})
 	}
 }

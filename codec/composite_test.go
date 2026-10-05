@@ -111,18 +111,11 @@ func TestRecursiveTypeRoundTrips(t *testing.T) {
 	}
 }
 
-// Truncated bytes must never panic a nested decode.
+// A truncated nested message is refused wherever the cut lands inside a field.
 func TestNestedTruncationIsRefused(t *testing.T) {
 	value := outer{Head: 7, One: inner{ID: 1, Name: "one"},
 		Many: []inner{{ID: 2, Name: "two"}}, Tail: "tail"}
-	message, err := Marshal(&value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for cut := range len(message) {
-		var back outer
-		_ = Unmarshal(message[:cut], &back)
-	}
+	checkPrefixes(t, &value, unmarshalInto[outer])
 }
 
 func BenchmarkNestedAppend(b *testing.B) {
@@ -132,7 +125,7 @@ func BenchmarkNestedAppend(b *testing.B) {
 	buffer := make([]byte, 0, 256)
 	b.ReportAllocs()
 	for b.Loop() {
-		buffer = handle.Append(buffer[:0], &value)
+		buffer, _ = handle.Append(buffer[:0], &value)
 	}
 }
 
@@ -140,7 +133,7 @@ func BenchmarkNestedUnmarshal(b *testing.B) {
 	value := outer{Head: 7, One: inner{ID: 1, Name: "one"},
 		Many: []inner{{ID: 2, Name: "two"}, {ID: 3, Name: "three"}}, Tail: "tail"}
 	handle := MustCodec[outer]()
-	message := handle.Encode(&value)
+	message := must(handle.Encode(&value))
 	var back outer
 	b.ReportAllocs()
 	for b.Loop() {
@@ -183,7 +176,7 @@ func TestSliceOfStructsChoosesTheLayout(t *testing.T) {
 	handle := MustCodec[tableHolder]()
 	for _, n := range []int{0, 1, 2, tableThreshold - 1, tableThreshold, 100, 1000} {
 		value := tableHolder{Head: 9, Rows: makeTableRows(n)}
-		message := handle.Encode(&value)
+		message := must(handle.Encode(&value))
 
 		var back tableHolder
 		if err := handle.Unmarshal(message, &back); err != nil {
@@ -207,8 +200,8 @@ func TestSliceOfStructsChoosesTheLayout(t *testing.T) {
 // The table has to actually be smaller, or choosing it is pointless.
 func TestTableBeatsRowWiseAtScale(t *testing.T) {
 	handle := MustCodec[tableHolder]()
-	small := len(handle.Encode(&tableHolder{Rows: makeTableRows(tableThreshold - 1)}))
-	large := len(handle.Encode(&tableHolder{Rows: makeTableRows(1000)}))
+	small := len(must(handle.Encode(&tableHolder{Rows: makeTableRows(tableThreshold - 1)})))
+	large := len(must(handle.Encode(&tableHolder{Rows: makeTableRows(1000)})))
 	perRowSmall := float64(small) / float64(tableThreshold-1)
 	perRowLarge := float64(large) / 1000
 	t.Logf("list at %d rows: %.1f B/row · table at 1000 rows: %.1f B/row",
@@ -219,14 +212,10 @@ func TestTableBeatsRowWiseAtScale(t *testing.T) {
 	}
 }
 
-// Truncated bytes must never panic a table decode.
+// A truncated table is refused, whichever column the cut lands in.
 func TestTableTruncationIsRefused(t *testing.T) {
 	handle := MustCodec[tableHolder]()
-	message := handle.Encode(&tableHolder{Head: 9, Rows: makeTableRows(50)})
-	for cut := range len(message) {
-		var back tableHolder
-		_ = handle.Unmarshal(message[:cut], &back)
-	}
+	checkPrefixes(t, &tableHolder{Head: 9, Rows: makeTableRows(50)}, handle.Unmarshal)
 }
 
 func BenchmarkTableAppend(b *testing.B) {
@@ -235,7 +224,7 @@ func BenchmarkTableAppend(b *testing.B) {
 	buffer := make([]byte, 0, 1<<16)
 	b.ReportAllocs()
 	for b.Loop() {
-		buffer = handle.Append(buffer[:0], &value)
+		buffer, _ = handle.Append(buffer[:0], &value)
 	}
 	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*1000), "ns/row")
 }
@@ -243,7 +232,7 @@ func BenchmarkTableAppend(b *testing.B) {
 func BenchmarkTableUnmarshal(b *testing.B) {
 	handle := MustCodec[tableHolder]()
 	value := tableHolder{Head: 9, Rows: makeTableRows(1000)}
-	message := handle.Encode(&value)
+	message := must(handle.Encode(&value))
 	var back tableHolder
 	b.ReportAllocs()
 	for b.Loop() {

@@ -220,14 +220,14 @@ func TestTheEnvelopeFlagSurvivesTheSection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !schema.plan.envelope {
+	if !schema.root().envelope {
 		t.Fatal("the plan for a slice root is not marked an envelope")
 	}
 	parsed, err := ParseSchema(schema.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !parsed.plan.envelope {
+	if !parsed.root().envelope {
 		t.Fatal("the envelope flag did not survive the section")
 	}
 
@@ -237,7 +237,7 @@ func TestTheEnvelopeFlagSurvivesTheSection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plain.plan.envelope {
+	if plain.root().envelope {
 		t.Fatal("a declared struct is marked an envelope")
 	}
 }

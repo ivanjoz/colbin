@@ -24,8 +24,9 @@ use crate::Error;
 use crate::json::{JsonSink, render_key_run};
 use crate::plan::{
     self, MAP_ANY, MAP_BOOL, MAP_FLOAT32, MAP_FLOAT64, MAP_INT, MAP_STRING, MAP_UINT, OP_ANY,
-    OP_ANYS, OP_BOOL, OP_BYTES, OP_FLOAT32, OP_FLOAT64, OP_INT8, OP_INT64, OP_MAP, OP_POINTER,
-    OP_STRING, OP_STRINGS, OP_STRUCT, OP_STRUCTS, OP_UINT8, OP_UINT64, Plan, PlanField,
+    OP_ANYS, OP_BOOL, OP_BYTES, OP_FLOAT32, OP_FLOAT64, OP_INT8, OP_INT16, OP_INT32, OP_INT64,
+    OP_MAP, OP_POINTER, OP_STRING, OP_STRINGS, OP_STRUCT, OP_STRUCTS, OP_UINT8, OP_UINT16,
+    OP_UINT32, OP_UINT64, Plan, PlanField,
 };
 use crate::section::Schema;
 use crate::wire::{Kind, Reader, Reader8};
@@ -186,10 +187,19 @@ impl<'s> Walker<'s> {
 
     fn narrow_run(&mut self, plan_at: u32, body: &[u8]) -> Result<(), Error> {
         self.enter()?;
+        self.to.begin_object();
+        self.narrow_fields(plan_at, body)?;
+        self.to.end_object();
+        self.leave();
+        Ok(())
+    }
+
+    /// A four-bit-keyed run's fields, into the object already open: the run's
+    /// own or, for a page, the one that links it.
+    fn narrow_fields(&mut self, plan_at: u32, body: &[u8]) -> Result<(), Error> {
         let plan = self.plan_at(plan_at)?;
         let mut reader = Reader::new(body);
         let mut seen = alloc::vec![false; plan.fields.len()];
-        self.to.begin_object();
         while reader.more() {
             let key = reader.key();
             // Four descriptor bits have no room for a class, so nothing can size
@@ -202,18 +212,24 @@ impl<'s> Walker<'s> {
             self.narrow_value(&mut reader, &field)?;
         }
         reader.err()?;
-        self.absent(plan_at, &seen)?;
+        self.absent(plan_at, &seen)
+    }
+
+    fn wide_run(&mut self, plan_at: u32, body: &[u8]) -> Result<(), Error> {
+        self.enter()?;
+        self.to.begin_object();
+        self.wide_fields(plan_at, body)?;
         self.to.end_object();
         self.leave();
         Ok(())
     }
 
-    fn wide_run(&mut self, plan_at: u32, body: &[u8]) -> Result<(), Error> {
-        self.enter()?;
+    /// [`Walker::narrow_fields`] at eight key bits, which is the only width a
+    /// page link can be under.
+    fn wide_fields(&mut self, plan_at: u32, body: &[u8]) -> Result<(), Error> {
         let plan = self.plan_at(plan_at)?;
         let mut reader = Reader8::new(body);
         let mut seen = alloc::vec![false; plan.fields.len()];
-        self.to.begin_object();
         while reader.more() {
             let Some(index) = plan.field_of(reader.key()) else {
                 // A key the schema does not list is stepped over, which is what
@@ -223,28 +239,69 @@ impl<'s> Walker<'s> {
                 continue;
             };
             seen[index] = true;
-            self.write_key(plan_at, index);
             let field = plan.fields[index].clone();
+            if self.links_page(&field) {
+                self.page(&mut reader, &field)?;
+                continue;
+            }
+            self.write_key(plan_at, index);
             self.wide_value(&mut reader, &field)?;
         }
         reader.err()?;
-        self.absent(plan_at, &seen)?;
-        self.to.end_object();
+        self.absent(plan_at, &seen)
+    }
+
+    /// Whether a field is the link to the next page of a paged type, which
+    /// `section::parse` only accepts as a struct under key 255 of a wide run.
+    fn links_page(&self, field: &PlanField) -> bool {
+        field.op == OP_STRUCT
+            && field
+                .sub
+                .and_then(|at| self.schema.plan(at))
+                .is_some_and(|plan| plan.is_page)
+    }
+
+    /// The next page of a paged type, into the object its first page opened:
+    /// the fields are the type's, and the page is only where they were put.
+    fn page(&mut self, reader: &mut Reader8<'_>, field: &PlanField) -> Result<(), Error> {
+        let (body, wide) = reader.struct_body().ok_or(Error::Truncated)?;
+        let at = field.sub.ok_or(Error::BadSection)?;
+        self.enter()?;
+        if wide {
+            self.wide_fields(at, body)?;
+        } else {
+            self.narrow_fields(at, body)?;
+        }
         self.leave();
         Ok(())
     }
 
-    /// The fields the message left out. See the module comment on ordering.
+    /// The fields the message left out. See the module comment on ordering. A
+    /// page left out is the same thing at a larger scale: its fields go into
+    /// this object, as zeros.
     fn absent(&mut self, plan_at: u32, seen: &[bool]) -> Result<(), Error> {
         let plan = self.plan_at(plan_at)?;
         for (index, field) in plan.fields.iter().enumerate() {
             if seen.get(index).copied().unwrap_or(false) {
                 continue;
             }
-            self.write_key(plan_at, index);
             let field = field.clone();
+            if self.links_page(&field) {
+                self.absent_page(field.sub)?;
+                continue;
+            }
+            self.write_key(plan_at, index);
             self.zero(&field)?;
         }
+        Ok(())
+    }
+
+    fn absent_page(&mut self, sub: Option<u32>) -> Result<(), Error> {
+        let at = sub.ok_or(Error::BadSection)?;
+        self.enter()?;
+        let none = alloc::vec![false; self.plan_at(at)?.fields.len()];
+        self.absent(at, &none)?;
+        self.leave();
         Ok(())
     }
 
@@ -320,8 +377,16 @@ impl<'s> Walker<'s> {
     fn narrow_scalar(&mut self, reader: &mut Reader<'_>, op: u8) -> Result<(), Error> {
         match op {
             OP_BOOL => self.to.boolean(reader.bool()),
-            o if (OP_INT8..=OP_INT64).contains(&o) => self.to.signed(reader.i64()),
-            o if (OP_UINT8..=OP_UINT64).contains(&o) => self.to.unsigned(reader.u64()),
+            // Each width is read as itself, so a value past its type is refused
+            // rather than rendered: the schema is what says what fits.
+            OP_INT8 => self.to.signed(i64::from(reader.i8())),
+            OP_INT16 => self.to.signed(i64::from(reader.i16())),
+            OP_INT32 => self.to.signed(i64::from(reader.i32())),
+            OP_INT64 => self.to.signed(reader.i64()),
+            OP_UINT8 => self.to.unsigned(u64::from(reader.u8())),
+            OP_UINT16 => self.to.unsigned(u64::from(reader.u16())),
+            OP_UINT32 => self.to.unsigned(u64::from(reader.u32())),
+            OP_UINT64 => self.to.unsigned(reader.u64()),
             OP_FLOAT32 => {
                 let value = f64::from(reader.f32());
                 if !self.to.float(value, 32) {
@@ -389,8 +454,16 @@ impl<'s> Walker<'s> {
     fn wide_scalar(&mut self, reader: &mut Reader8<'_>, op: u8) -> Result<(), Error> {
         match op {
             OP_BOOL => self.to.boolean(reader.bool()),
-            o if (OP_INT8..=OP_INT64).contains(&o) => self.to.signed(reader.i64()),
-            o if (OP_UINT8..=OP_UINT64).contains(&o) => self.to.unsigned(reader.u64()),
+            // Each width is read as itself, so a value past its type is refused
+            // rather than rendered: the schema is what says what fits.
+            OP_INT8 => self.to.signed(i64::from(reader.i8())),
+            OP_INT16 => self.to.signed(i64::from(reader.i16())),
+            OP_INT32 => self.to.signed(i64::from(reader.i32())),
+            OP_INT64 => self.to.signed(reader.i64()),
+            OP_UINT8 => self.to.unsigned(u64::from(reader.u8())),
+            OP_UINT16 => self.to.unsigned(u64::from(reader.u16())),
+            OP_UINT32 => self.to.unsigned(u64::from(reader.u32())),
+            OP_UINT64 => self.to.unsigned(reader.u64()),
             OP_FLOAT32 => {
                 let value = f64::from(reader.f32());
                 if !self.to.float(value, 32) {
@@ -732,10 +805,16 @@ impl<'s> Walker<'s> {
 
     fn narrow_table(&mut self, reader: &mut Reader<'_>, field: &PlanField) -> Result<(), Error> {
         let at = field.sub.ok_or(Error::BadSection)?;
-        let (rows, mut columns) = reader.counted().ok_or(Error::Truncated)?;
+        let (rows, body) = reader.table().ok_or(Error::Truncated)?;
+        // The columns are keyed at the row type's width, which for wide rows is
+        // not this run's. See `codec::write_table`.
+        if self.plan_at(at)?.is_wide {
+            return self.struct_table(at, rows, &mut Reader8::new(body));
+        }
         if rows > MAX_ROWS {
             return Err(Error::TooManyRows);
         }
+        let mut columns = Reader::new(body);
         let plan = self.plan_at(at)?;
         let mut gathered = Gathered::new(plan.fields.len());
         while columns.more() {
