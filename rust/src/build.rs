@@ -252,7 +252,13 @@ impl<'a, 'd> Builder<'a, 'd> {
         let element = self.schema.plan(sub);
         if element.is_some_and(|plan| plan.can_table) && rows >= TABLE_THRESHOLD {
             let mark = w.open_table(field.key, rows);
-            self.narrow_columns(w, sub, node, rows);
+            // The columns are keyed at the row type's width, which for wide
+            // rows is not this run's. See `codec::write_table`.
+            if element.is_some_and(|plan| plan.is_wide) {
+                self.wide_columns(&mut wire::Writer8::new(w.buf), sub, node, rows);
+            } else {
+                self.narrow_columns(w, sub, node, rows);
+            }
             w.close(mark);
             return;
         }

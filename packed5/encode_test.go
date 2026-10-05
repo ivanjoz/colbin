@@ -1,25 +1,21 @@
 package packed5
 
-// How far the greedy scan lands from the smallest frame the format allows, and
+// How far the greedy scan lands from the smallest payload the format allows, and
 // what it chooses on the way there.
 //
 // The optimum is a shortest path over (offset, case mode) nodes, priced in
-// units. Keeping it here as an oracle rather than shipping it is the same trade
-// the package documentation describes: the exact encoder is several times slower
-// for a gap that is zero on every realistic corpus and small elsewhere. What
-// matters is that the gap is measured rather than asserted, and that it cannot
-// widen without a test failing.
+// units. It is kept here as an oracle rather than shipped because it is several
+// times slower, for a gap that is zero on realistic strings and small elsewhere.
+// What matters is that the gap is measured rather than asserted, and that it
+// cannot widen without a test failing.
 
 import (
-	"fmt"
 	"math/rand/v2"
 	"strings"
 	"testing"
 )
 
-// Token costs, in units. The whole point of the format is that these are whole
-// numbers: a token that cost a fraction of a unit is a token that would put the
-// next one off the grid.
+// Token costs, in units.
 const (
 	unitsLetter      = 1
 	unitsLetterCased = 2 // CASE_TOGGLE_SIMPLE + the letter
@@ -33,7 +29,7 @@ const (
 )
 
 // optimalUnits is the fewest units any encoder could spend on s, over both
-// starting case modes — the header bit carries either at no cost.
+// starting case modes — the container carries either at no cost.
 //
 // dist[i][m] is the cost of reaching offset i in mode m. Every edge below is a
 // token the format can actually emit, so the result is a real encoding rather
@@ -119,20 +115,20 @@ func optimalUnits(s string) int {
 	return min(end[0], end[1])
 }
 
-// optimalSize is the frame the optimum would produce, so the comparison is in
-// the currency that matters.
+// storedSize is what a container stores for s: the payload when it packs, the
+// raw bytes when it does not.
+func storedSize(s string) int {
+	if _, n, _, ok := AppendPayload(nil, s); ok {
+		return n
+	}
+	return len(s)
+}
+
+// optimalSize is storedSize for the optimum, so the comparison is in the
+// currency that matters. The grid pad is free: it fits in the rounding or it is
+// not emitted.
 func optimalSize(s string) int {
-	if len(s) == 0 {
-		return 1
-	}
-	raw := frameOverhead(len(s)) + len(s)
-	u := optimalUnits(s)
-	// The grid pad is free: it fits in the rounding or it is not emitted.
-	n := payloadBytes(u)
-	if packed := frameOverhead(n) + n; packed < raw {
-		return packed
-	}
-	return raw
+	return min(payloadBytes(optimalUnits(s)), len(s))
 }
 
 // scanUnits is what the shipped encoder spends, counted the same way.
@@ -147,72 +143,65 @@ func scanUnits(s string) int {
 	return w.units
 }
 
+// oraclePools are the inputs the scan is measured against the optimum on.
+var oraclePools = []pool{
+	{"words", []string{"hola", " ", "mundo", "Test", "123", "-", "ABC"}},
+	{"alphabet", alphabet},
+	{"digits", []string{"0", "1", "9", "a", "-", "A"}},
+	{"case-heavy", []string{"a", "A", "b", "B", "c", "C"}},
+	{"case+symbol", []string{"a", "A", "B", "b", "-", "."}},
+	{"binary", []string{"\x00", "\xff", "\xc3", "a", "Z"}},
+}
+
 // TestNeverBeatsOptimal is the sanity direction: the greedy scan cannot spend
 // fewer units than the shortest path, or the shortest path is wrong.
 func TestNeverBeatsOptimal(t *testing.T) {
-	rng := rand.New(rand.NewPCG(11, 12))
-	for _, pool := range oraclePools {
+	for i, p := range oraclePools {
+		rng := rand.New(rand.NewPCG(11, uint64(i)))
 		for range 3000 {
-			s := randString(rng, pool, rng.IntN(24))
+			s := randString(rng, p.symbols, rng.IntN(24))
 			if got, want := scanUnits(s), optimalUnits(s); got < want {
-				t.Fatalf("%q: scan %d units, 'optimal' %d", s, got, want)
+				t.Fatalf("%s: %q: scan %d units, 'optimal' %d", p.name, s, got, want)
 			}
 		}
 	}
 }
 
-var oraclePools = map[string][]string{
-	"words":      {"hola", " ", "mundo", "Test", "123", "-", "ABC"},
-	"alphabet":   alphabet,
-	"digits":     {"0", "1", "9", "a", "-", "A"},
-	"case-heavy": {"a", "A", "b", "B", "c", "C"},
-	"casesym":    {"a", "A", "B", "b", "-", "."},
-	"binary":     {"\x00", "\xff", "\xc3", "a", "Z"},
-}
-
-// TestOptimalOnRealisticStrings is the claim the package documentation makes:
-// on the shapes this codec is for, the greedy scan is not merely close to the
-// optimum, it is the optimum, byte for byte.
+// TestOptimalOnRealisticStrings is the claim the README makes: on the shapes
+// this codec is for, the greedy scan is not merely close to the optimum, it is
+// the optimum, byte for byte.
 func TestOptimalOnRealisticStrings(t *testing.T) {
-	for _, kind := range corpusKinds {
-		strs, _ := corpus(kind)
-		if len(strs) > 8000 {
-			strs = strs[:8000]
-		}
-		for _, s := range strs {
-			if got, want := len(Append(nil, s)), optimalSize(s); got != want {
-				t.Fatalf("%s: %q encodes to %d bytes, optimal is %d\n tokens: %s",
-					kind, s, got, want, opsOf(disassemble(t, Append(nil, s))))
+	for _, kind := range realisticKinds {
+		for _, s := range realistic(kind, 8000) {
+			if got, want := storedSize(s), optimalSize(s); got != want {
+				t.Fatalf("%s: %q stores in %d bytes, optimal is %d\n tokens: %s",
+					kind, s, got, want, opsOf(disassemble(t, s)))
 			}
 		}
 	}
 }
 
-// TestGapFromOptimal measures where the scan does lose, and pins it. A change
-// that widens any of these numbers is a change that made the encoder worse.
+// TestGapFromOptimal measures where the scan does lose, and pins it. Each
+// ceiling sits a little above what the scan measures today, so a change that
+// makes the encoder worse fails here rather than in a ratio someone notices
+// later. Run with -v for the table packed5/README.md quotes.
 func TestGapFromOptimal(t *testing.T) {
-	// Ceilings a little above what the scan measures today, so that a change
-	// which makes it worse fails here rather than in a ratio someone notices
-	// later. The pre-unit format's figures, for comparison, were alphabet
-	// 9.47/0.52, digits 13.28/0.95, case-heavy 19.45/1.50 and case+symbol
-	// 24.66/2.13: better here on three of the four, and a little worse on the
-	// one where the case rule is doing all the work.
 	limits := map[string]struct{ hurt, lost float64 }{
-		"words":      {0.5, 0.1},
-		"alphabet":   {3.0, 0.3},
-		"digits":     {14.0, 1.2},
-		"case-heavy": {26.0, 2.2},
-		"casesym":    {17.0, 1.3},
-		"binary":     {0.5, 0.1},
+		"words":       {0.1, 0.01},
+		"alphabet":    {2.0, 0.15},
+		"digits":      {11.5, 1.0},
+		"case-heavy":  {23.0, 2.0},
+		"case+symbol": {15.0, 1.2},
+		"binary":      {0.1, 0.01},
 	}
-	rng := rand.New(rand.NewPCG(13, 14))
 	t.Log("pool          strings hurt   bytes lost   worst case")
-	for name, pool := range oraclePools {
+	for i, p := range oraclePools {
+		rng := rand.New(rand.NewPCG(13, uint64(i)))
 		var hurt, total, lost, bytes, worst int
 		var worstStr string
 		for range 20000 {
-			s := randString(rng, pool, 1+rng.IntN(30))
-			got, want := len(Append(nil, s)), optimalSize(s)
+			s := randString(rng, p.symbols, 1+rng.IntN(30))
+			got, want := storedSize(s), optimalSize(s)
 			total++
 			bytes += want
 			if got > want {
@@ -225,25 +214,24 @@ func TestGapFromOptimal(t *testing.T) {
 		}
 		hurtPct := 100 * float64(hurt) / float64(total)
 		lostPct := 100 * float64(lost) / float64(bytes)
-		t.Logf("%-12s %11.2f%% %11.2f%%   +%d on %q", name, hurtPct, lostPct, worst, worstStr)
-		if lim := limits[name]; hurtPct > lim.hurt || lostPct > lim.lost {
+		t.Logf("%-12s %11.2f%% %11.2f%%   +%d on %q", p.name, hurtPct, lostPct, worst, worstStr)
+		if lim := limits[p.name]; hurtPct > lim.hurt || lostPct > lim.lost {
 			t.Errorf("%s: %.2f%% hurt / %.2f%% lost exceeds %.2f / %.2f",
-				name, hurtPct, lostPct, lim.hurt, lim.lost)
+				p.name, hurtPct, lostPct, lim.hurt, lim.lost)
 		}
 	}
 }
 
-// TestKnownGapCaseAcrossSymbols records the one shape the run-length rule cannot
+// TestKnownGapCaseAcrossSymbols bounds the one shape the run-length rule cannot
 // see: case changes spread across symbols, where two long toggles spanning them
-// beat four simple ones.
+// beat four simple ones. A better encoder may close the gap; none may widen it.
 func TestKnownGapCaseAcrossSymbols(t *testing.T) {
 	const s = "abab-CD-EF-ghgh"
 	got, want := scanUnits(s), optimalUnits(s)
-	if got <= want {
-		t.Fatalf("%q: expected the greedy scan to lose, got %d vs %d", s, got, want)
+	if got-want > 2 {
+		t.Fatalf("%q: scan %d units against an optimal %d, a gap above 2 — %s",
+			s, got, want, opsOf(disassemble(t, s)))
 	}
-	t.Logf("%q: scan %d units, optimal %d — %s", s, got, want,
-		opsOf(disassemble(t, Append(nil, s))))
 }
 
 // --- what the encoder chooses ----------------------------------------------
@@ -253,7 +241,7 @@ func TestKnownGapCaseAcrossSymbols(t *testing.T) {
 func TestCaseToggleSelection(t *testing.T) {
 	for run := 1; run <= 5; run++ {
 		s := "lower" + strings.Repeat("A", run) + "tail"
-		toks := disassemble(t, Append(nil, s))
+		toks := disassemble(t, s)
 		simple, long := countKind(toks, "caseSimple"), countKind(toks, "caseLong")
 		if run <= 2 {
 			if simple != run || long != 0 {
@@ -265,9 +253,9 @@ func TestCaseToggleSelection(t *testing.T) {
 	}
 }
 
-// TestUppercaseHeaderBit pins the hoist: a string whose first letter is
-// uppercase starts the stream in uppercase mode, and spends no token saying so.
-func TestUppercaseHeaderBit(t *testing.T) {
+// TestUppercaseModeIsHoisted pins the case mode: a string whose first letter is
+// uppercase opens the stream in uppercase mode, and spends no token saying so.
+func TestUppercaseModeIsHoisted(t *testing.T) {
 	for _, c := range []struct {
 		in    string
 		upper bool
@@ -280,15 +268,18 @@ func TestUppercaseHeaderBit(t *testing.T) {
 		{"123-ABC", true},
 		{"-", false},
 	} {
-		buf := Append(nil, c.in)
-		if buf[0]&flagPacked5 == 0 {
-			continue // fell back to raw; the flag means nothing there
+		if got := opensUpper(c.in); got != c.upper {
+			t.Errorf("%q: opens upper = %v, want %v", c.in, got, c.upper)
 		}
-		if got := buf[0]&flagUppercase != 0; got != c.upper {
-			t.Errorf("%q: UPPERCASE = %v, want %v", c.in, got, c.upper)
+		_, _, upper, ok := AppendPayload(nil, c.in)
+		if !ok {
+			continue // stored raw; there is no case mode
+		}
+		if upper != c.upper {
+			t.Errorf("%q: AppendPayload upper = %v, want %v", c.in, upper, c.upper)
 		}
 		// Whatever the mode, the stream must not open by toggling it.
-		if toks := disassemble(t, buf); len(toks) > 0 && toks[0].kind == "caseLong" {
+		if toks := disassemble(t, c.in); len(toks) > 0 && toks[0].kind == "caseLong" {
 			t.Errorf("%q: stream opens with a long toggle — %s", c.in, opsOf(toks))
 		}
 	}
@@ -303,7 +294,7 @@ func TestLoneDigitTakesSymbolToken(t *testing.T) {
 		{"aaaaaa12aaaaaa", "num"},
 		{"aaaaaa1234aaaaaa", "num"},
 	} {
-		toks := disassemble(t, Append(nil, c.in))
+		toks := disassemble(t, c.in)
 		found := ""
 		for _, tk := range toks {
 			if tk.kind == "sym" || tk.kind == "num" {
@@ -320,17 +311,18 @@ func TestLoneDigitTakesSymbolToken(t *testing.T) {
 // TestNumberTokensNeverCarryLeadingZeros is the rule that keeps "00123" from
 // coming back as "123". Checked over every decimal string up to six digits.
 func TestNumberTokensNeverCarryLeadingZeros(t *testing.T) {
-	var b []byte
+	var b, buf, dst []byte
 	var digits func(n int)
 	digits = func(n int) {
 		if n == 0 {
-			s := string(b)
-			if s == "" {
-				return
+			var size int
+			var upper, ok bool
+			if buf, size, upper, ok = AppendPayload(buf[:0], string(b)); !ok {
+				return // stored raw, so there is no number token to check
 			}
-			got, _, err := Decode(Append(nil, s))
-			if err != nil || got != s {
-				t.Fatalf("%q: got %q, %v", s, got, err)
+			var err error
+			if dst, err = AppendString(dst[:0], buf, size, upper); err != nil || string(dst) != string(b) {
+				t.Fatalf("%q: got %q, %v", b, dst, err)
 			}
 			return
 		}
@@ -350,7 +342,7 @@ func TestNumberTokensNeverCarryLeadingZeros(t *testing.T) {
 func TestEscapeRunsAreMerged(t *testing.T) {
 	for n := 1; n <= 9; n++ {
 		s := strings.Repeat("a", 30) + strings.Repeat("\x01", n) + strings.Repeat("b", 30)
-		toks := disassemble(t, Append(nil, s))
+		toks := disassemble(t, s)
 		want := (n + maxEscapeRun - 1) / maxEscapeRun
 		if got := countKind(toks, "esc"); got != want {
 			t.Errorf("%d bytes: %d escapes, want %d — %s", n, got, want, opsOf(toks))
@@ -362,8 +354,7 @@ func TestEscapeRunsAreMerged(t *testing.T) {
 // own token rather than the escape.
 func TestSymbolTableCoverage(t *testing.T) {
 	for i, c := range symTable {
-		s := "aaaaaaaa" + string(c) + "aaaaaaaa"
-		toks := disassemble(t, Append(nil, s))
+		toks := disassemble(t, "aaaaaaaa"+string(c)+"aaaaaaaa")
 		if countKind(toks, "sym") != 1 {
 			t.Errorf("symTable[%d] = %q did not take a symbol token — %s", i, c, opsOf(toks))
 			continue
@@ -381,8 +372,7 @@ func TestSymbolTableCoverage(t *testing.T) {
 			}
 			continue
 		}
-		s := "aaaaaaaa" + str + "aaaaaaaa"
-		toks := disassemble(t, Append(nil, s))
+		toks := disassemble(t, "aaaaaaaa"+str+"aaaaaaaa")
 		if countKind(toks, "ext") != 1 {
 			t.Errorf("extTable[%d] = %q did not take an ext token — %s", i, str, opsOf(toks))
 			continue
@@ -427,8 +417,8 @@ func TestTablesAreConsistent(t *testing.T) {
 			}
 		}
 	}
-	// A letter, a space or a digit must never also sit in a table, or two
-	// encodings of the same string would exist.
+	// A letter or a space must never also sit in a table, or two encodings of
+	// the same string would exist.
 	for c := range 128 {
 		if isLetter(byte(c)) || byte(c) == ' ' {
 			if asciiSym[c] >= 0 || asciiExt[c] >= 0 {
@@ -438,22 +428,18 @@ func TestTablesAreConsistent(t *testing.T) {
 	}
 }
 
-// TestInlineLengthMatchesPayload pins the header's length against the bytes that
-// follow it, across the inline/uvarint boundary.
-func TestInlineLengthMatchesPayload(t *testing.T) {
-	for n := range 400 {
+// TestPayloadLengthMatchesUnits pins the payload length to the units the scan
+// spends: the grid pad never adds a byte, so the payload is exactly the bytes
+// those units need.
+func TestPayloadLengthMatchesUnits(t *testing.T) {
+	for n := 1; n < 400; n++ {
 		s := strings.Repeat("ab ", n)
-		buf := Append(nil, s)
-		h, err := frame(buf)
-		if err != nil {
-			t.Fatalf("n=%d: %v", n, err)
+		_, size, _, ok := AppendPayload(nil, s)
+		if !ok {
+			t.Fatalf("n=%d: did not pack", n)
 		}
-		if h.n != len(buf) {
-			t.Errorf("n=%d: frame says %d bytes, Append wrote %d", n, h.n, len(buf))
-		}
-		if h.packed && payloadUnits(len(h.payload)) < scanUnits(s) {
-			t.Errorf("n=%d: payload holds %d units, scan wants %d",
-				n, payloadUnits(len(h.payload)), scanUnits(s))
+		if want := payloadBytes(scanUnits(s)); size != want {
+			t.Errorf("n=%d: payload %d bytes, %d units need %d", n, size, scanUnits(s), want)
 		}
 	}
 }
@@ -462,20 +448,14 @@ func TestInlineLengthMatchesPayload(t *testing.T) {
 // must pack, and shapes it is not for must not.
 func TestPackedBeatsRawWhereExpected(t *testing.T) {
 	for _, s := range []string{"hello", "helloWorld", "el niño comió jamón",
-		"the quick brown fox", "SKU-4217-hola", "Factura 2024-1023"} {
-		if Append(nil, s)[0]&flagPacked5 == 0 {
+		"the quick brown fox", "SKU-4217-hola", "Factura 2024-1023",
+		`{"id":1023,"name":"ana"}`} {
+		if _, _, _, ok := AppendPayload(nil, s); !ok {
 			t.Errorf("%q did not pack", s)
 		}
 	}
-	// Braces, quotes, colons and commas all have symbol tokens now, so JSON
-	// packs where the pre-unit tables had to fall back on it.
-	for _, s := range []string{`{"id":1023,"name":"ana"}`} {
-		if Append(nil, s)[0]&flagPacked5 == 0 {
-			t.Errorf("%q did not pack", s)
-		}
-	}
-	for _, s := range []string{"\x00\x01\x02\x03", "\xff\xfe\xfd"} {
-		if Append(nil, s)[0]&flagPacked5 != 0 {
+	for _, s := range []string{"\x00\x01\x02\x03", "\xff\xfe\xfd", "SKU-00042-XL"} {
+		if _, _, _, ok := AppendPayload(nil, s); ok {
 			t.Errorf("%q packed, but should have fallen back", s)
 		}
 	}
@@ -491,7 +471,7 @@ func TestSpecExampleCosts(t *testing.T) {
 		{"hello", 5},                     // five letters
 		{"hello world", 11},              // plus a space and five more
 		{"helloWorld", 11},               // a simple toggle for the W
-		{"HELLOWORLD", 10},               // all upper, mode from the header
+		{"HELLOWORLD", 10},               // all upper, mode from the container
 		{"a1", 3},                        // letter plus a lone digit
 		{"a12", 4},                       // letter plus a number
 		{"a-b", 4},                       // the dash is a symbol token
@@ -507,46 +487,34 @@ func TestSpecExampleCosts(t *testing.T) {
 	}
 }
 
-// TestAppendPayloadMatchesFrame pins the embedded form against the framed one:
-// the payload bytes and the case mode must be exactly what the frame carries.
-func TestAppendPayloadMatchesFrame(t *testing.T) {
-	rng := rand.New(rand.NewPCG(15, 16))
-	for _, pool := range oraclePools {
+// TestAppendPayloadAfterPrefix pins the encoder's offset handling: a payload
+// appended after existing bytes, as wire always does after a field header, is
+// the same payload it writes onto an empty buffer, and the bytes before it are
+// left alone.
+func TestAppendPayloadAfterPrefix(t *testing.T) {
+	prefix := []byte("key+header")
+	for i, p := range oraclePools {
+		rng := rand.New(rand.NewPCG(15, uint64(i)))
 		for range 3000 {
-			s := randString(rng, pool, rng.IntN(40))
-			if s == "" {
-				continue
+			s := randString(rng, p.symbols, rng.IntN(40))
+			alone, n, upper, ok := AppendPayload(nil, s)
+			after, m, upperAfter, okAfter := AppendPayload(prefix, s)
+			if ok != okAfter || n != m || upper != upperAfter {
+				t.Fatalf("%q: alone %v/%d/%v, after a prefix %v/%d/%v",
+					s, ok, n, upper, okAfter, m, upperAfter)
 			}
-			buf := Append(nil, s)
-			h, err := frame(buf)
-			if err != nil {
-				t.Fatal(err)
-			}
-			payload, n, upper, ok := AppendPayload(nil, s)
-			if ok != h.packed {
-				t.Fatalf("%q: AppendPayload ok=%v, frame packed=%v", s, ok, h.packed)
+			if string(after[:len(prefix)]) != string(prefix) {
+				t.Fatalf("%q: prefix clobbered: %q", s, after[:len(prefix)])
 			}
 			if !ok {
+				if len(after) != len(prefix) {
+					t.Fatalf("%q: did not pack, but appended %d bytes", s, len(after)-len(prefix))
+				}
 				continue
 			}
-			if n != len(h.payload) || upper != h.upper {
-				t.Fatalf("%q: payload %d/%v, frame %d/%v", s, n, upper, len(h.payload), h.upper)
-			}
-			if string(payload[:n]) != string(h.payload) {
-				t.Fatalf("%q:\n payload %x\n frame   %x", s, payload[:n], h.payload)
-			}
-			got, err := AppendString(nil, append(payload[:n:n], make([]byte, 8)...), n, upper)
-			if err != nil || string(got) != s {
-				t.Fatalf("%q: AppendString gave %q, %v", s, got, err)
+			if string(after[len(prefix):]) != string(alone[:n]) {
+				t.Fatalf("%q:\n alone        %x\n after prefix %x", s, alone[:n], after[len(prefix):])
 			}
 		}
-	}
-}
-
-func TestSizeReportUnits(t *testing.T) {
-	t.Log("units  bytes  input")
-	for _, s := range []string{"hello", "helloWorld", "SKU-4217-hola",
-		"el niño comió jamón", "the quick brown fox", "THE QUICK BROWN FOX"} {
-		t.Log(fmt.Sprintf("%5d %6d  %q", scanUnits(s), len(Append(nil, s)), s))
 	}
 }

@@ -16,33 +16,27 @@ package wire
 //     it costs a header byte and a value byte. That is why the wide key is not
 //     simply a byte worse per field: it is a byte worse only above 127.
 //
-// # Why this is a separate file, not a flag
-//
-// The key width must not be a variable the field loop can see. Measured on a
-// ten-field record, one decoder carrying a `k8 bool` runs at 11.7 ns where a
-// decoder per width runs at 8.7 — not because the branch mispredicts, it never
-// does, but because a width the compiler cannot see is a width it cannot fold.
-// The framing is therefore written twice; the value codecs underneath —
-// magnitudes, blobs, array elements — are written once and shared.
-//
 // # Descriptor
 //
 //	0 vvvvvvv                   the value, 0..127, no payload
 //	1 ccc dddd                  class ccc, detail dddd
 //
-//	class 0 INT      [pos:1][n:3]        n magnitude bytes, as K4
-//	class 1 BLOB     [enc:2][lw:2]       [size: lw] then size bytes
-//	class 2 VEC      [w:2][pos:1][lw:1]  [bytelen: lw] then the elements
-//	class 3 COL      reserved for the column codec
-//	class 4 LIST     [homog:1][-:1][lw:2] [bytelen: lw][count: lw] then elements
-//	class 5 STRUCT   reserved for a nested key run
-//	class 6 MAP      reserved
-//	class 7 SPECIAL  [detail:4]          null, true, false, and the self-
-//	                                     describing values in dynamic.go
+//	class 0 INT      [pos:1][n:3]          n magnitude bytes, as K4
+//	class 1 BLOB     [enc:2][lw:2]         [size: lw] then size bytes (packed.go)
+//	class 2 VEC      [w:2][pos:1][lw:1]    [bytelen: 1|4] then the elements
+//	class 3 COL      [—:2][lw:2]           [bytelen: lw] a table column (table.go)
+//	class 4 LIST     [homog:1][—:1][lw:2]  [bytelen: lw][count] then elements
+//	class 5 STRUCT   [k8:1][—:1][lw:2]     [bytelen: lw] a nested key run
+//	class 6 MAP      [table:1][—:1][lw:2]  [bytelen: lw][count] entries, or a
+//	                                       table's row count and columns
+//	class 7 SPECIAL  [detail:4]            null, true, false, the varint below,
+//	                                       and the self-describing values in
+//	                                       dynamic.go
 //
 // `lw` names the width of the length that follows: 0 → 1 byte, 1 → 2, 2 → 4,
-// 3 → 8. There is no varint anywhere, so reading a length is a branch and one
-// load rather than a loop whose trip count is data.
+// 3 → 8. A length is never a varint, so reading one is a branch and one load;
+// the only varint is the integer form below, which the writer picks when it is
+// shorter.
 
 import (
 	"encoding/binary"
@@ -158,30 +152,34 @@ func appendVarint(buffer []byte, key uint8, value uint64) []byte {
 }
 
 // readVarint reads the form back, returning the byte length of the whole field.
-func readVarint(field []byte, detail uint8) (value uint64, length int, ok bool) {
-	value, length, ok = readVarintAt(field, 1, detail)
-	return value, length + 1, ok // the key byte this form does not read
+func readVarint(field []byte, detail uint8) (value uint64, length int, err error) {
+	value, length, err = readVarintAt(field, 1, detail)
+	return value, length + 1, err // the key byte this form does not read
 }
 
 // readVarintAt is readVarint anchored on the descriptor rather than on the key,
 // which is what a key-less element needs: `at` is where the descriptor sits and
 // the continuation bytes follow it. The length it returns counts from the
 // descriptor, not from the start of the field.
-func readVarintAt(buffer []byte, at int, detail uint8) (value uint64, length int, ok bool) {
+//
+// A run that carries bits past the sixty-fourth is refused rather than
+// truncated, which also bounds the run at nine continuation bytes.
+func readVarintAt(buffer []byte, at int, detail uint8) (value uint64, length int, err error) {
 	value = uint64(detail & 0b111)
 	shift := uint(varintBits)
 	for cursor := at + 1; cursor < len(buffer); cursor++ {
 		b := buffer[cursor]
-		value |= uint64(b&0x7F) << shift
+		payload := uint64(b & 0x7F)
+		if shift >= 64 || payload>>(64-shift) != 0 {
+			return 0, 0, ErrFieldTooWide
+		}
+		value |= payload << shift
 		if b < 0x80 {
-			return value, cursor + 1 - at, true
+			return value, cursor + 1 - at, nil
 		}
 		shift += 7
-		if shift > 63+varintBits {
-			return 0, 0, false
-		}
 	}
-	return 0, 0, false
+	return 0, 0, ErrTruncated
 }
 
 // listHomogeneous is the LIST detail bit saying the elements share one shape and
@@ -195,7 +193,7 @@ var lengthWidth = [4]int{1, 2, 4, 8}
 
 // ErrBadDescriptor is a descriptor this version does not assign, or one whose
 // class is not the one the caller asked to read.
-var ErrBadDescriptor = errors.New("narrow: unassigned or mismatched descriptor")
+var ErrBadDescriptor = errors.New("wire: unassigned or mismatched descriptor")
 
 // lengthCodeFor is the narrowest lw that holds n.
 func lengthCodeFor(n uint64) (code uint8, width int) {
@@ -218,9 +216,6 @@ func descriptor(class, detail uint8) uint8 { return descExplicit | class<<4 | de
 type Writer8 struct {
 	Buffer []byte
 }
-
-// Reset points the writer at a buffer, keeping its capacity.
-func (w *Writer8) Reset(buffer []byte) { w.Buffer = buffer[:0] }
 
 // Uint writes an unsigned integer, and nothing at all when it is zero.
 //
@@ -484,7 +479,10 @@ func NewReader8(message []byte) Reader8 { return Reader8{buffer: message} }
 
 // More reports whether another field follows. It does not test the error
 // because fail parks the cursor at the end, so one comparison answers both.
-func (r *Reader8) More() bool { return r.at+1 < len(r.buffer) }
+//
+// A lone trailing byte is a field, not padding: the read that follows fails on
+// it with ErrTruncated rather than the message decoding as if it were not there.
+func (r *Reader8) More() bool { return r.at < len(r.buffer) }
 
 // Key is the field the cursor is on. It does not advance: the typed read does.
 func (r *Reader8) Key() uint8 { return r.buffer[r.at] }
@@ -520,9 +518,9 @@ func (r *Reader8) uintWide() uint64 {
 	}
 	if class := (desc >> 4) & 0b111; class != classInt {
 		if class == classSpecial && desc&specialVarint != 0 {
-			value, length, ok := readVarint(r.buffer[r.at:], desc)
-			if !ok {
-				r.fail(ErrTruncated)
+			value, length, err := readVarint(r.buffer[r.at:], desc)
+			if err != nil {
+				r.fail(err)
 				return 0
 			}
 			r.at += length
@@ -558,7 +556,15 @@ func (r *Reader8) Int() int64 {
 	negative := desc >= descExplicit && (desc>>4)&0b111 == classInt && desc&intPositiveFlag == 0
 	magnitude := r.uintWide()
 	if negative {
+		if magnitude > 1<<63 {
+			r.fail(ErrFieldTooWide)
+			return 0
+		}
 		return -int64(magnitude)
+	}
+	if magnitude > math.MaxInt64 {
+		r.fail(ErrFieldTooWide)
+		return 0
 	}
 	return int64(magnitude)
 }
@@ -586,7 +592,43 @@ func (r *Reader8) U32() uint32 {
 	return uint32(value)
 }
 
-func (r *Reader8) I32() int32 { return int32(r.Int()) }
+func (r *Reader8) U8() uint8 {
+	value := r.Uint()
+	if value > 0xFF {
+		r.fail(ErrFieldTooWide)
+		return 0
+	}
+	return uint8(value)
+}
+
+// I8, I16 and I32 refuse a value the type cannot hold, as U16 does. Written
+// out, as the narrow reader's are, so that each inlines.
+func (r *Reader8) I8() int8 {
+	value := r.Int()
+	if int64(int8(value)) != value {
+		r.fail(ErrFieldTooWide)
+		return 0
+	}
+	return int8(value)
+}
+
+func (r *Reader8) I16() int16 {
+	value := r.Int()
+	if int64(int16(value)) != value {
+		r.fail(ErrFieldTooWide)
+		return 0
+	}
+	return int16(value)
+}
+
+func (r *Reader8) I32() int32 {
+	value := r.Int()
+	if int64(int32(value)) != value {
+		r.fail(ErrFieldTooWide)
+		return 0
+	}
+	return int32(value)
+}
 
 func (r *Reader8) F32() float32 {
 	return math.Float32frombits(bits.ReverseBytes32(uint32(r.Uint())))
@@ -597,8 +639,13 @@ func (r *Reader8) F64() float64 {
 }
 
 // Bytes returns the field's bytes as a sub-slice of the message, without
-// copying. It stays valid only as long as the message buffer does.
+// copying. It stays valid only as long as the message buffer does. A blob in any
+// encoding but raw — a packed5 string — is refused; String reads those.
 func (r *Reader8) Bytes() []byte {
+	if r.at+2 <= len(r.buffer) && r.buffer[r.at+1]&encMask != encRaw {
+		r.fail(ErrBadDescriptor)
+		return nil
+	}
 	size, start, ok := r.lengthOf(classBlob)
 	if !ok {
 		return nil
@@ -610,9 +657,6 @@ func (r *Reader8) Bytes() []byte {
 	r.at = start + size
 	return r.buffer[start : start+size]
 }
-
-// String copies the field into a Go string.
-func (r *Reader8) String() string { return string(r.Bytes()) }
 
 // lengthOf reads the length a class's descriptor declares and returns it with
 // the offset just past it. It also checks the class, so a reader asking for a
@@ -703,87 +747,55 @@ func (r *Reader8) vecBody() (elements []byte, width int, positive, ok bool) {
 
 // Strings copies each element into a Go string.
 func (r *Reader8) Strings(dst []string) []string {
-	count, at, ok := r.listHeader()
-	if !ok {
-		return dst
-	}
+	count, elements, _ := r.stringList()
 	for range count {
-		size, next, ok := r.elementSize(at)
+		element, ok := elements.Element()
 		if !ok {
+			r.fail(elements.err)
 			return dst
 		}
-		if size > len(r.buffer)-next {
-			r.fail(ErrTruncated)
-			return dst
-		}
-		dst = append(dst, string(r.buffer[next:next+size]))
-		at = next + size
+		dst = append(dst, string(element))
 	}
-	r.at = at
 	return dst
 }
 
 // StringsBytes appends each element as a sub-slice of the message.
 func (r *Reader8) StringsBytes(dst [][]byte) [][]byte {
-	count, at, ok := r.listHeader()
-	if !ok {
-		return dst
-	}
+	count, elements, _ := r.stringList()
 	for range count {
-		size, next, ok := r.elementSize(at)
+		element, ok := elements.Element()
 		if !ok {
+			r.fail(elements.err)
 			return dst
 		}
-		if size > len(r.buffer)-next {
-			r.fail(ErrTruncated)
-			return dst
-		}
-		dst = append(dst, r.buffer[next:next+size])
-		at = next + size
+		dst = append(dst, element)
 	}
-	r.at = at
 	return dst
 }
 
-// listHeader reads a list's byte length and count and returns the count with the
-// offset of the first element.
-func (r *Reader8) listHeader() (count, at int, ok bool) {
+// stringList reads a homogeneous list's framing and returns its count with a
+// reader over exactly its elements, advancing past the whole field. An element
+// is [len][bytes], the shape a narrow list element has, so the narrow reader's
+// Element reads it — and reading inside the list's own bytes is what keeps a
+// bad element length from running into the field that follows.
+func (r *Reader8) stringList() (int, Reader, bool) {
 	length, start, ok := r.lengthOf(classList)
 	if !ok {
-		return 0, 0, false
+		return 0, Reader{}, false
 	}
 	if length > len(r.buffer)-start {
 		r.fail(ErrTruncated)
-		return 0, 0, false
+		return 0, Reader{}, false
 	}
-	count, consumed, ok := readCount(r.buffer[start : start+length])
-	if !ok {
+	body := r.buffer[start : start+length]
+	count, at, ok := readCount(body)
+	// Every element spends at least its length byte.
+	if !ok || count > len(body)-at {
 		r.fail(ErrTruncated)
-		return 0, 0, false
+		return 0, Reader{}, false
 	}
-	return count, start + consumed, true
-}
-
-// elementSize reads one list element length: one byte, or four more behind the
-// escape.
-func (r *Reader8) elementSize(at int) (size, start int, ok bool) {
-	if at >= len(r.buffer) {
-		r.fail(ErrTruncated)
-		return 0, 0, false
-	}
-	if size := r.buffer[at]; size != elementSizeEscape {
-		return int(size), at + 1, true
-	}
-	if at+5 > len(r.buffer) {
-		r.fail(ErrTruncated)
-		return 0, 0, false
-	}
-	value := binary.LittleEndian.Uint32(r.buffer[at+1:])
-	if uint64(value) > uint64(maxInt) {
-		r.fail(ErrSizeTooLarge)
-		return 0, 0, false
-	}
-	return int(value), at + 5, true
+	r.at = start + length
+	return count, Reader{buffer: body[at:]}, true
 }
 
 // Skip steps over the field at the cursor without knowing what it is, which is
@@ -829,30 +841,38 @@ func valueSize(buffer []byte, at int) (int, error) {
 	if desc < descExplicit {
 		return 1, nil // the descriptor is the value
 	}
-	switch (desc >> 4) & 0b111 {
+	switch class := (desc >> 4) & 0b111; class {
 	case classInt:
-		width := magnitudeWidth[desc&0b111]
-		if len(buffer)-(at+1) < width {
-			return 0, ErrTruncated
-		}
-		return 1 + width, nil
+		return intSize(buffer, at, desc)
 	case classSpecial:
 		return specialSize(buffer, at, desc)
-	case classBlob, classVec, classList, classStruct, classMap, classCol:
-		// Every one of these declares a byte length covering the whole of its
+	default:
+		// Every other class declares a byte length covering the whole of its
 		// payload, which is the property that makes an unknown field skippable
 		// without its sub-schema.
-		length, start, err := declaredLength(buffer, at, (desc>>4)&0b111)
-		if err != nil {
-			return 0, err
-		}
-		if length > len(buffer)-start {
-			return 0, ErrTruncated
-		}
-		return start + length - at, nil
-	default:
-		return 0, ErrBadDescriptor
+		return lengthSize(buffer, at, class)
 	}
+}
+
+// intSize sizes an INT-class value: the descriptor and its magnitude bytes.
+func intSize(buffer []byte, at int, desc uint8) (int, error) {
+	width := magnitudeWidth[desc&0b111]
+	if len(buffer)-(at+1) < width {
+		return 0, ErrTruncated
+	}
+	return 1 + width, nil
+}
+
+// lengthSize sizes a value of a class that declares its byte length.
+func lengthSize(buffer []byte, at int, class uint8) (int, error) {
+	length, start, err := declaredLength(buffer, at, class)
+	if err != nil {
+		return 0, err
+	}
+	if length > len(buffer)-start {
+		return 0, ErrTruncated
+	}
+	return start + length - at, nil
 }
 
 // declaredLength is lengthOf without a cursor: the length a length-carrying

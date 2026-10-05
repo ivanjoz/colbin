@@ -41,8 +41,12 @@
 //! column := [header:1] [base: 8 bytes]? block*
 //!
 //! header  bits 0-1  transform: raw / delta / frame-of-reference / constant
-//!         bit  2    zigzag applied to residuals
-//!         bits 3-7  reserved
+//!         bit  2    zigzag applied to residuals: set for delta, set for raw
+//!                   when the column has a negative, clear otherwise
+//!         bits 3-7  reserved, zero
+//!
+//!         An empty column is the header 0 alone. The decoder refuses any
+//!         other header the encoder does not write.
 //!
 //! base    the delta's first value or the frame's minimum, zigzagged, in the
 //!         clear at full width
@@ -451,6 +455,20 @@ fn append_blocks<T: Signed>(out: &mut Vec<u8>, vals: &[T], transform: u8, base: 
     }
 }
 
+/// Reports whether [`append_array`] writes `header` for a column of `n`
+/// values: raw with or without zigzag, delta with it, frame of reference and
+/// constant without, and raw alone for an empty column. Everything else —
+/// a reserved bit, a zigzag the transform never takes — is refused, as the Go
+/// decoder refuses it.
+fn header_written(header: u8, n: usize) -> bool {
+    if n == 0 {
+        return header == TR_RAW;
+    }
+    matches!(header, TR_RAW | TR_FOR | TR_CONSTANT)
+        || header == TR_RAW | ZIGZAG_FLAG
+        || header == TR_DELTA | ZIGZAG_FLAG
+}
+
 /// Reads `n` values written by [`append_array`] into `out` and returns the
 /// number of bytes consumed from `buf`.
 ///
@@ -463,6 +481,9 @@ pub fn decode_array<T: Signed>(buf: &[u8], n: usize, out: &mut [T]) -> Result<us
     }
     let header = *buf.first().ok_or(Error::Truncated)?;
     let mut position = 1;
+    if !header_written(header, n) {
+        return Err(Error::BadColumnHeader);
+    }
     let transform = header & 0x03;
     let zz = header & ZIGZAG_FLAG != 0;
     if n == 0 {

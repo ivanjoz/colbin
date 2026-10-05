@@ -48,6 +48,7 @@ package codec
 // struct with the same fields is smaller, faster, and says what it is.
 
 import (
+	"encoding"
 	"fmt"
 	"math"
 	"reflect"
@@ -58,15 +59,10 @@ import (
 	"github.com/ivanjoz/colbin/wire"
 )
 
-// maxDynamicDepth bounds how deep the encoder will follow a value.
-//
-// Nesting here is data rather than type, and `m["self"] = m` is a value a caller
-// can build by accident. The walk has the same bound for the same reason; the
-// two are the same number so that anything this writes, that can read.
-const maxDynamicDepth = maxSchemaDepth
-
-var errDynamicDepth = fmt.Errorf(
-	"colbin: a dynamic value nests more than %d deep, or holds itself", maxDynamicDepth)
+// A dynamic value nests as deep as the value does, and `m["self"] = m` is a
+// value a caller can build by accident: the walk is bounded by maxSchemaDepth,
+// like every other one, and stops at the first failure rather than following
+// the siblings of what failed.
 
 // --- encoding ----------------------------------------------------------------
 
@@ -171,6 +167,10 @@ func appendAnyReflect(writer *wire.Writer8, value reflect.Value, buf *scratch) {
 	case reflect.Map:
 		appendAnyMap(writer, value, buf)
 	case reflect.Struct:
+		if opaqueStruct(value.Type()) {
+			appendOpaqueStruct(writer, value, buf)
+			return
+		}
 		appendAnyStruct(writer, value, buf)
 	default:
 		buf.fail(fmt.Errorf("colbin: a %s has no form in a dynamic value", value.Type()))
@@ -202,9 +202,48 @@ func appendAnySequence(writer *wire.Writer8, value reflect.Value, buf *scratch) 
 	defer buf.leave()
 	mark := writer.OpenElementList(value.Len())
 	for index := range value.Len() {
+		if buf.err != nil {
+			break
+		}
 		appendAnyReflect(writer, value.Index(index), buf)
 	}
 	writer.Close(mark)
+}
+
+// opaqueStruct says a struct holds data and no exported field to carry it in —
+// a time.Time — which as a map of its exported fields would be `{}` and lose it.
+func opaqueStruct(structType reflect.Type) bool {
+	return structType.NumField() > 0 && !hasExportedField(structType)
+}
+
+var textMarshalerType = reflect.TypeFor[encoding.TextMarshaler]()
+
+// appendOpaqueStruct writes an opaque struct as its text when it has one, which
+// is what encoding/json writes for a time.Time, and refuses it otherwise rather
+// than writing an empty object in its place.
+func appendOpaqueStruct(writer *wire.Writer8, value reflect.Value, buf *scratch) {
+	var marshaler encoding.TextMarshaler
+	switch {
+	case value.Type().Implements(textMarshalerType):
+		marshaler = value.Interface().(encoding.TextMarshaler)
+	case reflect.PointerTo(value.Type()).Implements(textMarshalerType):
+		copied := reflect.New(value.Type())
+		copied.Elem().Set(value)
+		marshaler = copied.Interface().(encoding.TextMarshaler)
+	default:
+		buf.fail(fmt.Errorf(
+			"colbin: a %s has no exported field and no text form, so it has no form in a dynamic value",
+			value.Type()))
+		writer.ElementNull()
+		return
+	}
+	text, err := marshaler.MarshalText()
+	if err != nil {
+		buf.fail(fmt.Errorf("colbin: %s: %w", value.Type(), err))
+		writer.ElementNull()
+		return
+	}
+	writer.ElementString(string(text))
 }
 
 // appendBoxedSequence writes a sequence of *boxed* records as one typed run, and
@@ -352,20 +391,19 @@ func appendAnyStringMap(writer *wire.Writer8, value map[string]any, buf *scratch
 	defer buf.leave()
 	mark := writer.OpenElementMap(len(value))
 	for _, key := range sortedKeys(value) {
+		if buf.err != nil {
+			break
+		}
 		writer.ElementString(key)
 		appendAnyValue(writer, value[key], buf)
 	}
 	writer.Close(mark)
 }
 
-// sortedKeys is why a dynamic map is written in order. Go's map iteration is
+// sortedKeys is why a map is written in order. Go's map iteration is
 // deliberately random, so without this the same value encodes to different bytes
 // every time — which rules out a golden vector, an ETag, and any two ports
-// agreeing about a `map[string]any` at all.
-//
-// A typed map field does not sort, and that difference is deliberate: it has a
-// key set the schema declares, it is usually small, and it is on a path where
-// the allocation this costs would be paid per message for nothing.
+// agreeing about a map at all.
 func sortedKeys(value map[string]any) []string {
 	keys := make([]string, 0, len(value))
 	for key := range value {
@@ -392,10 +430,12 @@ func appendAnyMap(writer *wire.Writer8, value reflect.Value, buf *scratch) {
 		return
 	}
 	defer buf.leave()
-	keys := value.MapKeys()
-	sortMapKeys(keys)
+	keys := sortedMapKeys(value)
 	mark := writer.OpenElementMap(len(keys))
 	for _, key := range keys {
+		if buf.err != nil {
+			break
+		}
 		appendAnyReflect(writer, key, buf)
 		appendAnyReflect(writer, value.MapIndex(key), buf)
 	}
@@ -466,6 +506,9 @@ func appendStructAsMap(writer *wire.Writer8, value reflect.Value, buf *scratch) 
 		if !ok {
 			continue
 		}
+		if buf.err != nil {
+			break
+		}
 		writer.ElementString(name)
 		appendAnyReflect(writer, value.Field(index), buf)
 	}
@@ -478,8 +521,8 @@ func dynamicFieldName(field reflect.StructField) (string, bool) {
 	if !field.IsExported() {
 		return "", false
 	}
-	name, _, skip := parseCbTag(field)
-	if skip {
+	name, _, skip, err := parseCbTag(field)
+	if skip || err != nil {
 		return "", false
 	}
 	return name, true
@@ -512,6 +555,9 @@ func appendAnyList(writer *wire.Writer8, values []any, buf *scratch) {
 	defer buf.leave()
 	mark := writer.OpenElementList(len(values))
 	for _, value := range values {
+		if buf.err != nil {
+			break
+		}
 		appendAnyValue(writer, value, buf)
 	}
 	writer.Close(mark)
@@ -541,31 +587,20 @@ func appendStructElement(writer *wire.Writer8, plan *typePlan, at unsafe.Pointer
 func appendStructsElement(
 	writer *wire.Writer8, plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratch,
 ) {
+	if !buf.enter() {
+		writer.ElementNull()
+		return
+	}
+	defer buf.leave()
 	if plan.canTable && slice.len >= tableThreshold {
-		appendTableElement(writer, plan, slice, stride, buf)
+		mark := writer.OpenElementTable(slice.len)
+		appendColumns(writer, plan, slice, stride, buf)
+		writer.Close(mark)
 		return
 	}
 	mark := writer.OpenElementList(slice.len)
 	for index := range slice.len {
 		appendStructElement(writer, plan, unsafe.Add(slice.data, uintptr(index)*stride), buf)
-	}
-	writer.Close(mark)
-}
-
-func appendTableElement(
-	writer *wire.Writer8, plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratch,
-) {
-	buf.reserve(slice.len)
-	mark := writer.OpenElementTable(slice.len)
-	for index := range plan.fields {
-		column := &plan.fields[index]
-		if column.op == opString {
-			buf.strings = gatherStrings(buf.strings[:0], slice, stride, column.offset)
-			writer.StringColumn(column.key, buf.strings)
-			continue
-		}
-		buf.ints = gatherInts(buf.ints[:0], slice, stride, column)
-		writer.Column(column.key, buf.ints)
 	}
 	writer.Close(mark)
 }
@@ -585,8 +620,12 @@ func readAnyValue(reader *wire.Reader8, buf *scratch) any {
 		return nil
 	}
 	out := anySink{}
-	walk := walker{to: &out, plans: plans}
+	// The walk inherits the typed decode's depth and row budget, so that a
+	// dynamic value is bounded by what is left of the message's rather than
+	// starting afresh.
+	walk := walker{to: &out, plans: plans, depth: buf.depth, rowsLeft: buf.rowsLeft}
 	walk.dynamicValue(reader)
+	buf.rowsLeft = walk.rowsLeft
 	if walk.err != nil {
 		reader.Fail(walk.err)
 		return nil

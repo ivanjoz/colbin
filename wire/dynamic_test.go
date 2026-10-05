@@ -102,7 +102,7 @@ func TestDynamicValuesRoundTrip(t *testing.T) {
 			t.Fatalf("element %d: %v", at, err)
 		}
 	}
-	if elements.MoreElements() {
+	if elements.More() {
 		t.Fatal("bytes left after the last element")
 	}
 }
@@ -117,7 +117,7 @@ func TestADynamicRoundFloatIsTwoBytes(t *testing.T) {
 		t.Fatalf("2.0 took %d bytes: %x", len(writer.Buffer), writer.Buffer)
 	}
 
-	writer.Reset(nil)
+	writer = Writer8{}
 	writer.ElementFloat64(1.5)
 	if len(writer.Buffer) != 4 {
 		t.Fatalf("1.5 took %d bytes: %x", len(writer.Buffer), writer.Buffer)
@@ -198,7 +198,7 @@ func TestDynamicCompositesClassify(t *testing.T) {
 	if got := elements.ElementKind(); got != KindStruct {
 		t.Fatalf("struct is kind %d", got)
 	}
-	record, ok := elements.ElementStruct()
+	record, ok := elementStructOf(&elements)
 	if !ok {
 		t.Fatalf("inner struct: %v", elements.Err())
 	}
@@ -253,7 +253,7 @@ func TestTypedElementNamesAStructAndThenIsOrdinary(t *testing.T) {
 		if !ok || count != 2 {
 			t.Fatalf("index %d: rows %d, %v", index, count, elements.Err())
 		}
-		first, ok := rows.ElementStruct()
+		first, ok := elementStructOf(&rows)
 		if !ok {
 			t.Fatalf("index %d: first row: %v", index, rows.Err())
 		}
@@ -321,7 +321,7 @@ func TestSkipElementStepsOverEveryKind(t *testing.T) {
 		if err := elements.Err(); err != nil {
 			t.Fatalf("%s: %v", one.name, err)
 		}
-		if elements.MoreElements() {
+		if elements.More() {
 			t.Fatalf("%s: bytes left over", one.name)
 		}
 	}
@@ -351,7 +351,7 @@ func TestSkipStepsOverADynamicField(t *testing.T) {
 	}
 
 	for _, one := range cases {
-		writer.Reset(nil)
+		writer = Writer8{}
 		one.write(&writer)
 		writer.U32(1, 4242)
 
@@ -372,8 +372,11 @@ func TestSkipStepsOverADynamicField(t *testing.T) {
 // index outside the buffer on the way to saying so.
 func TestTruncatedDynamicValuesAreRefused(t *testing.T) {
 	writer := Writer8{}
+	between := map[int]bool{0: true}
 	writer.ElementFloat64(-0.1)
+	between[len(writer.Buffer)] = true
 	writer.ElementBytes([]byte{1, 2, 3})
+	between[len(writer.Buffer)] = true
 	writer.ElementTyped(2)
 	mark := writer.OpenElementStruct()
 	writer.U32(0, 5)
@@ -387,8 +390,10 @@ func TestTruncatedDynamicValuesAreRefused(t *testing.T) {
 				break
 			}
 		}
-		// Either it stepped over what was there or it failed; what it must not do
-		// is panic, which is what this loop is here to catch.
-		_ = reader.Err()
+		// It stepped over whole values or it failed, and it did not panic.
+		if refused := reader.Err() != nil; refused == between[cut] {
+			t.Fatalf("a cut at %d of %d: refused %v, between values %v",
+				cut, len(whole), refused, between[cut])
+		}
 	}
 }

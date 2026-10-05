@@ -5,9 +5,10 @@ minimal mode already proved: `[key][descriptor][payload]`, nothing packed across
 a byte boundary, every size escalating to a fixed width rather than a varint run.
 
 Everything below is a design; nothing here is implemented yet. The measurements
-are real and reproducible — `go test ./experiments/bytealigned -bench .` and
-`go test ./codec -bench Minimal`, both on the i7-1355U this repo already
-benchmarks on.
+are real and were reproducible when written — the `experiments/bytealigned`
+prototype and `go test ./codec -bench Minimal`, both on the i7-1355U this repo
+already benchmarks on. The prototype was deleted once the column codec landed;
+`git checkout 0e9377a` and `go test ./experiments/bytealigned -bench .` rerun it.
 
 ---
 
@@ -24,10 +25,11 @@ From `codec/minimal_bench_test.go`, same ten-field record, five fields set:
 | minimal through a cached plan | 18.3 ns | 34 ns | 11 |
 | compact (bitstream) through `Codec[T]` | 88 ns | 130 ns | 10 |
 
-**Columns do not have to trade size for speed at all.** From
-`experiments/bytealigned`, 1024 `int64` per column, against the current `varint`
-(k,M) bit codec. Two candidates: a **byte-blocked** column, one byte width per
-128 residuals, and a **bit-blocked** one, one exact bit width per 128 residuals.
+**Columns do not have to trade size for speed at all.** From the
+`experiments/bytealigned` prototype (in git at 0e9377a), 1024 `int64` per
+column, against the current `varint` (k,M) bit codec. Two candidates: a
+**byte-blocked** column, one byte width per 128 residuals, and a **bit-blocked**
+one, one exact bit width per 128 residuals.
 
 Size, bytes per element:
 
@@ -230,7 +232,7 @@ float the same way as an integer therefore saves nothing at all, measured:
 | prices, two decimals | 8.00 | 7.81 |
 | coordinates | 8.00 | 7.97 |
 
-(`go test ./experiments/bytealigned -run TestFloatTrim -v`.) So a float writes
+(`TestFloatTrim` in the deleted prototype, at 0e9377a.) So a float writes
 its IEEE-754 pattern **big-endian** and trims the trailing zero bytes, which is
 the same operation on the other end of the word. The reader knows which rule
 applies because it knows the field is a float — from the schema under K4, from
@@ -639,7 +641,8 @@ Byte alignment is the floor, not the ceiling. In rough order of payoff:
 ### Dispatch on key width once per key run, never per field
 
 The key width must not be a variable the field loop can see. Measured, the same
-five-of-ten-field record, `go test ./experiments/bytealigned -bench KeyRun`:
+five-of-ten-field record, `BenchmarkKeyRun` in the deleted prototype (at
+0e9377a):
 
 | | one decoder carrying `k8 bool` | a decoder per width |
 |---|---:|---:|
@@ -718,11 +721,11 @@ is the whole reason §2.7 is a K8 optimisation and an argument for dropping K4.
 Each phase is independently useful and independently revertable.
 
 1. **`varint/` → blocked columns**, bit-blocked by default. Self-contained,
-   already prototyped and measured in `experiments/bytealigned`, and the only
-   phase that can land without touching anything else — it is also the one phase
-   that is a strict improvement on today's bytes as well as today's speed, so it
-   needs no argument. It changes the standard mode's wire, so the vectors
-   regenerate and the Rust port moves with it.
+   already prototyped and measured (in the deleted `experiments/bytealigned`),
+   and the only phase that can land without touching anything else — it is also
+   the one phase that is a strict improvement on today's bytes as well as
+   today's speed, so it needs no argument. It changes the standard mode's wire,
+   so the vectors regenerate and the Rust port moves with it.
 2. **Fixed-width size escapes in `minimal/`**, replacing LEB128, and the float
    trim fix (§2.3). Small, isolated, deletes code.
 3. **The wide descriptor byte and K8 keys in `minimal/`**, with key width per

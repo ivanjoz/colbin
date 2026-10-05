@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+// structOf and elementStructOf open a nested wide run the way codec does: the
+// body, and a reader over it.
+func structOf(reader *Reader8) (Reader8, bool) {
+	body, _, ok := reader.StructBody()
+	return NewReader8(body), ok
+}
+
+func elementStructOf(reader *Reader8) (Reader8, bool) {
+	body, _, ok := reader.ElementStructBody()
+	return NewReader8(body), ok
+}
+
 func TestNestedStructRoundTrip(t *testing.T) {
 	writer := Writer8{}
 	writer.U32(0, 7)
@@ -22,7 +34,7 @@ func TestNestedStructRoundTrip(t *testing.T) {
 	if got := reader.U32(); got != 7 {
 		t.Fatalf("outer scalar %d", got)
 	}
-	sub, ok := reader.Struct()
+	sub, ok := structOf(&reader)
 	if !ok {
 		t.Fatalf("struct: %v", reader.Err())
 	}
@@ -32,7 +44,7 @@ func TestNestedStructRoundTrip(t *testing.T) {
 	if got := sub.String(); got != "hero" {
 		t.Fatalf("inner string %q", got)
 	}
-	deep, ok := sub.Struct()
+	deep, ok := structOf(&sub)
 	if !ok {
 		t.Fatalf("deep struct: %v", sub.Err())
 	}
@@ -69,7 +81,7 @@ func TestCompositeLengthWidens(t *testing.T) {
 		if got := reader.U32(); got != 9 {
 			t.Fatalf("size %d: leading scalar %d", size, got)
 		}
-		sub, ok := reader.Struct()
+		sub, ok := structOf(&reader)
 		if !ok {
 			t.Fatalf("size %d: struct: %v", size, reader.Err())
 		}
@@ -112,7 +124,7 @@ func TestListOfStructsRoundTrip(t *testing.T) {
 		t.Fatalf("count %d", count)
 	}
 	for index := range count {
-		sub, ok := elements.ElementStruct()
+		sub, ok := elementStructOf(&elements)
 		if !ok {
 			t.Fatalf("element %d: %v", index, elements.Err())
 		}
@@ -123,7 +135,7 @@ func TestListOfStructsRoundTrip(t *testing.T) {
 			t.Fatalf("element %d name %q", index, got)
 		}
 	}
-	if elements.MoreElements() {
+	if elements.More() {
 		t.Fatal("trailing elements")
 	}
 	if got := reader.U32(); got != 77 {
@@ -183,8 +195,7 @@ func TestListOfScalarsAndMapRoundTrip(t *testing.T) {
 }
 
 // The capability the byte length buys: a composite is skippable without its
-// sub-schema, which is exactly what compact mode's ErrSkipComposite exists to
-// say cannot be done.
+// sub-schema, which a narrow run, with no class in its descriptor, cannot do.
 func TestCompositesAreSkippable(t *testing.T) {
 	writer := Writer8{}
 	writer.U32(0, 7)
@@ -243,12 +254,14 @@ func TestCompositesAreSkippable(t *testing.T) {
 	}
 }
 
-// Truncated and arbitrary bytes must never panic a composite read.
+// Truncated and arbitrary bytes must never panic a composite read, and a cut
+// anywhere but between two fields is an error rather than a shorter message.
 func TestCompositeGarbageIsRefused(t *testing.T) {
 	writer := Writer8{}
 	inner := writer.OpenStruct(1)
 	writer.String(0, "responses.go:539")
 	writer.Close(inner)
+	between := len(writer.Buffer)
 	list := writer.OpenList(2, 1)
 	element := writer.OpenElementStruct()
 	writer.U32(0, 1)
@@ -263,11 +276,14 @@ func TestCompositeGarbageIsRefused(t *testing.T) {
 				break
 			}
 		}
+		if cut != 0 && cut != between && reader.Err() == nil {
+			t.Fatalf("a cut at %d of %d skipped without an error", cut, len(full))
+		}
 		reader = NewReader8(full[:cut])
 		for reader.More() {
 			switch reader.Key() {
 			case 1:
-				sub, ok := reader.Struct()
+				sub, ok := structOf(&reader)
 				if ok {
 					for sub.More() {
 						sub.Bytes()
@@ -276,8 +292,8 @@ func TestCompositeGarbageIsRefused(t *testing.T) {
 			case 2:
 				_, elements, ok := reader.List()
 				if ok {
-					for elements.MoreElements() {
-						if sub, ok := elements.ElementStruct(); ok {
+					for elements.More() {
+						if sub, ok := elementStructOf(&elements); ok {
 							for sub.More() {
 								sub.Uint()
 							}
@@ -307,7 +323,7 @@ func TestCompositeGarbageIsRefused(t *testing.T) {
 		}
 		reader = NewReader8(message)
 		for reader.More() {
-			if sub, ok := reader.Struct(); ok {
+			if sub, ok := structOf(&reader); ok {
 				for sub.More() {
 					sub.Uint()
 				}
@@ -318,7 +334,7 @@ func TestCompositeGarbageIsRefused(t *testing.T) {
 		reader = NewReader8(message)
 		for reader.More() {
 			if _, elements, ok := reader.List(); ok {
-				for elements.MoreElements() {
+				for elements.More() {
 					elements.ElementUint()
 				}
 			} else {

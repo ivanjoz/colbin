@@ -165,6 +165,10 @@ pub struct Plan {
     /// Whether this plan is the one-field wrapper an encoder puts round a
     /// document whose top level is not an object.
     pub is_envelope: bool,
+    /// Whether this plan is a page of a paged type: the fields past the first
+    /// 255, linked from the page before under key 255. A walk writes them into
+    /// the object that links them. See `codec/pages.go`.
+    pub is_page: bool,
     /// Field positions by key, so a walk resolves a key in one load. `-1` means
     /// the message holds a key this plan does not list, which under eight bits
     /// is a field to step over and under four is the end of the decode.

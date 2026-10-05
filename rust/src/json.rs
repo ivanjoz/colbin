@@ -245,6 +245,8 @@ fn write_json_string(out: &mut Vec<u8>, value: &[u8]) {
                 b'\n' => out.extend_from_slice(b"\\n"),
                 b'\r' => out.extend_from_slice(b"\\r"),
                 b'\t' => out.extend_from_slice(b"\\t"),
+                0x08 => out.extend_from_slice(b"\\b"),
+                0x0c => out.extend_from_slice(b"\\f"),
                 // A control byte, or one of the three HTML-significant ones,
                 // which go the long way round for the same reason: so the output
                 // is safe wherever it is pasted.

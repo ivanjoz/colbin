@@ -3,32 +3,23 @@ package column
 import (
 	"encoding/binary"
 	"math/bits"
-	"unsafe"
 )
 
 // Array codec: the integer input is mapped to a sequence of unsigned residuals
 // by one of four transforms, and the residuals are then written as blocks of 128
-// at a bit width chosen per block (see column.go). The encoder scores every
+// at a bit width chosen per block (see pack.go). The encoder scores every
 // transform against what it would actually occupy in blocks and picks the
 // smallest; the choice is recorded in the header byte.
 
-// Signed is the set of element types the codec handles natively. Values are
-// widened to int64 internally, which is free for every member.
+// Signed is the set of element types the codec handles. Values are widened to
+// int64 internally, which is free for every member, so the element type never
+// reaches the wire.
 //
-// int is deliberately excluded. Its width is platform-dependent, so an []int
-// encoded on a 64-bit host would not decode on a 32-bit one; the width is
-// derived from the type rather than stored, so that mismatch would be silent.
+// int is left out because its range differs between platforms: a column
+// written from an []int on a 64-bit host could hold values a 32-bit host cannot.
 // Convert to a fixed-width type at the call site instead.
 type Signed interface {
 	~int8 | ~int16 | ~int32 | ~int64
-}
-
-// widthOfType is the element width in bytes. unsafe.Sizeof on a type parameter
-// resolves per instantiation, so encoder and decoder derive the same width from
-// the same type and it never goes on the wire.
-func widthOfType[T Signed]() uint8 {
-	var zero T
-	return uint8(unsafe.Sizeof(zero))
 }
 
 const (
@@ -62,8 +53,8 @@ func residualsUnder(transform uint8, n int) int {
 
 // blockedCost is the payload size a transform would produce, block widths and
 // all — which is what the transform has to be scored against. Scoring it by the
-// column's widest residual instead picks frame-of-reference for a column of
-// small ids and loses 76%, where scoring it this way picks delta and loses 14%.
+// column's widest residual instead picks frame-of-reference over delta for a
+// column of small ids.
 //
 // One pass over the data per candidate, with the residual inlined into the loop
 // and the block's width taken by OR-ing its residuals together, so there is not
@@ -104,9 +95,8 @@ func encode(x int64, zz bool) uint64 {
 	return uint64(x)
 }
 
-// AppendArray encodes vals onto out and returns out. The element width comes
-// from T and is not stored, so DecodeArray must be instantiated with the same
-// type.
+// AppendArray encodes vals onto out and returns out. The bytes depend only on
+// the values: the same values encode identically whatever T is.
 func AppendArray[T Signed](out []byte, vals []T) []byte {
 	if len(vals) == 0 {
 		return append(out, trRaw)
@@ -115,7 +105,7 @@ func AppendArray[T Signed](out []byte, vals []T) []byte {
 	// One pass for everything the transforms need to be scored: the minimum for
 	// the frame of reference, whether anything is negative, whether every value
 	// is the same, and whether a delta could overflow.
-	minimum, maximum := int64(vals[0]), int64(vals[0])
+	minimum := int64(vals[0])
 	constant := true
 	deltaOverflows := false
 	for index, value := range vals {
@@ -123,15 +113,12 @@ func AppendArray[T Signed](out []byte, vals []T) []byte {
 		if x < minimum {
 			minimum = x
 		}
-		if x > maximum {
-			maximum = x
-		}
 		if x != int64(vals[0]) {
 			constant = false
 		}
-		// A delta can only overflow int64 for int64 input, and only across a
-		// span above 2^63.
-		if index > 0 && widthOfType[T]() == 8 && subOverflows(x, int64(vals[index-1])) {
+		// A delta overflows int64 only across a span above 2^63, which only
+		// int64 input can have.
+		if index > 0 && subOverflows(x, int64(vals[index-1])) {
 			deltaOverflows = true
 		}
 	}
@@ -201,33 +188,46 @@ func appendBlocks[T Signed](out []byte, vals []T, transform uint8, base int64, z
 }
 
 // DecodeArray reads n values written by AppendArray into out and returns the
-// number of bytes consumed from buf. It must be instantiated with the same
-// element type used to encode.
+// number of bytes consumed from buf.
+//
+// T need not be the type the column was written from: any element type that
+// can hold the values will do, and a value outside T's range is an error rather
+// than a truncation. A header the encoder never writes is an error too; the
+// transform and block widths are not checked against the ones the encoder would
+// have chosen.
 func DecodeArray[T Signed](buf []byte, n int, out []T) (int, error) {
 	if n < 0 {
-		return 0, ErrNegativeCount
+		return 0, errNegativeCount
 	}
 	if len(out) < n {
-		return 0, ErrShortBuffer
+		return 0, errShortBuffer
 	}
 	if len(buf) < 1 {
-		return 0, ErrTruncated
+		return 0, errTruncated
 	}
 	header := buf[0]
 	position := 1
-	transform := header & 0x03
-	zz := header&zigzagFlag != 0
+	if !headerWritten(header, n) {
+		return 0, errBadHeader
+	}
 	if n == 0 {
 		return position, nil
 	}
+	transform := header & 0x03
+	zz := header&zigzagFlag != 0
 
 	var base int64
 	if transform != trRaw {
 		if len(buf) < position+8 {
-			return 0, ErrTruncated
+			return 0, errTruncated
 		}
 		base = unzigzag(binary.LittleEndian.Uint64(buf[position:]))
 		position += 8
+		// Delta, frame of reference and constant all write one of the column's
+		// own values as the base, so it has to fit T as well.
+		if !fits[T](base) {
+			return 0, errOutOfRange
+		}
 	}
 	if transform == trConstant {
 		for index := range n {
@@ -252,38 +252,68 @@ func DecodeArray[T Signed](buf []byte, n int, out []T) (int, error) {
 	for start := 0; start < len(target); start += blockSize {
 		end := min(start+blockSize, len(target))
 		if position >= len(buf) {
-			return 0, ErrTruncated
+			return 0, errTruncated
 		}
 		w := int(buf[position])
 		position++
 		if w > 64 {
-			return 0, ErrBadWidth
+			return 0, errBadWidth
 		}
 		bytes := blockBytes(end-start, w)
 		if len(buf)-position < bytes {
-			return 0, ErrTruncated
+			return 0, errTruncated
 		}
 		block := scratch[:end-start]
 		unpackRun(buf[position:], block, w)
 		position += bytes
+		// spill collects the bits each value loses on its way into T, so the
+		// range check is one test per block rather than a branch per value. For
+		// int64 it is constant zero.
+		var spill int64
 		switch transform {
 		case trFOR:
 			for index, residual := range block {
-				target[start+index] = T(int64(uint64(base) + residual))
+				value := int64(uint64(base) + residual)
+				target[start+index] = T(value)
+				spill |= value ^ int64(T(value))
 			}
 		case trDelta:
 			for index, residual := range block {
 				accumulator += unzigzag(residual)
 				target[start+index] = T(accumulator)
+				spill |= accumulator ^ int64(T(accumulator))
 			}
 		default:
 			for index, residual := range block {
-				target[start+index] = T(decode(residual, zz))
+				value := decode(residual, zz)
+				target[start+index] = T(value)
+				spill |= value ^ int64(T(value))
 			}
+		}
+		if spill != 0 {
+			return 0, errOutOfRange
 		}
 	}
 	return position, nil
 }
+
+// headerWritten reports whether AppendArray writes header for a column of n
+// values: the empty column's lone raw header, or one of the five headers a
+// non-empty column can open with — raw with or without zigzag, delta (always
+// zigzagged), frame of reference and constant (never).
+func headerWritten(header uint8, n int) bool {
+	if n == 0 {
+		return header == trRaw
+	}
+	switch header {
+	case trRaw, trRaw | zigzagFlag, trDelta | zigzagFlag, trFOR, trConstant:
+		return true
+	}
+	return false
+}
+
+// fits reports whether v is in T's range.
+func fits[T Signed](v int64) bool { return int64(T(v)) == v }
 
 // decode inverts encode.
 func decode(u uint64, zz bool) int64 {

@@ -1,6 +1,7 @@
 package codec
 
 import (
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -22,18 +23,15 @@ const noFieldID = -1
 // # Ids are one-based
 //
 // The first field is `cb:"1"`. Narrow keys hold ids 1..16 and wide keys hold
-// 1..256, so the count either width buys is unchanged — only where the counting
-// starts moved.
+// 1..255; past that a type is split into pages of 255, up to maxFieldID (see
+// pages.go).
 //
 // The wire key is the id minus one. It has to be: the key is a bare nibble or a
 // bare byte with every value spoken for, so there is no spare encoding to give
 // away to a reserved zero. `cb:"1"` therefore writes key 0, and `cb:"16"` writes
-// key 15. This is the one place the two numbers differ, and it is deliberate —
-// source counts from one, bytes count from zero.
-//
-// Both `FieldIDs` and the schema section report the *key*, not the id, because
-// both describe bytes that already exist rather than the tags that produced
-// them. A field written `cb:"1"` reads back as 0 from either.
+// key 15. Source counts from one and bytes count from zero: `FieldIDs` reports
+// the id, as the tag says it, and the schema section carries the key, as the
+// wire does.
 //
 // # An unnumbered field
 //
@@ -48,34 +46,47 @@ const noFieldID = -1
 // type with any derived key uses eight-bit keys. Numbering the fields is
 // therefore also how a type asks for the narrow width.
 //
-// An id outside 1..256 is returned as written rather than rejected here, so that
-// planFor can name the offending field. That includes zero, which is what a tag
-// left over from the old zero-based numbering parses to.
-func parseCbTag(field reflect.StructField) (name string, explicitID int, skip bool) {
+// An id outside 1..maxFieldID is returned as written rather than rejected here, so that
+// planFor can name the offending field. A token that starts like a number and
+// does not parse as one — `-1`, or a number past what an int holds — is refused
+// rather than taken for a name.
+func parseCbTag(field reflect.StructField) (name string, explicitID int, skip bool, err error) {
 	name, explicitID = field.Name, noFieldID
 	tag := field.Tag.Get("cb")
 	if tag == "-" {
-		return "", noFieldID, true
+		return "", noFieldID, true, nil
 	}
 	if tag == "" {
-		return field.Name, noFieldID, false
+		return field.Name, noFieldID, false, nil
 	}
 	named := false
 	for _, token := range strings.Split(tag, ",") {
 		if token == "" {
 			continue
 		}
-		if id, err := strconv.Atoi(token); err == nil {
+		if numeric(token) {
+			id, err := strconv.Atoi(token)
+			if err != nil || id < 0 {
+				return "", 0, false, fmt.Errorf("the tag `cb:%q` holds %q, which is not a field id", tag, token)
+			}
 			explicitID = id
 		} else if !named {
 			name, named = token, true
 		}
 	}
-	return name, explicitID, false
+	return name, explicitID, false, nil
 }
 
-// fnv8 is FNV-1a folded to a byte, which is the hash the previous format used
-// and therefore the one every already-written reader expects.
+// numeric says a tag token is meant as a number: a digit, or a sign and one.
+func numeric(token string) bool {
+	if token[0] == '-' || token[0] == '+' {
+		token = token[1:]
+	}
+	return token != "" && token[0] >= '0' && token[0] <= '9'
+}
+
+// fnv8 is FNV-1a folded to a byte. Every port derives untagged keys with it, so
+// it is format rather than an implementation detail.
 func fnv8(name string) uint8 {
 	const (
 		offset32 = 2166136261

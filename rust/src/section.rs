@@ -68,6 +68,15 @@ const SCHEMA_WIDE_KEYS: u8 = 0x01;
 /// the three ports render the same document for the same bytes.
 const SCHEMA_ENVELOPE: u8 = 0x02;
 
+/// The structDef flag saying this struct is a page of a paged type — one with
+/// more fields than a key run holds — linked under [`PAGE_LINK`] of the page
+/// before. A walk merges its fields into the object that links it. Go writes it
+/// (`codec/pages.go`); nothing on this side builds a paged plan.
+const SCHEMA_PAGE: u8 = 0x04;
+
+/// The key a page's link to the next one is under.
+const PAGE_LINK: u8 = 255;
+
 /// What eight key bits buy, and therefore the most fields a section may name.
 const MAX_WIDE_FIELDS: usize = 256;
 
@@ -178,6 +187,7 @@ pub fn parse(data: &[u8]) -> Result<Schema, Error> {
     for index in 0..count {
         parse_struct_def(&mut cursor, &mut plans, index, count)?;
     }
+    check_pages(&plans)?;
     for plan in &mut plans {
         plan.finish();
     }
@@ -186,6 +196,28 @@ pub fn parse(data: &[u8]) -> Result<Schema, Error> {
     // byteLength is what a reader steps over, and room behind the definitions is
     // where a later version would put something this one does not know about.
     Ok(Schema { plans, size })
+}
+
+/// Refuses a page reached any way but the one an encoder writes: as the struct
+/// under key 255 of a wide run. A walk merges a page into the object that links
+/// it, so a page at the root, in a list or under any other key has no object to
+/// merge into. Mirrors `checkPages` in `codec/schema_plan.go`.
+fn check_pages(plans: &[Plan]) -> Result<(), Error> {
+    if plans[0].is_page {
+        return Err(Error::BadSection);
+    }
+    for plan in plans {
+        for field in &plan.fields {
+            let Some(at) = field.sub else { continue };
+            if !plans[at as usize].is_page {
+                continue;
+            }
+            if field.op != OP_STRUCT || field.key != PAGE_LINK || !plan.is_wide {
+                return Err(Error::BadSection);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn parse_struct_def(
@@ -197,6 +229,7 @@ fn parse_struct_def(
     let flags = cursor.byte()?;
     let is_wide = flags & SCHEMA_WIDE_KEYS != 0;
     let is_envelope = flags & SCHEMA_ENVELOPE != 0;
+    let is_page = flags & SCHEMA_PAGE != 0;
 
     let count = cursor.length()?;
     if count > cursor.left() / MIN_FIELD_BYTES || count > MAX_WIDE_FIELDS {
@@ -228,6 +261,7 @@ fn parse_struct_def(
     plan.names = names;
     plan.is_wide = is_wide;
     plan.is_envelope = is_envelope;
+    plan.is_page = is_page;
     Ok(())
 }
 
@@ -297,6 +331,9 @@ pub fn build(schema: &Schema) -> Vec<u8> {
         }
         if plan.is_envelope {
             flags |= SCHEMA_ENVELOPE;
+        }
+        if plan.is_page {
+            flags |= SCHEMA_PAGE;
         }
         body.push(flags);
         append_length(&mut body, plan.fields.len());

@@ -36,6 +36,9 @@ package codec
 //   - **K4 cannot skip.** A narrow message holding a key the schema does not
 //     list ends the decode, as it does for a Go type. That is K4's standing
 //     trade and the error says so.
+//   - **The message is untrusted.** The walk descends at most maxSchemaDepth
+//     levels, a message's tables declare at most rowBudget rows between them,
+//     and nothing continues once a failure is recorded.
 
 import (
 	"fmt"
@@ -46,13 +49,16 @@ import (
 	"github.com/ivanjoz/colbin/wire"
 )
 
-// maxSchemaDepth bounds how far a walk descends.
+// maxSchemaDepth bounds how far any walk descends — encode and decode, typed,
+// dynamic and JSON alike — counting a level per struct, list, map and table.
 //
-// Nesting is data here, not type: `[]Node` inside `Node` nests as deep as the
-// message says, and a crafted message could otherwise run the stack out. A
-// hundred and twenty-eight is far past anything a real record nests and far
-// short of anything that hurts.
+// Nesting is data, not type: `[]Node` inside `Node` nests as deep as the value
+// or the message says, and either could otherwise run the stack out. One bound
+// for every path is what keeps Marshal from writing a message that ToJSON, or
+// the Rust port (rust/src/walk.rs, MAX_DEPTH), would refuse.
 const maxSchemaDepth = 128
+
+var errTooDeep = fmt.Errorf("colbin: a value nests more than %d deep, or holds itself", maxSchemaDepth)
 
 // maxTableRows bounds the row count a table may declare.
 //
@@ -77,8 +83,33 @@ const maxSchemaDepth = 128
 const maxTableRows = 1 << 22
 
 var errTooManyRows = fmt.Errorf(
-	"colbin: a table declares more than %d rows, which this decoder refuses to allocate for",
-	maxTableRows)
+	"colbin: a table declares more rows than this decoder allocates for: "+
+		"%d in one table, or more than the message's size allows in all", maxTableRows)
+
+// rowBudget is how many table cells — rows times columns — one message may
+// declare between all its tables: maxTableRows, and sixty-four more for every
+// byte of the message.
+//
+// maxTableRows bounds one table's rows, which leaves a message free to hold a
+// thousand tables, or a table of a hundred columns, and ask for that many times
+// the memory. A real table of many cells is many bytes — only an all-zero or
+// constant column is not — so a budget that grows with the message admits
+// real tables and holds a small message to a small total.
+func rowBudget(messageLen int) int {
+	return maxTableRows + 64*min(messageLen, (maxInt-maxTableRows)/64)
+}
+
+const maxInt = int(^uint(0) >> 1)
+
+// takeRows spends a table's cells from a budget, refusing a table past either
+// bound.
+func takeRows(left *int, rows, columns int) error {
+	if rows > maxTableRows || rows*max(columns, 1) > *left {
+		return errTooManyRows
+	}
+	*left -= rows * max(columns, 1)
+	return nil
+}
 
 // sink is where a walk puts what it finds. A JSON sink appends text; an `any`
 // sink builds maps and slices. Nothing about the wire reaches this far.
@@ -121,6 +152,8 @@ type walker struct {
 	// for a schema that cannot hold a dynamic value either.
 	plans []*typePlan
 	depth int
+	// rowsLeft is the message's row budget. See rowBudget.
+	rowsLeft int
 }
 
 func (w *walker) fail(err error) {
@@ -129,9 +162,15 @@ func (w *walker) fail(err error) {
 	}
 }
 
+// enter takes a level of depth, and refuses once the walk has failed: a walk
+// that has failed is unwinding, and descending further would only do work —
+// exponential work, for a value that reaches one thing twice.
 func (w *walker) enter() bool {
+	if w.err != nil {
+		return false
+	}
 	if w.depth >= maxSchemaDepth {
-		w.fail(fmt.Errorf("colbin: a message nests more than %d deep", maxSchemaDepth))
+		w.fail(errTooDeep)
 		return false
 	}
 	w.depth++
@@ -148,16 +187,18 @@ type fieldSet [4]uint64
 func (set *fieldSet) add(index int)      { set[index>>6] |= 1 << uint(index&63) }
 func (set *fieldSet) has(index int) bool { return set[index>>6]&(1<<uint(index&63)) != 0 }
 
-// AppendJSON writes data as JSON onto dst, which may be nil.
+// AppendJSON writes data as JSON onto dst, which may be nil. On failure it
+// returns dst as it was given.
 //
-// schema describes the message. Pass nil for a message written by
-// MarshalSelfDescribing, which carries its own.
+// schema describes the message. A message written by MarshalSelfDescribing
+// carries its own, which is used in preference to schema; pass nil for one.
 //
-// The output is what encoding/json would have written for the same record: every
-// field of the schema is present, a []byte is base64, a nil slice or map is
-// null, and the numbers are spelled the same way. Key *order* is not promised —
-// the fields the message carried come first, in wire order, and the ones it
-// omitted follow.
+// The output is equivalent to what encoding/json writes for the same record —
+// the same fields holding the same values — though not always the same text:
+// every field of the schema is present, a []byte is base64, a nil slice or map
+// is null, and the numbers are spelled the same way, but key *order* is the
+// message's, with the fields it omitted at the end of their object, and names
+// are colbin's rather than any `json` tag's.
 //
 // A NaN or an infinity is refused rather than turned into null. JSON has no
 // spelling for either, and quietly writing null loses the difference between a
@@ -166,13 +207,13 @@ func (set *fieldSet) has(index int) bool { return set[index>>6]&(1<<uint(index&6
 func AppendJSON(dst []byte, schema *Schema, data []byte) ([]byte, error) {
 	resolved, body, wide, err := resolveSchema(schema, data)
 	if err != nil {
-		return nil, err
+		return dst, err
 	}
 	out := jsonSink{buffer: dst}
-	walk := walker{to: &out, plans: resolved.plans}
-	walk.root(resolved.plan, body, wide)
+	walk := walker{to: &out, plans: resolved.plans, rowsLeft: rowBudget(len(data))}
+	walk.root(resolved.plans[0], body, wide)
 	if walk.err != nil {
-		return nil, walk.err
+		return dst[:len(dst):len(dst)], walk.err
 	}
 	return out.buffer, nil
 }
@@ -198,41 +239,44 @@ func DecodeAny(schema *Schema, data []byte) (any, error) {
 		return nil, err
 	}
 	out := anySink{}
-	walk := walker{to: &out, plans: resolved.plans}
-	walk.root(resolved.plan, body, wide)
+	walk := walker{to: &out, plans: resolved.plans, rowsLeft: rowBudget(len(data))}
+	walk.root(resolved.plans[0], body, wide)
 	if walk.err != nil {
 		return nil, walk.err
 	}
 	return out.root, nil
 }
 
-// resolveSchema finds the plan and the body: from the schema the caller handed
-// in, or from the message's own section when there is none.
+// resolveSchema finds the plan and the body: from the message's own section when
+// it carries one, and from the schema the caller handed in otherwise.
+//
+// The message's own wins because it is the one that describes these bytes: a
+// caller's schema is a guess about what the message holds, and a wrong guess
+// reads every field as some other one.
 func resolveSchema(schema *Schema, data []byte) (resolved *Schema, body []byte, wide bool, err error) {
 	if len(data) == 0 {
 		return nil, nil, false, errNoSection(data)
 	}
-	if schema != nil {
-		body, wide, ok := rootOf(data)
-		if !ok {
-			return nil, nil, false, fmt.Errorf(
-				"colbin: byte 0 is %#02x, which is not a root descriptor this version writes",
-				data[0])
+	section, body, wide, ok := rootParts(data)
+	if !ok {
+		if data[0] == rootStructNarrowSchema || data[0] == rootStructWideSchema {
+			return nil, nil, false, errShortSection
 		}
-		return schema, body, wide, nil
+		return nil, nil, false, fmt.Errorf(
+			"colbin: byte 0 is %#02x, which is not a root descriptor this version writes",
+			data[0])
 	}
-	if data[0] != rootStructNarrowSchema && data[0] != rootStructWideSchema {
+	if section != nil {
+		parsed, err := ParseSchema(section)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		return parsed, body, wide, nil
+	}
+	if schema == nil {
 		return nil, nil, false, errNoSection(data)
 	}
-	section, body, ok := splitSchemaSection(data[1:])
-	if !ok {
-		return nil, nil, false, errShortSection
-	}
-	parsed, err := ParseSchema(section)
-	if err != nil {
-		return nil, nil, false, err
-	}
-	return parsed, body, data[0]&rootWide != 0, nil
+	return schema, body, wide, nil
 }
 
 // root walks the outermost run, which is the only place an envelope can be.
@@ -314,9 +358,18 @@ func (w *walker) narrowRun(plan *typePlan, body []byte) {
 		return
 	}
 	defer w.leave()
+	w.to.beginObject()
+	w.narrowFields(plan, body)
+	if w.err == nil {
+		w.to.endObject()
+	}
+}
+
+// narrowFields writes a four-bit-keyed run's fields into the object already
+// open, which is the run's own or, for a page, the one that links it.
+func (w *walker) narrowFields(plan *typePlan, body []byte) {
 	reader := wire.NewReader(body)
 	var seen fieldSet
-	w.to.beginObject()
 	for reader.More() && w.err == nil {
 		key := reader.Key()
 		index := plan.findIndex(key)
@@ -337,7 +390,6 @@ func (w *walker) narrowRun(plan *typePlan, body []byte) {
 		return
 	}
 	w.absent(plan, &seen)
-	w.to.endObject()
 }
 
 // wideRun turns one eight-bit-keyed record into an object. A key the schema does
@@ -347,9 +399,18 @@ func (w *walker) wideRun(plan *typePlan, body []byte) {
 		return
 	}
 	defer w.leave()
+	w.to.beginObject()
+	w.wideFields(plan, body)
+	if w.err == nil {
+		w.to.endObject()
+	}
+}
+
+// wideFields is narrowFields at eight key bits, which is the only width a page
+// link can be under.
+func (w *walker) wideFields(plan *typePlan, body []byte) {
 	reader := wire.NewReader8(body)
 	var seen fieldSet
-	w.to.beginObject()
 	for reader.More() && w.err == nil {
 		index := plan.findIndex(reader.Key())
 		if index < 0 {
@@ -360,30 +421,71 @@ func (w *walker) wideRun(plan *typePlan, body []byte) {
 			continue
 		}
 		seen.add(index)
+		field := &plan.fields[index]
+		if field.linksPage() {
+			w.page(&reader, field)
+			continue
+		}
 		w.to.key(plan.names[index])
-		w.wideValue(&reader, &plan.fields[index])
+		w.wideValue(&reader, field)
 	}
 	w.fail(reader.Err())
 	if w.err != nil {
 		return
 	}
 	w.absent(plan, &seen)
-	w.to.endObject()
+}
+
+// page writes the next page of a paged type into the object its first page
+// opened: the fields are the type's, and the page is only where they were put.
+func (w *walker) page(reader *wire.Reader8, field *planField) {
+	body, wideKeys, ok := reader.StructBody()
+	if !ok {
+		w.fail(reader.Err())
+		return
+	}
+	if !w.enter() {
+		return
+	}
+	defer w.leave()
+	if wideKeys {
+		w.wideFields(field.sub, body)
+		return
+	}
+	w.narrowFields(field.sub, body)
 }
 
 // absent writes the fields the message left out.
 //
 // It is not an afterthought: omission *is* the encoding of a zero value, so a
 // record that writes three of its nine fields still has nine, and a reader that
-// printed three would be printing a different record.
+// printed three would be printing a different record. A page left out is the
+// same thing at a larger scale: its fields go into this object, as zeros.
 func (w *walker) absent(plan *typePlan, seen *fieldSet) {
 	for index := range plan.fields {
+		if w.err != nil {
+			return
+		}
 		if seen.has(index) {
 			continue
 		}
+		field := &plan.fields[index]
+		if field.linksPage() {
+			w.absentPage(field.sub)
+			continue
+		}
 		w.to.key(plan.names[index])
-		w.zero(&plan.fields[index])
+		w.zero(field)
 	}
+}
+
+func (w *walker) absentPage(page *typePlan) {
+	if !w.enter() {
+		return
+	}
+	defer w.leave()
+	var none fieldSet
+	w.absent(page, &none)
 }
 
 // zero is what an absent key means, per op — which is exactly what Unmarshal
@@ -433,9 +535,8 @@ func (w *walker) floatValue(value float64, width int) {
 
 // narrowValue reads one field at four key bits.
 //
-// The composites are here and the values are in narrowScalar, because a pointer
-// field's payload *is* a value — the op it points at — and the two switches
-// would otherwise be one switch written twice.
+// The composites are here and the values are in narrowScalar (ops_gen.go),
+// because a pointer field's payload *is* a value — the op it points at.
 func (w *walker) narrowValue(reader *wire.Reader, field *planField) {
 	switch field.op {
 	case opStruct, opPointerStruct:
@@ -466,60 +567,9 @@ func (w *walker) narrowValue(reader *wire.Reader, field *planField) {
 	}
 }
 
-func (w *walker) narrowScalar(reader *wire.Reader, op fieldOp) {
-	switch op {
-	case opBool:
-		w.to.boolean(reader.Bool())
-	case opInt8, opInt16, opInt32, opInt64:
-		w.to.signed(reader.Int())
-	case opUint8, opUint16:
-		w.to.unsigned(uint64(reader.U16()))
-	case opUint32:
-		w.to.unsigned(uint64(reader.U32()))
-	case opUint64:
-		w.to.unsigned(reader.Uint())
-	case opFloat32:
-		w.floatValue(float64(reader.F32()), 32)
-	case opFloat64:
-		w.floatValue(reader.F64(), 64)
-	case opString:
-		// PackedString rather than Bytes, for the reason the wide path says: the
-		// header's escape code carries the encoding, so this needs no setting
-		// and cannot be wrong about it.
-		//
-		// It used to be Bytes, and that was safe only because packed5 forced the
-		// wide key — a narrow string could never be packed. It no longer does,
-		// which made the case reachable and made this an error rather than a
-		// tidiness: Marshal wrote a message ToJSON refused. See
-		// TestPackedNarrowStringThroughEveryReader.
-		w.to.text(reader.PackedString())
-	case opBytes:
-		w.to.blob(reader.Bytes())
-	case opInt8s:
-		signedArray(w, reader.Int8s(nil))
-	case opInt16s:
-		signedArray(w, reader.Int16s(nil))
-	case opInt32s:
-		signedArray(w, reader.Int32s(nil))
-	case opInt64s:
-		signedArray(w, reader.Ints(nil))
-	case opUint16s:
-		unsignedArray(w, reader.Uint16s(nil))
-	case opUint32s:
-		unsignedArray(w, reader.Uint32s(nil))
-	case opUint64s:
-		unsignedArray(w, reader.Uint64s(nil))
-	case opStrings:
-		w.textArray(reader.StringsBytes(nil))
-	default:
-		w.fail(errUnwalkableOp(op))
-	}
-}
-
-// wideValue and wideScalar are narrowValue and narrowScalar at eight key bits.
-// They are written out rather than shared behind an interface for the reason
-// `wire` keeps the two widths in separate files: the readers are different types
-// and boxing them would cost an allocation per field to save a switch.
+// wideValue is narrowValue at eight key bits. It is written out rather than
+// shared behind an interface because the readers are different types and boxing
+// them would cost an allocation per field to save a switch.
 func (w *walker) wideValue(reader *wire.Reader8, field *planField) {
 	switch field.op {
 	case opStruct, opPointerStruct:
@@ -549,49 +599,6 @@ func (w *walker) wideValue(reader *wire.Reader8, field *planField) {
 		}
 	default:
 		w.wideScalar(reader, field.op)
-	}
-}
-
-func (w *walker) wideScalar(reader *wire.Reader8, op fieldOp) {
-	switch op {
-	case opBool:
-		w.to.boolean(reader.Bool())
-	case opInt8, opInt16, opInt32, opInt64:
-		w.to.signed(reader.Int())
-	case opUint8, opUint16:
-		w.to.unsigned(uint64(reader.U16()))
-	case opUint32:
-		w.to.unsigned(uint64(reader.U32()))
-	case opUint64:
-		w.to.unsigned(reader.Uint())
-	case opFloat32:
-		w.floatValue(float64(reader.F32()), 32)
-	case opFloat64:
-		w.floatValue(reader.F64(), 64)
-	case opString:
-		// PackedString reads either encoding: the descriptor says which, so
-		// packed5 costs this path nothing and needs no setting.
-		w.to.text(reader.PackedString())
-	case opBytes:
-		w.to.blob(reader.Bytes())
-	case opInt8s:
-		signedArray(w, reader.Int8s(nil))
-	case opInt16s:
-		signedArray(w, reader.Int16s(nil))
-	case opInt32s:
-		signedArray(w, reader.Int32s(nil))
-	case opInt64s:
-		signedArray(w, reader.Ints(nil))
-	case opUint16s:
-		unsignedArray(w, reader.Uint16s(nil))
-	case opUint32s:
-		unsignedArray(w, reader.Uint32s(nil))
-	case opUint64s:
-		unsignedArray(w, reader.Uint64s(nil))
-	case opStrings:
-		w.textArray(reader.StringsBytes(nil))
-	default:
-		w.fail(errUnwalkableOp(op))
 	}
 }
 
@@ -633,7 +640,7 @@ func (w *walker) textArray(values [][]byte) {
 // element and the reason a structDef states its key width: this is the one run
 // on the wire whose width the wire does not say.
 func (w *walker) narrowList(reader *wire.Reader, field *planField) {
-	count, elements, ok := reader.Counted()
+	count, elements, ok := reader.List()
 	if !ok {
 		w.fail(reader.Err())
 		return
@@ -719,11 +726,9 @@ func (w *walker) structList(count int, elements *wire.Reader8, plan *typePlan) {
 // that it is every column at once rather than one at a time, and it is
 // documented rather than hidden.
 //
-// The row count is the message's claim, exactly as it is for the typed decoder
-// in table.go: a peer that says four billion rows makes both of them allocate
-// for four billion rows. That is the readers' standing behaviour rather than
-// something this path introduces, and bounding it belongs in `wire` where both
-// would get it.
+// The row count is the message's claim, and nothing in the message bounds it:
+// an absent column is a column of zeros. Both this walk and the typed decoder
+// spend it from the message's row budget (rowBudget) before allocating for it.
 
 // tableColumns is a decoded table, by field index rather than by key.
 type tableColumns struct {
@@ -742,14 +747,13 @@ func newTableColumns(fields int) *tableColumns {
 	}
 }
 
+// narrowTable walks a table under a narrow parent, whose columns are keyed at
+// the row type's width — which, as for a narrow list's elements, the schema
+// says and the wire does not.
 func (w *walker) narrowTable(reader *wire.Reader, field *planField) {
-	rows, columns, ok := reader.Counted()
+	rows, body, ok := reader.Table()
 	if !ok {
 		w.fail(reader.Err())
-		return
-	}
-	if rows > maxTableRows {
-		w.fail(errTooManyRows)
 		return
 	}
 	sub := field.sub
@@ -757,6 +761,16 @@ func (w *walker) narrowTable(reader *wire.Reader, field *planField) {
 		w.fail(errNoSubSchema)
 		return
 	}
+	if sub.isWide {
+		columns := wire.NewReader8(body)
+		w.structTable(rows, &columns, sub)
+		return
+	}
+	if err := takeRows(&w.rowsLeft, rows, len(sub.fields)); err != nil {
+		w.fail(err)
+		return
+	}
+	columns := wire.NewReader(body)
 	gathered := newTableColumns(len(sub.fields))
 	for columns.More() {
 		key := columns.Key()
@@ -764,8 +778,8 @@ func (w *walker) narrowTable(reader *wire.Reader, field *planField) {
 		if index < 0 {
 			// A narrow key cannot be skipped here either.
 			w.fail(fmt.Errorf(
-				"colbin: a table holds column %d, which the schema does not declare, "+
-					"and a narrow key cannot be skipped", key))
+				"colbin: a table holds column id %d, which the schema does not declare, "+
+					"and a narrow key cannot be skipped", int(key)+1))
 			return
 		}
 		if sub.fields[index].op == opString {
@@ -791,15 +805,16 @@ func (w *walker) wideTable(reader *wire.Reader8, field *planField) {
 	w.structTable(rows, &columns, field.sub)
 }
 
-// structTable is wideTable over an opened one, for the reason structList is
-// split out: a dynamic value reaches the same columns through a TYPED tag.
+// structTable walks a table whose columns are keyed at eight bits: under a wide
+// parent, under a narrow one whose rows are wide, or reached by a dynamic value
+// through a TYPED tag.
 func (w *walker) structTable(rows int, columns *wire.Reader8, sub *typePlan) {
 	if sub == nil {
 		w.fail(errNoSubSchema)
 		return
 	}
-	if rows > maxTableRows {
-		w.fail(errTooManyRows)
+	if err := takeRows(&w.rowsLeft, rows, len(sub.fields)); err != nil {
+		w.fail(err)
 		return
 	}
 	gathered := newTableColumns(len(sub.fields))
@@ -834,6 +849,9 @@ func (w *walker) tableRows(sub *typePlan, gathered *tableColumns, rows int) {
 	defer w.leave()
 	w.to.beginArray()
 	for row := range rows {
+		if w.err != nil {
+			return
+		}
 		w.to.beginObject()
 		for index := range sub.fields {
 			field := &sub.fields[index]
@@ -894,22 +912,26 @@ func (w *walker) columnValue(op fieldOp, raw int64) {
 
 // Maps.
 //
-// JSON objects are unordered and a Go map has no iteration order, so a
-// schema-described message holding a map does not render to identical JSON bytes
-// twice. That rules a map out of any golden-vector test and is worth writing
-// down rather than discovering.
+// Entries render in the order the message holds them, which the Go encoder
+// sorts by key, so a map renders to the same text every time.
 //
 // An integer key becomes a quoted decimal, because a JSON object key is a
 // string. Reading one back the other way is out of scope.
 
 func (w *walker) narrowMap(reader *wire.Reader, field *planField) {
-	count, entries, ok := reader.Counted()
+	count, entries, ok := reader.Map()
 	if !ok {
 		w.fail(reader.Err())
 		return
 	}
 	if !mapKeyIsRenderable(field.keyKind) {
 		w.fail(errBadMapKey(field.keyKind))
+		return
+	}
+	if field.valueKind == mapAny {
+		// A dynamic value names its own class, which four descriptor bits cannot:
+		// a map of them is always wide, so a section saying otherwise is wrong.
+		w.fail(errBadMapValue(field.valueKind))
 		return
 	}
 	if !w.enter() {
@@ -939,13 +961,19 @@ func (w *walker) narrowMap(reader *wire.Reader, field *planField) {
 			w.floatValue(float64FromReversed(entries.ElementUint()), 64)
 		case mapBool:
 			w.to.boolean(entries.ElementUint() == 1)
+		default:
+			w.fail(errBadMapValue(field.valueKind))
 		}
-		if entries.Err() != nil {
-			w.fail(entries.Err())
+		w.fail(entries.Err())
+		if w.err != nil {
 			return
 		}
 	}
 	w.to.endObject()
+}
+
+func errBadMapValue(kind mapKind) error {
+	return fmt.Errorf("colbin: the schema gives a map values of kind %d, which this key width cannot hold", kind)
 }
 
 func (w *walker) wideMap(reader *wire.Reader8, field *planField) {
@@ -989,9 +1017,11 @@ func (w *walker) wideMap(reader *wire.Reader8, field *planField) {
 			// The entries of a `map[string]any`, which say what they are one at a
 			// time rather than once in the schema. See dynamic.go.
 			w.dynamicValue(&entries)
+		default:
+			w.fail(errBadMapValue(field.valueKind))
 		}
-		if entries.Err() != nil {
-			w.fail(entries.Err())
+		w.fail(entries.Err())
+		if w.err != nil {
 			return
 		}
 	}

@@ -69,8 +69,8 @@ func TestDerivedIDsAreStable(t *testing.T) {
 		"Samples":   fnv8("Samples"),
 		"Valid":     fnv8("Valid"),
 	} {
-		if ids[name] != want {
-			t.Errorf("%s got id %d, want fnv8 = %d", name, ids[name], want)
+		if ids[name] != uint16(want)+1 {
+			t.Errorf("%s got id %d, want fnv8 + 1 = %d", name, ids[name], uint16(want)+1)
 		}
 	}
 }
@@ -81,13 +81,13 @@ func TestDeclaredIDsWinOverHashes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ids["First"] != 0 || ids["Second"] != 1 {
+	if ids["First"] != 1 || ids["Second"] != 2 {
 		t.Fatalf("declared ids moved: %+v", ids)
 	}
-	if ids["Third"] != fnv8("Third") || ids["Fourth"] != fnv8("Fourth") {
+	if ids["Third"] != uint16(fnv8("Third"))+1 || ids["Fourth"] != uint16(fnv8("Fourth"))+1 {
 		t.Fatalf("derived ids are not their hashes: %+v", ids)
 	}
-	seen := map[uint8]string{}
+	seen := map[uint16]string{}
 	for name, id := range ids {
 		if other, clash := seen[id]; clash {
 			t.Fatalf("%s and %s both got id %d", name, other, id)

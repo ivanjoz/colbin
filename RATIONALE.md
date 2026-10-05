@@ -664,6 +664,33 @@ latency-bound, which is the case this format exists to serve.
   measurement: K4's key rides in the descriptor byte the field needs anyway, so
   removing the key removes nothing and the bitmap is pure addition.
 
+Three more, from the prototypes behind packed5's unit format (deleted with
+`experiments/` after 0e9377a; the corpora were packed5's synthetic ones):
+
+- **packed5 units in `uint16` triples.** Three five-bit units fill 15 bits of a
+  `uint16`, which buys fixed shifts and whole-byte stores — but eight units in a
+  `uint64` buy the same at 40 bits, exactly five bytes, with nothing spare. On the
+  isolated kernel the triple packed at 0.30 ns per unit against the group's 0.20
+  (and the bit accumulator's 0.69), and is 6.7% larger. Used only for the final
+  group it is never smaller than the dense tail and larger for tails of 1, 4 and 7
+  units: +1.5% to +4.2% on the corpora. Rejected; nothing needed the spare bit.
+- **A flat six-bit string code ("p6").** 64 codes hold both letter cases, the
+  space and the ten digits outright, so there is no case state, no lookahead and
+  one table index per byte. Against the prototype of the current unit format it
+  decoded 1.2–1.6× faster and encoded up to 1.8× faster on short strings (slower
+  on a long paragraph) — and was 6% (SKUs) to 20% larger, 12% or more on
+  everything else. packed5 exists for size, so it lost. It is the answer for a
+  CPU-bound wire, and its layout is base64's, so SIMD kernels for it exist.
+- **Table-driven byte classification in the packed5 encoder.** One
+  `[256]uint16` load giving class and operand together, in place of the
+  `isLetter` / space / `isDigit` / symbol-lookup chain. Identical output, and
+  12% (names) to 35% (paragraphs) *slower*: the chain decides a lowercase letter
+  in three ALU operations on a branch that predicts almost perfectly on text,
+  where the table costs an L1 load plus a switch that predicts worse.
+  Classification is most of what an encode costs now, but the cost is the
+  per-character loop, not the dispatch — the way at it is SWAR over eight bytes,
+  not a bigger table.
+
 ## Composites, tables and a generator
 
 ### A composite's length is written forward and patched
@@ -1369,7 +1396,10 @@ message that already exists — a decoder reading a section has bytes in front o
 it, not tags, and handing it a number one higher than the nibble it is about to
 match would be a trap in both implementations. That is why
 `FieldIDs` reports 0 for a field tagged `cb:"1"`, which is the one surprise in
-the change and is documented where it can be met.
+the change and is documented where it can be met. *(Superseded: `FieldIDs`
+reports the id now — see the next entry — because on a paged type a key repeats
+from page to page and no longer names a field. The schema section still carries
+keys.)*
 
 **What it cost to make** — Nothing on the wire. The 323 tags in the Go tree and
 the 122 in the Rust one moved by one, the two subtractions went in, and
@@ -1383,3 +1413,39 @@ unnumbered field derives its key from a hash, so the field would move *and* take
 the type wide. `TestRefusesIDsOutsideTheOneBasedRange` pins it. The Rust side
 refuses `#[cb(0)]` the same way, though with no `trybuild` in the tree there is
 nothing asserting the message.
+
+## More than 255 fields: pages, not a wider key
+
+**Context** — A key is one byte, so a struct holds at most 256 fields. Some
+records are wider than that — an analytics row, a form with every question as a
+column — and the format had no answer but to refuse them.
+
+**Considered** — A third key width: twelve bits, a K4 with eight more, chosen
+the same way K4 and K8 are. It would have been a new framing in three
+implementations, a new descriptor bit to say it, and a slower key on every field
+of every type that used it, to serve types that are rare.
+
+**Decision** — Pages. A type numbered past 255 is split into pages of 255
+fields, `page = (id-1)/255` and `key = (id-1)%255`, and key 255 of each page
+holds the next page as an ordinary nested struct (`codec/pages.go`). Each page is
+a plan over the same Go record, linked by an `opStruct` field at offset 0, so the
+encoder and the typed decoder needed no new path at all. What did change:
+
+- An empty page is not written, and since the link is a page's last field, a
+  page holding only an empty link is empty too — pages past the last field in
+  use cost nothing.
+- A schema-section flag, `schemaPage`, marks a page, and the JSON walks in Go and
+  Rust write its fields into the object that links it. `ParseSchema` refuses a
+  page anywhere but under key 255 of a wide run, which is the only place a merge
+  has an object to go into.
+- `FieldIDs` reports ids, as `uint16`, since a key no longer names a field.
+- Every field of a paged type needs a number: a hashed key can land on 255.
+- Sixteen pages at most, id 4080. A page is a level of nesting to every walk,
+  and sixteen stays well inside the depth bound.
+
+**What it cost** — Id 256 moved: it was key 255 of one run and is now key 0 of
+the second page. Nothing in the tree used it, the Rust derive now stops at 255
+rather than disagree, and the vectors did not move. `codec.Generate` refuses a
+paged type, since the code it writes is one key run. The JavaScript encoder
+infers its schema and still caps an object at 256 keys; the reader renders
+paged messages.

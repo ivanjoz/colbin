@@ -105,8 +105,10 @@ func envelopeFor(valueType reflect.Type) reflect.Type {
 	// Recorded before the type is published, so that a plan built for it — which
 	// can only happen after envelopeFor has returned — always finds the mark.
 	envelopeTypes.Store(envelope, struct{}{})
-	envelopeCache.Store(valueType, envelope)
-	return envelope
+	// Two callers racing here build two types; the first stored is the one both
+	// get, so a value type has one envelope and one cached plan.
+	published, _ := envelopeCache.LoadOrStore(valueType, envelope)
+	return published.(reflect.Type)
 }
 
 // isEnvelope reports whether a struct type is one of the synthetic wrappers
@@ -144,10 +146,12 @@ func planForRoot(rootType reflect.Type) (*typePlan, error) {
 // Slices and maps are, because they are containers a caller genuinely holds. A
 // bare int or string is not: a message carrying one scalar and no name for it is
 // a byte array with extra steps, and refusing it keeps the error at the call
-// site rather than in whatever reads the blob later.
+// site rather than in whatever reads the blob later. An array is not either: no
+// field can hold one, so it is refused here, by its own name, rather than inside
+// the envelope.
 func envelopable(rootType reflect.Type) bool {
 	switch rootType.Kind() {
-	case reflect.Slice, reflect.Array, reflect.Map:
+	case reflect.Slice, reflect.Map:
 		return true
 	}
 	return false

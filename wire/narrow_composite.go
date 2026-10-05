@@ -8,30 +8,21 @@ package wire
 // is the same thing the wide form needs — a byte length — and the same four
 // detail bits carry it.
 //
-//	struct  [key:4][k8:1][—:1][lw:2]   [len: lw] [key run]
+//	struct  [key:4][k8:1][—:1][lw:2]    [len: lw] [key run]
 //	list    [key:4][homog:1][—:1][lw:2] [len: lw] [count] ( [len] [body] )*
 //	map     [key:4][sub=0:1][—:1][lw:2] [len: lw] [count] ( key value )*
-//	table   [key:4][sub=1:1][k8:1][lw:2] [len: lw] [rows] ( [key][desc][column] )*
+//	table   [key:4][sub=1:1][—:1][lw:2] [len: lw] [rows]  column run
 //
-// The detail nibble is bit for bit the wide one's. That is the whole of §2.5:
-// the wide descriptor spends its extra nibble on the class, and K4 takes the
-// class from the schema instead, so everything below the class is shared.
+// The detail nibble is bit for bit the wide one's: the wide descriptor spends
+// its extra nibble on the class, and K4 takes the class from the schema, so
+// everything below the class is shared.
 //
-// # What this is worth
+// A table's column run uses the row type's key width, which the reader takes
+// from the schema as it does a list element's shape: four-bit columns are
+// [key:4][lw:4-detail][len][column], eight-bit ones are Writer8's.
 //
-// Before it, a struct holding any composite had to use eight-bit keys — the
-// composite needed a byte length, a byte length needed a class, and a class
-// needed the wide descriptor. Every *scalar* in that struct then paid a byte it
-// did not need. A four-field order with three nested lines went from 55 bytes to
-// 51, against protobuf's 49, and the scalars around the composite went back to
-// costing one byte of framing rather than two.
-//
-// # What it gives up
-//
-// The same thing K4 always gives up: a field it does not recognise cannot be
-// stepped over, because nothing on the wire says what shape it is. A composite
-// is skippable under K8 and not under K4, and that is the trade rather than an
-// omission.
+// A field K4 does not recognise cannot be stepped over, composite or not,
+// because nothing on the wire says what shape it is.
 
 import (
 	"encoding/binary"
@@ -74,8 +65,9 @@ func (w *Writer) OpenMap(key uint8, count int) Mark {
 	return mark
 }
 
-// OpenTable begins a table of rows rows under key, its columns keyed at four
-// bits.
+// OpenTable begins a table of rows rows under key. Its columns follow in the row
+// type's key width: Column for four bits, or a Writer8 over the same buffer for
+// eight. Close it with Close.
 func (w *Writer) OpenTable(key uint8, rows int) Mark {
 	mark := w.openNarrowComposite(key, tableFlag)
 	w.Buffer = appendCount(w.Buffer, rows)
@@ -230,19 +222,48 @@ func (r *Reader) IsTable() bool {
 	return r.at < len(r.buffer) && r.buffer[r.at]&tableFlag != 0
 }
 
-// Counted returns the element count of a list, map or table and a reader over
-// what follows it.
-func (r *Reader) Counted() (int, Reader, bool) {
+// List returns a list's element count and a reader over its elements. The count
+// is checked against the body: every element is at least its length byte.
+func (r *Reader) List() (int, Reader, bool) { return r.counted(1) }
+
+// Map returns a map's entry count and a reader over its entries, which are at
+// least two bytes each.
+func (r *Reader) Map() (int, Reader, bool) { return r.counted(2) }
+
+func (r *Reader) counted(minSize int) (int, Reader, bool) {
 	body, ok := r.compositeBody()
 	if !ok {
 		return 0, Reader{}, false
 	}
 	count, at, ok := readCount(body)
-	if !ok {
+	if !ok || count > (len(body)-at)/minSize {
 		r.fail(ErrTruncated)
 		return 0, Reader{}, false
 	}
 	return count, Reader{buffer: body[at:]}, true
+}
+
+// Table returns a table's row count and its column run, whose key width the
+// caller knows from the row type: NewReader or NewReader8 over it accordingly.
+//
+// The row count is not bounded by the message — an absent column is a column of
+// zeros, so a table of a million rows can be a few bytes — and a caller that
+// allocates for it must budget rows itself.
+func (r *Reader) Table() (rows int, columns []byte, ok bool) {
+	if r.at < len(r.buffer) && r.buffer[r.at]&tableFlag == 0 {
+		r.fail(ErrBadDescriptor)
+		return 0, nil, false
+	}
+	body, ok := r.compositeBody()
+	if !ok {
+		return 0, nil, false
+	}
+	rows, at, ok := readCount(body)
+	if !ok {
+		r.fail(ErrTruncated)
+		return 0, nil, false
+	}
+	return rows, body[at:], true
 }
 
 // Element returns one narrow list element's body: a length and then a key run.
@@ -302,10 +323,7 @@ func (r *Reader) ElementInt() int64 {
 	}
 	positive := r.buffer[r.at]&intPositiveFlag != 0
 	magnitude := r.elementMagnitude()
-	if positive {
-		return int64(magnitude)
-	}
-	return -int64(magnitude)
+	return r.signed(positive, magnitude)
 }
 
 // elementMagnitude is signedMagnitude for a key-less element, which ElementInt
@@ -350,13 +368,10 @@ func (r *Reader) ElementString() string {
 	return string(r.buffer[start : start+int(size)])
 }
 
-// MoreElements reports whether another key-less value follows.
-func (r *Reader) MoreElements() bool { return r.err == nil && r.at < len(r.buffer) }
-
 // Column writes an integer column under key, for a narrow-keyed table. It is
 // Writer8.Column with four key bits: the column codec underneath is the same.
 func (w *Writer) Column(key uint8, values []int64) {
-	if len(values) == 0 || allZeroInts(values) {
+	if allZero(values) {
 		return
 	}
 	mark := w.openNarrowComposite(key, 0)
@@ -371,14 +386,8 @@ func (r *Reader) Column(rows int, dst []int64) []int64 {
 	if !ok {
 		return dst
 	}
-	if cap(dst) < rows {
-		dst = make([]int64, rows)
-	}
-	dst = dst[:rows]
-	if _, err := column.DecodeArray(body, rows, dst); err != nil {
-		r.fail(err)
-		return nil
-	}
+	dst, err := decodeColumn(body, rows, dst)
+	r.Fail(err)
 	return dst
 }
 

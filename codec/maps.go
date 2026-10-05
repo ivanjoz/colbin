@@ -30,9 +30,15 @@ package codec
 // `any` is the escape hatch and the expensive one: an entry of it carries its
 // own type on the wire (dynamic.go), which is what a `map[string]any` needs and
 // what a map with a known value type should not pay for. A dynamic value only
-// exists at eight key bits, so the two writers below are not symmetric — the
-// narrow one has no mapAny arm and cannot be reached with one, because a plan
-// holding a dynamic field goes wide.
+// exists at eight key bits, so the narrow writer has no mapAny arm — a plan
+// holding a dynamic field goes wide — and the narrow reader refuses one, which
+// only a message for some other type can bring.
+//
+// # Entries are written in key order
+//
+// Go's map order is random, so writing entries in it would encode the same value
+// differently every time. Sorting costs a slice of keys per map and makes the
+// bytes, and the JSON they render to, a function of the value.
 
 import (
 	"fmt"
@@ -131,37 +137,32 @@ func appendMapField(writer *wire.Writer8, field *planField, at unsafe.Pointer, b
 	if count == 0 {
 		return
 	}
-	if field.valueKind == mapAny {
-		// A dynamic map is written in key order, which an ordinary one is not.
-		// See sortedKeys: without it the same value encodes differently every
-		// time, and no two implementations can be pinned against each other.
-		appendDynamicMapField(writer, field, value, buf)
-		return
-	}
-	mark := writer.OpenMap(field.key, count)
-	for entries := value.MapRange(); entries.Next(); {
-		writeMapValue(writer, field.keyKind, entries.Key())
-		writeMapValue(writer, field.valueKind, entries.Value())
-	}
-	writer.Close(mark)
-}
-
-// appendDynamicMapField writes a map whose values have no declared type.
-func appendDynamicMapField(
-	writer *wire.Writer8, field *planField, value reflect.Value, buf *scratch,
-) {
+	// A map is a level of depth to every reader, so it is one here.
 	if !buf.enter() {
 		return
 	}
 	defer buf.leave()
-	keys := value.MapKeys()
-	sortMapKeys(keys)
+	keys := sortedMapKeys(value)
 	mark := writer.OpenMap(field.key, len(keys))
 	for _, key := range keys {
+		if buf.err != nil {
+			break
+		}
 		writeMapValue(writer, field.keyKind, key)
-		appendAnyReflect(writer, value.MapIndex(key), buf)
+		if field.valueKind == mapAny {
+			appendAnyReflect(writer, value.MapIndex(key), buf)
+		} else {
+			writeMapValue(writer, field.valueKind, value.MapIndex(key))
+		}
 	}
 	writer.Close(mark)
+}
+
+// sortedMapKeys is a map's keys in the order its entries are written.
+func sortedMapKeys(value reflect.Value) []reflect.Value {
+	keys := value.MapKeys()
+	sortMapKeys(keys)
+	return keys
 }
 
 func writeMapValue(writer *wire.Writer8, kind mapKind, value reflect.Value) {
@@ -186,12 +187,17 @@ func writeMapValue(writer *wire.Writer8, kind mapKind, value reflect.Value) {
 }
 
 // readMapField reads a map, allocating it at the entry count the message
-// declares.
+// declares — which wire has checked against the bytes that hold the entries.
 func readMapField(reader *wire.Reader8, field *planField, at unsafe.Pointer, buf *scratch) {
 	count, entries, ok := reader.Map()
 	if !ok {
 		return
 	}
+	if !buf.enter() {
+		reader.Fail(buf.err)
+		return
+	}
+	defer buf.leave()
 	target := reflect.NewAt(field.sliceType, at).Elem()
 	built := reflect.MakeMapWithSize(field.sliceType, count)
 	key := reflect.New(field.sliceType.Key()).Elem()
@@ -224,14 +230,34 @@ func readMapValue(reader *wire.Reader8, kind mapKind, into reflect.Value) {
 	case mapString:
 		into.SetString(reader.ElementString())
 	case mapInt:
-		into.SetInt(reader.ElementInt())
+		reader.Fail(setInt(into, reader.ElementInt()))
 	case mapUint:
-		into.SetUint(reader.ElementUint())
+		reader.Fail(setUint(into, reader.ElementUint()))
 	case mapFloat32, mapFloat64:
 		setFloatFromReversed(into, reader.ElementUint())
 	case mapBool:
 		into.SetBool(reader.ElementUint() == 1)
+	default:
+		reader.Fail(errBadMapValue(kind))
 	}
+}
+
+// setInt and setUint store an entry, refusing one wider than the map's type
+// rather than truncating it into a different value, as the scalar readers do.
+func setInt(into reflect.Value, value int64) error {
+	if into.OverflowInt(value) {
+		return wire.ErrFieldTooWide
+	}
+	into.SetInt(value)
+	return nil
+}
+
+func setUint(into reflect.Value, value uint64) error {
+	if into.OverflowUint(value) {
+		return wire.ErrFieldTooWide
+	}
+	into.SetUint(value)
+	return nil
 }
 
 // reverseFloatBits and setFloatFromReversed put a float through the same byte

@@ -12,8 +12,7 @@
 // The Rust side holds the same values in `rust/tests/vectors.rs` and asserts
 // both directions: that it decodes these bytes to those values, and that it
 // encodes those values to these bytes. So neither port can move without the
-// other failing, which is the discipline this repository keeps and the one the
-// previous corpus had silently lost.
+// other failing.
 package main
 
 import (
@@ -26,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -110,6 +110,32 @@ type Order struct {
 	Note     string `cb:"4"`
 }
 
+// WideLine has an id past sixteen, so its key run is wide where Ledger's is
+// narrow. A table of them under a Ledger keys its columns at eight bits — the
+// rows' width, not the parent's — which a four-bit key would truncate.
+type WideLine struct {
+	SKU      string `cb:"1"`
+	Quantity int32  `cb:"2"`
+	Cents    int64  `cb:"20"`
+}
+
+type Ledger struct {
+	ID    uint32     `cb:"1"`
+	Lines []WideLine `cb:"2"`
+}
+
+func wideLines(count int) []WideLine {
+	out := make([]WideLine, count)
+	for index := range out {
+		out[index] = WideLine{
+			SKU:      fmt.Sprintf("W-%d", index),
+			Quantity: int32(index + 1),
+			Cents:    int64(index) * 1001,
+		}
+	}
+	return out
+}
+
 // Maps holds one entry each: Go's map iteration order is its own, so a corpus
 // entry with two would not be byte-stable from one run to the next.
 type Maps struct {
@@ -119,7 +145,7 @@ type Maps struct {
 	Sizes  map[uint32]float32 `cb:"4"`
 }
 
-// WideEvolved carries an id past fifteen, which puts the whole run on the
+// WideEvolved carries an id past sixteen, which puts the whole run on the
 // eight-bit width — where a reader that does not know a key can step over it.
 type WideEvolved struct {
 	First uint32  `cb:"1"`
@@ -264,7 +290,7 @@ type corpus struct {
 }
 
 func main() {
-	out := "rust/vectors/vectors.json"
+	out := filepath.Join(sourceDir(), "vectors.json")
 	if len(os.Args) > 1 {
 		out = os.Args[1]
 	}
@@ -272,13 +298,20 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
-		panic(err)
-	}
 	if err := os.WriteFile(out, append(body, '\n'), 0o644); err != nil {
 		panic(err)
 	}
 	fmt.Printf("wrote %s\n", out)
+}
+
+// sourceDir is the directory this file was compiled from, so the default output
+// lands beside the generator whichever directory `go run` was started in.
+func sourceDir() string {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok || !filepath.IsAbs(file) {
+		panic("vectors: cannot locate the source directory (built with -trimpath?); pass the output path")
+	}
+	return filepath.Dir(file)
 }
 
 func build() corpus {
@@ -477,14 +510,9 @@ type Holder struct {
 // --- the reader corpus -------------------------------------------------------
 //
 // The shapes `js/tests/documents.mjs` drives the browser encoder over, written
-// here as Go types with the same field names and the same ids.
-//
-// They exist because `rust/tests/{section,walk}.rs` read
-// `js/vectors/web_encoded.json`, which at the time only the AssemblyScript
-// module wrote — so the Rust port's decoder tests could not run without
-// building a module in another language first. Go is the specification for
-// everything those tests check, and Go can write every one of these shapes, so
-// it may as well be the one that does.
+// here as Go types with the same field names and the same ids, so that
+// `rust/tests/{section,walk}.rs` test the Rust decoder against messages the
+// specification wrote rather than ones only the wasm module can produce.
 //
 // Coverage is what is being kept, not the bytes: narrow keys and wide, a table
 // and a list of the same record, a nested struct four deep, scalar and string
@@ -723,6 +751,16 @@ type EmptyPair struct {
 	B int64  `cb:"b,2"`
 }
 
+// Paged numbers fields past 255, which splits it into pages of 255 linked under
+// key 255: ID and Name on the first, Late on the second, Last on the third. A
+// walk writes every page's fields into one object.
+type Paged struct {
+	ID   uint32 `cb:"1"`
+	Name string `cb:"2"`
+	Late int64  `cb:"300"`
+	Last string `cb:"600"`
+}
+
 func walks() []walkCase {
 	var out []walkCase
 	add := func(name, about string, value any) {
@@ -799,9 +837,17 @@ func walks() []walkCase {
 		Label: "bare",
 	})
 	add("dynamic.map.empty", "a dynamic map with no entries at all", Doc{})
+	// Declared types, so under the `doc.` prefix the walk tests read.
+	add("doc.table-of-wide-rows", "a narrow parent's table of wide rows, whose columns keep eight-bit keys",
+		&Ledger{ID: 3, Lines: wideLines(20)})
+	add("doc.paged", "fields on three pages, every one set, merged into one object",
+		&Paged{ID: 1, Name: "first", Late: -300, Last: "third"})
+	add("doc.paged-first-page", "the later pages empty, so not written, and their fields zeros",
+		&Paged{ID: 2, Name: "only"})
+	add("doc.paged-last-page", "only the third page set, so the second holds nothing but the link",
+		&Paged{Last: "end"})
 
-	// The reader corpus. See the types above for what it is covering and why it
-	// is here rather than in js/vectors.
+	// The reader corpus. See the types above for what it covers and why.
 	readers := []struct {
 		name  string
 		about string
@@ -998,9 +1044,10 @@ func fieldIDs() []idCase {
 		if err != nil {
 			panic(err)
 		}
+		// The port is checked against wire keys, which are the ids less one.
 		numbers := make(map[string]int, len(ids))
 		for name, id := range ids {
-			numbers[name] = int(id)
+			numbers[name] = int(id) - 1
 		}
 		out = append(out, idCase{Type: fmt.Sprintf("%T", value), IDs: numbers})
 	}
@@ -1086,6 +1133,10 @@ func cases() []caseOut {
 		Lines: lines(40),
 	})
 	add("order.empty list", "an empty slice of structs is an absent key", Order{ID: 2})
+	add("ledger.wide rows table", "a narrow parent's table of wide rows, whose columns keep eight-bit keys",
+		Ledger{ID: 3, Lines: wideLines(20)})
+	add("ledger.wide rows list", "the same rows under the threshold, each a wide run in a narrow list",
+		Ledger{ID: 4, Lines: wideLines(3)})
 
 	add("maps.empty", "an empty map is an absent key", Maps{})
 	add("maps.one entry each", "a map's keys are values, not field ids", Maps{
@@ -1115,7 +1166,7 @@ func cases() []caseOut {
 	add("packed5.string", "the opt-in string encoding, chosen per field by the descriptor", PackedText{
 		Text: "el niño comió jamón",
 	})
-	// JSON punctuation all has symbol tokens now, so the fallback needs a string
+	// JSON punctuation all has symbol tokens, so the fallback needs a string
 	// that genuinely has no packed form: raw bytes with no characters in either
 	// table.
 	add("packed5.does not pack", "a string the packed form would not shrink is written raw", PackedText{

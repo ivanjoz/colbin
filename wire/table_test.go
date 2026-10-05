@@ -26,18 +26,18 @@ func makeRows(n int) []tableRow {
 }
 
 func writeTable(buffer []byte, rows []tableRow) []byte {
-	ids := make([]int32, len(rows))
-	users := make([]int32, len(rows))
+	ids := make([]int64, len(rows))
+	users := make([]int64, len(rows))
 	amounts := make([]int64, len(rows))
 	names := make([]string, len(rows))
 	for index, row := range rows {
-		ids[index], users[index] = row.ID, row.UserID
+		ids[index], users[index] = int64(row.ID), int64(row.UserID)
 		amounts[index], names[index] = row.Amount, row.Name
 	}
 	writer := Writer8{Buffer: buffer}
 	mark := writer.OpenTable(0, len(rows))
-	writer.Column32(0, ids)
-	writer.Column32(1, users)
+	writer.Column(0, ids)
+	writer.Column(1, users)
 	writer.Column(2, amounts)
 	writer.StringColumn(3, names)
 	writer.Close(mark)
@@ -69,12 +69,12 @@ func readTable(message []byte) ([]tableRow, error) {
 	for columns.More() {
 		switch columns.Key() {
 		case 0:
-			for index, value := range columns.Column32(rows, nil) {
-				out[index].ID = value
+			for index, value := range columns.Column(rows, nil) {
+				out[index].ID = int32(value)
 			}
 		case 1:
-			for index, value := range columns.Column32(rows, nil) {
-				out[index].UserID = value
+			for index, value := range columns.Column(rows, nil) {
+				out[index].UserID = int32(value)
 			}
 		case 2:
 			for index, value := range columns.Column(rows, nil) {

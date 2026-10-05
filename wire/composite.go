@@ -11,8 +11,7 @@ package wire
 //	map      [key][desc][bytelen][count]         ( [desc][payload] [desc][payload] )*
 //
 // Every one carries a byte length, so every one is skippable without its
-// sub-schema — which is what `compact.ErrSkipComposite` exists to say cannot be
-// done, and is the reason to spend the length.
+// sub-schema, which is the reason to spend the length.
 //
 // # Lengths are written forward and patched
 //
@@ -51,8 +50,8 @@ func (w *Writer8) OpenStruct(key uint8) Mark {
 	return w.openComposite(key, classStruct, 0)
 }
 
-// structNarrowKeys is the STRUCT descriptor's k8 bit, clear when the key run
-// inside uses four-bit keys.
+// structWideKeys is the STRUCT descriptor's k8 bit, set when the key run inside
+// uses eight-bit keys.
 const structWideKeys uint8 = 0b1000
 
 // OpenStructWide is OpenStruct for a nested run that needs eight-bit keys. The
@@ -105,8 +104,8 @@ func appendCount(buffer []byte, count int) []byte {
 }
 
 // AppendLength writes a length the way this format writes every count and every
-// element length: one byte, escaping to four behind 0xFF. There is no varint
-// here or anywhere else, so reading one back is a compare and a load.
+// element length: one byte, escaping to four behind 0xFF, so reading one back is
+// a compare and a load.
 //
 // It is exported for the schema section, which is a byte layout of colbin's own
 // outside any field framing and should not invent a second rule for a length —
@@ -126,6 +125,16 @@ func (w *Writer8) Close(mark Mark) {
 		return
 	}
 	w.widenLength(mark, body)
+}
+
+// CloseNonEmpty is Close for a composite that is not written at all when nothing
+// went into it: an empty one is removed, key and descriptor with it.
+func (w *Writer8) CloseNonEmpty(mark Mark) {
+	if len(w.Buffer) == mark.at+1 {
+		w.Buffer = w.Buffer[:mark.at-2]
+		return
+	}
+	w.Close(mark)
 }
 
 // widenLength turns a one-byte length placeholder into four, shifting the body
@@ -181,19 +190,6 @@ func (w *Writer8) ElementString(value string) {
 
 // Reader side.
 
-// Struct returns a reader over a nested key run and advances past it. The sub
-// reader is a value, so descending costs no allocation.
-//
-// It is only correct for a run the descriptor says is wide-keyed; StructBody is
-// what a caller that handles both widths uses.
-func (r *Reader8) Struct() (Reader8, bool) {
-	body, ok := r.compositeBody(classStruct)
-	if !ok {
-		return Reader8{}, false
-	}
-	return Reader8{buffer: body}, true
-}
-
 // StructBody returns a nested run's bytes and the key width it uses, advancing
 // past the whole field. A caller reads the body with NewReader or NewReader8
 // accordingly — which is the per-scope key width, spent where it is decided.
@@ -213,19 +209,16 @@ func (r *Reader8) ElementStructBody() (body []byte, wideKeys, ok bool) {
 	return r.StructBody()
 }
 
-// MoreElements reports whether another key-less value follows. It differs from
-// More because a key-less value is one byte rather than two at its shortest.
-func (r *Reader8) MoreElements() bool { return r.err == nil && r.at < len(r.buffer) }
-
-// List returns the element count and a reader over a list's elements.
+// List returns the element count and a reader over a list's elements. The count
+// is checked against the body: every element is at least a descriptor byte.
 func (r *Reader8) List() (int, Reader8, bool) {
-	return r.countedBody(classList)
+	return r.countedBody(classList, 1)
 }
 
 // Map returns the entry count and a reader over a map's entries, which alternate
-// key and value.
+// key and value — two descriptor bytes at least, which bounds the count.
 func (r *Reader8) Map() (int, Reader8, bool) {
-	return r.countedBody(classMap)
+	return r.countedBody(classMap, 2)
 }
 
 // compositeBody checks the class, reads the length and returns the body as a
@@ -243,14 +236,16 @@ func (r *Reader8) compositeBody(want uint8) ([]byte, bool) {
 	return r.buffer[start : start+length], true
 }
 
-// countedBody is compositeBody for the classes whose body begins with a count.
-func (r *Reader8) countedBody(want uint8) (int, Reader8, bool) {
+// countedBody is compositeBody for the classes whose body begins with a count,
+// refusing a count that would need more than the body's bytes at minSize each —
+// which is what makes the count safe to allocate for.
+func (r *Reader8) countedBody(want uint8, minSize int) (int, Reader8, bool) {
 	body, ok := r.compositeBody(want)
 	if !ok {
 		return 0, Reader8{}, false
 	}
 	count, at, ok := readCount(body)
-	if !ok {
+	if !ok || count > (len(body)-at)/minSize {
 		r.fail(ErrTruncated)
 		return 0, Reader8{}, false
 	}
@@ -280,8 +275,7 @@ func readCount(body []byte) (count, at int, ok bool) {
 }
 
 // Element readers: a value with a descriptor but no key. They are Reader8's own
-// reads with the cursor stepped back one byte, exactly as BitmapReader's are,
-// because a key-less value is the same shape as a bitmap run's.
+// reads with the cursor stepped back one byte, onto where a key would be.
 
 // ElementUint reads an integer element.
 func (r *Reader8) ElementUint() uint64 {
@@ -299,12 +293,6 @@ func (r *Reader8) ElementInt() int64 {
 func (r *Reader8) ElementString() string {
 	r.at--
 	return r.String()
-}
-
-// ElementStruct returns a reader over a struct element.
-func (r *Reader8) ElementStruct() (Reader8, bool) {
-	r.at--
-	return r.Struct()
 }
 
 // IsTable reports whether the field at the cursor is a table rather than a list.

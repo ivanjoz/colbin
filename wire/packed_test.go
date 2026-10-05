@@ -24,7 +24,7 @@ func TestPackedStringRoundTrip(t *testing.T) {
 			continue
 		}
 		reader := NewReader8(writer.Buffer)
-		if got := reader.PackedString(); got != value {
+		if got := reader.String(); got != value {
 			t.Fatalf("%q round-tripped as %q", value, got)
 		}
 		if err := reader.Err(); err != nil {
@@ -34,7 +34,7 @@ func TestPackedStringRoundTrip(t *testing.T) {
 		writer = Writer8{}
 		writer.String(3, value)
 		reader = NewReader8(writer.Buffer)
-		if got := reader.PackedString(); got != value {
+		if got := reader.String(); got != value {
 			t.Fatalf("%q written raw round-tripped as %q", value, got)
 		}
 	}

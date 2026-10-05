@@ -1,8 +1,12 @@
 package column
 
 import (
+	"bytes"
+	"encoding/binary"
+	"errors"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"testing"
 )
 
@@ -10,8 +14,7 @@ import (
 
 func transformOf(buf []byte) uint8 { return buf[0] & 0x03 }
 
-// blockWidthsOf reports the bit width each block chose, which is what the
-// header used to carry as (k, M) and now lives one byte per 128 residuals.
+// blockWidthsOf reports the bit width each block chose.
 func blockWidthsOf(buf []byte, count int) []int {
 	transform := transformOf(buf)
 	if transform == trConstant {
@@ -32,22 +35,43 @@ func blockWidthsOf(buf []byte, count int) []int {
 	return widths
 }
 
+// forced is AppendArray with the transform named by the caller rather than
+// scored: the header, base and blocks the encoder writes when it picks that
+// transform. It is only a valid encoding of a constant column for trConstant.
+func forced(vals []int64, transform uint8) []byte {
+	minimum := slices.Min(vals)
+	zz := transform == trDelta || (transform == trRaw && minimum < 0)
+	header := transform
+	if zz {
+		header |= zigzagFlag
+	}
+	out := []byte{header}
+	switch transform {
+	case trConstant:
+		return binary.LittleEndian.AppendUint64(out, zigzag(minimum))
+	case trFOR:
+		out = binary.LittleEndian.AppendUint64(out, zigzag(minimum))
+	case trDelta:
+		out = binary.LittleEndian.AppendUint64(out, zigzag(vals[0]))
+	}
+	return appendBlocks(out, vals, transform, minimum, zz)
+}
+
 func roundtrip[T Signed](t *testing.T, vals []T) []byte {
 	t.Helper()
-	w := widthOfType[T]()
 	buf := AppendArray(nil, vals)
 	out := make([]T, len(vals))
 	n, err := DecodeArray(buf, len(vals), out)
 	if err != nil {
-		t.Fatalf("decode %v (w=%d): %v", vals, w, err)
+		t.Fatalf("decode %v: %v", vals, err)
 	}
 	if n != len(buf) {
-		t.Fatalf("decode consumed %d of %d bytes for %v (w=%d)", n, len(buf), vals, w)
+		t.Fatalf("decode consumed %d of %d bytes for %v", n, len(buf), vals)
 	}
 	for i := range vals {
 		if out[i] != vals[i] {
-			t.Fatalf("w=%d idx=%d: got %d want %d (input %v, transform %d, widths %v)",
-				w, i, out[i], vals[i], vals, transformOf(buf), blockWidthsOf(buf, len(vals)))
+			t.Fatalf("idx=%d: got %d want %d (input %v, transform %d, widths %v)",
+				i, out[i], vals[i], vals, transformOf(buf), blockWidthsOf(buf, len(vals)))
 		}
 	}
 	return buf
@@ -128,8 +152,7 @@ func typedSweep[T Signed](t *testing.T, lo, hi T, seed uint64) {
 	}
 }
 
-// Each element width is encoded natively: no widening at the call site, and the
-// width is derived from T rather than passed in.
+// Each element type end to end, across its whole range.
 func TestArrayElementTypes(t *testing.T) {
 	t.Run("int8", func(t *testing.T) { typedSweep[int8](t, math.MinInt8, math.MaxInt8, 1) })
 	t.Run("int16", func(t *testing.T) { typedSweep[int16](t, math.MinInt16, math.MaxInt16, 2) })
@@ -137,42 +160,146 @@ func TestArrayElementTypes(t *testing.T) {
 	t.Run("int64", func(t *testing.T) { typedSweep[int64](t, math.MinInt64, math.MaxInt64, 4) })
 }
 
-// Defined types with a Signed underlying type must work identically, since the
-// width comes from unsafe.Sizeof rather than a type switch.
-type recordID int32
-
-func TestArrayDefinedType(t *testing.T) {
-	if got := widthOfType[recordID](); got != 4 {
-		t.Fatalf("widthOfType[recordID] = %d, want 4", got)
+// encodesAs checks that vals written as []T are want byte for byte, and that
+// want decodes into []T as vals.
+func encodesAs[T Signed](t *testing.T, vals []int64, want []byte) {
+	t.Helper()
+	typed := make([]T, len(vals))
+	for i, v := range vals {
+		typed[i] = T(v)
 	}
-	roundtrip(t, []recordID{100, 240, 250, 380})
-	roundtrip(t, []recordID{math.MinInt32, 0, math.MaxInt32})
+	if got := AppendArray(nil, typed); !bytes.Equal(got, want) {
+		t.Fatalf("as %T: % x\n as []int64: % x\n values %v", typed, got, want, vals)
+	}
+	out := make([]T, len(vals))
+	if _, err := DecodeArray(want, len(vals), out); err != nil {
+		t.Fatalf("into %T: %v (values %v)", out, err, vals)
+	}
+	for i := range vals {
+		if int64(out[i]) != vals[i] {
+			t.Fatalf("into %T: idx %d is %d, want %d", out, i, out[i], vals[i])
+		}
+	}
 }
 
-// The same values encoded as a narrower type must never cost more than as a
-// wider one: the residuals are the same, so the widths are too.
-func TestArrayNarrowerTypeNeverLarger(t *testing.T) {
+// A defined type over a Signed type is just another element type.
+type recordID int32
+
+// The encoding depends on the values alone: written as any element type that can
+// hold them, the same values are the same bytes, and those bytes decode into any
+// of those types.
+func TestArrayEncodingIsIndependentOfType(t *testing.T) {
 	r := rand.New(rand.NewPCG(77, 78))
-	for range 2000 {
-		n := int(r.UintN(40)) + 1
-		v16 := make([]int16, n)
-		v32 := make([]int32, n)
-		v64 := make([]int64, n)
-		for i := range v16 {
-			x := int16(r.Uint64())
-			v16[i], v32[i], v64[i] = x, int32(x), int64(x)
+	for range 3000 {
+		n := int(r.UintN(300))
+		// The narrowest type every value will fit, and values that use its range.
+		bits := []uint{8, 16, 32}[r.UintN(3)]
+		lo, span := -int64(1)<<(bits-1), uint64(1)<<bits
+		vals := make([]int64, n)
+		start := lo + int64(r.Uint64N(span))
+		for i := range vals {
+			switch r.UintN(3) {
+			case 0: // anywhere in the range
+				vals[i] = lo + int64(r.Uint64N(span))
+			case 1: // a ramp, which delta wins on, clamped to the range
+				vals[i] = min(start+int64(i), lo+int64(span)-1)
+			default: // a cluster, which frame of reference wins on
+				vals[i] = max(lo, start-int64(r.Uint64N(16)))
+			}
 		}
-		b16, b32, b64 := len(AppendArray(nil, v16)), len(AppendArray(nil, v32)), len(AppendArray(nil, v64))
-		if b16 > b32 || b32 > b64 {
-			t.Fatalf("n=%d: int16=%dB int32=%dB int64=%dB, want non-decreasing", n, b16, b32, b64)
+		want := AppendArray(nil, vals)
+		encodesAs[int32](t, vals, want)
+		encodesAs[recordID](t, vals, want)
+		if bits <= 16 {
+			encodesAs[int16](t, vals, want)
+		}
+		if bits <= 8 {
+			encodesAs[int8](t, vals, want)
+		}
+	}
+}
+
+// Decoding into a type too narrow for a value is an error, never a truncation,
+// whichever transform carried the value — and a value at the type's edge still
+// decodes.
+func TestArrayDecodeRejectsOutOfRange(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		vals      []int64
+		transform uint8
+	}{
+		{"raw", []int64{1, 2, 200}, trRaw},
+		{"raw wraps to an in-range value", []int64{1, 2, 256}, trRaw},
+		{"raw negative", []int64{-1, -200}, trRaw},
+		{"FOR residual", []int64{100, 101, 300}, trFOR},
+		{"FOR base", []int64{-200, -199}, trFOR},
+		{"delta step", []int64{0, 100, 200}, trDelta},
+		{"delta base", []int64{1000, 1001}, trDelta},
+		{"constant", []int64{511, 511, 511}, trConstant},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			buf := forced(c.vals, c.transform)
+			wide := make([]int64, len(c.vals))
+			if _, err := DecodeArray(buf, len(c.vals), wide); err != nil || !slices.Equal(wide, c.vals) {
+				t.Fatalf("as int64: %v, %v", wide, err)
+			}
+			if _, err := DecodeArray(buf, len(c.vals), make([]int8, len(c.vals))); !errors.Is(err, errOutOfRange) {
+				t.Errorf("into int8: got %v, want errOutOfRange", err)
+			}
+			if _, err := DecodeArray(buf, len(c.vals), make([]int16, len(c.vals))); err != nil {
+				t.Errorf("into int16: %v", err)
+			}
+		})
+	}
+	for _, transform := range []uint8{trRaw, trFOR, trDelta} {
+		edges := []int64{math.MinInt8, math.MaxInt8, 0, math.MinInt8}
+		out := make([]int8, len(edges))
+		if _, err := DecodeArray(forced(edges, transform), len(edges), out); err != nil {
+			t.Errorf("transform %d, int8 edges: %v", transform, err)
+		}
+	}
+	// The same check at every width, through the encoder.
+	for _, c := range []struct {
+		value int64
+		into  func(buf []byte) error
+	}{
+		{1 << 7, func(buf []byte) error { _, err := DecodeArray(buf, 3, make([]int8, 3)); return err }},
+		{1 << 15, func(buf []byte) error { _, err := DecodeArray(buf, 3, make([]int16, 3)); return err }},
+		{1 << 31, func(buf []byte) error { _, err := DecodeArray(buf, 3, make([]int32, 3)); return err }},
+		{-1<<31 - 1, func(buf []byte) error { _, err := DecodeArray(buf, 3, make([]int32, 3)); return err }},
+	} {
+		if err := c.into(AppendArray(nil, []int64{0, 1, c.value})); !errors.Is(err, errOutOfRange) {
+			t.Errorf("%d: got %v, want errOutOfRange", c.value, err)
+		}
+	}
+}
+
+// The decoder accepts exactly the headers the encoder writes: raw with or
+// without zigzag, delta with it, frame of reference and constant without it, and
+// for an empty column the bare raw header alone.
+func TestArrayDecodeRejectsUnwrittenHeaders(t *testing.T) {
+	written := map[uint8]bool{
+		trRaw: true, trRaw | zigzagFlag: true, trDelta | zigzagFlag: true, trFOR: true, trConstant: true,
+	}
+	for header := range 256 {
+		// Zeros after the header are a valid base and a width-0 block, so the
+		// header is the only thing that can be wrong.
+		buf := append([]byte{uint8(header)}, make([]byte, 16)...)
+		for _, n := range []int{0, 1, 4} {
+			_, err := DecodeArray(buf, n, make([]int64, n))
+			ok := written[uint8(header)] && (n > 0 || header == int(trRaw))
+			if ok && err != nil {
+				t.Errorf("header %#02x, n=%d: %v", header, n, err)
+			}
+			if !ok && !errors.Is(err, errBadHeader) {
+				t.Errorf("header %#02x, n=%d: got %v, want errBadHeader", header, n, err)
+			}
 		}
 	}
 }
 
 // Incompressible input costs the element width plus framing, and the framing is
-// one header byte and one width byte per 128 values — no more. This is the bound
-// the trFixed fallback used to provide; the widest block width provides it now,
-// at the cost of that one byte per block.
+// one header byte and one width byte per 128 values — no more.
 func TestArrayNeverExceedsTheElementWidth(t *testing.T) {
 	r := rand.New(rand.NewPCG(99, 100))
 	for range 2000 {
@@ -189,46 +316,60 @@ func TestArrayNeverExceedsTheElementWidth(t *testing.T) {
 	}
 }
 
-// The encoder scores each transform against what it would actually occupy in
-// blocks, so no other transform may produce a shorter encoding than the one it
-// chose. This is the property the old (k, M) parameter search had to be checked
-// for, moved to the thing that replaced it.
+// The encoder scores each transform by its cost model; this holds the choice
+// against the real thing. Each transform the encoder could have picked is
+// written out in full, checked to decode to the same values, and must not be
+// shorter than what the encoder chose.
 func TestArrayTransformChoiceIsOptimal(t *testing.T) {
 	r := rand.New(rand.NewPCG(5, 6))
-	for range 2000 {
+	for iter := range 3000 {
 		n := int(r.UintN(300)) + 1
 		vals := make([]int64, n)
-		shift := r.UintN(60)
+		shift := r.UintN(62)
+		base := int64(r.Uint64())
 		for i := range vals {
-			vals[i] = int64(r.Uint64N(1 << (shift + 1)))
-		}
-		chosen := len(AppendArray(nil, vals))
-
-		minimum := vals[0]
-		for _, v := range vals {
-			minimum = min(minimum, v)
-		}
-		alternatives := map[string]int{
-			"raw":      1 + blockedCost(vals, trRaw, 0, minimum < 0),
-			"FOR":      1 + blockedCost(vals, trFOR, minimum, false),
-			"constant": 1 + 8,
-		}
-		if n > 1 {
-			alternatives["delta"] = 1 + blockedCost(vals, trDelta, 0, true)
-		}
-		for name, cost := range alternatives {
-			if name == "constant" && n > 1 {
-				continue // only a genuinely constant column may use it
+			switch iter % 5 {
+			case 0: // small non-negative
+				vals[i] = int64(r.Uint64N(1 << (shift + 1)))
+			case 1: // with negatives
+				vals[i] = int64(r.Uint64N(1<<(shift+1))) - 1<<shift
+			case 2: // a noisy ramp from anywhere
+				vals[i] = base + int64(i)*int64(shift) + int64(r.Uint64N(8))
+			case 3: // constant, short or long
+				vals[i] = base >> shift
+			default: // anything at all, deltas that overflow included
+				vals[i] = int64(r.Uint64())
 			}
-			if cost < chosen {
-				t.Fatalf("n=%d: chose %dB but %s would be %dB", n, chosen, name, cost)
+		}
+		chosen := AppendArray(nil, vals)
+
+		candidates := []uint8{trRaw, trFOR}
+		overflows := false
+		for i := 1; i < n; i++ {
+			overflows = overflows || subOverflows(vals[i], vals[i-1])
+		}
+		if n > 1 && !overflows {
+			candidates = append(candidates, trDelta)
+		}
+		if slices.Min(vals) == slices.Max(vals) {
+			candidates = append(candidates, trConstant)
+		}
+		for _, transform := range candidates {
+			alt := forced(vals, transform)
+			out := make([]int64, n)
+			if used, err := DecodeArray(alt, n, out); err != nil || used != len(alt) || !slices.Equal(out, vals) {
+				t.Fatalf("n=%d: the forced transform %d does not decode: %v", n, transform, err)
+			}
+			if len(alt) < len(chosen) {
+				t.Fatalf("n=%d: chose transform %d at %dB, but transform %d is %dB",
+					n, transformOf(chosen), len(chosen), transform, len(alt))
 			}
 		}
 	}
 }
 
-// The three varint transforms plus the fixed fallback must each be selectable,
-// otherwise a header code is dead weight.
+// Each of the four transforms must be selectable, otherwise a header code is
+// dead weight.
 func TestArrayAllTransformsSelected(t *testing.T) {
 	corpus := [][]int64{
 		{1, 2, 3, 4}, // raw
@@ -266,7 +407,7 @@ func TestArrayAllTransformsSelected(t *testing.T) {
 	}
 }
 
-func TestArrayFuzzRoundtrip(t *testing.T) {
+func TestArrayRandomShapesRoundtrip(t *testing.T) {
 	r := rand.New(rand.NewPCG(2024, 8))
 	shapes := []func(i, n int) int64{
 		func(i, n int) int64 { return int64(r.Uint64N(128)) },
@@ -302,15 +443,24 @@ func TestArrayTruncated(t *testing.T) {
 	buf := AppendArray(nil, vals)
 	out := make([]int64, len(vals))
 	for cut := range buf {
-		if _, err := DecodeArray(buf[:cut], len(vals), out); err == nil {
-			t.Fatalf("truncation to %d/%d bytes not detected", cut, len(buf))
+		if _, err := DecodeArray(buf[:cut], len(vals), out); !errors.Is(err, errTruncated) {
+			t.Fatalf("truncation to %d/%d bytes: got %v, want errTruncated", cut, len(buf), err)
 		}
 	}
-	if _, err := DecodeArray(buf, len(vals), out[:len(vals)-1]); err == nil {
-		t.Fatal("short output slice not detected")
+	if _, err := DecodeArray(buf, len(vals), out[:len(vals)-1]); !errors.Is(err, errShortBuffer) {
+		t.Fatalf("short output slice: got %v", err)
 	}
-	if _, err := DecodeArray(buf, -1, out); err == nil {
-		t.Fatal("negative count not detected")
+	if _, err := DecodeArray(buf, -1, out); !errors.Is(err, errNegativeCount) {
+		t.Fatalf("negative count: got %v", err)
+	}
+	wide := bytes.Clone(buf)
+	firstWidth := 1
+	if transformOf(buf) != trRaw {
+		firstWidth += 8
+	}
+	wide[firstWidth] = 65
+	if _, err := DecodeArray(wide, len(vals), out); !errors.Is(err, errBadWidth) {
+		t.Fatalf("width 65: got %v", err)
 	}
 }
 
@@ -338,30 +488,28 @@ func TestArrayEmptyAndSingle(t *testing.T) {
 	if err != nil || n != 1 {
 		t.Fatalf("empty decode: n=%d err=%v", n, err)
 	}
-	// The empty encoding is width-independent: one header byte for every type.
-	for _, got := range []int{
-		len(AppendArray[int8](nil, nil)),
-		len(AppendArray[int16](nil, nil)),
-		len(AppendArray[int32](nil, nil)),
+	// The empty encoding is the same one header byte for every type.
+	for _, got := range [][]byte{
+		AppendArray[int8](nil, nil),
+		AppendArray[int16](nil, nil),
+		AppendArray[int32](nil, nil),
 	} {
-		if got != 1 {
-			t.Fatalf("empty array encoded to %d bytes, want 1", got)
+		if !bytes.Equal(got, buf) {
+			t.Fatalf("empty array encoded to % x, want % x", got, buf)
 		}
 	}
 }
 
 // Delta and frame-of-reference write an eight-byte base in the clear, which is
 // nothing amortised over a real column and dominant over a short one. The
-// encoder has to see that, and it does: the same four values that delta would
-// have won on under the old codec are cheaper raw here.
+// encoder has to see that: four values are cheaper raw.
 func TestABaseHasToEarnItsEightBytes(t *testing.T) {
 	short := []int64{100, 240, 250, 380}
 	buf := roundtrip(t, short)
 	if got := transformOf(buf); got != trRaw {
 		t.Fatalf("four values chose transform %d, want raw: delta's base costs more than it saves", got)
 	}
-	// zigzag(380) is 760, ten bits, so four values are five bytes behind two of
-	// framing.
+	// 380 is nine bits, so four values are five bytes behind two of framing.
 	if len(buf) != 1+1+5 {
 		t.Fatalf("encoded %d bytes, want 7: % x", len(buf), buf)
 	}
@@ -438,13 +586,13 @@ func FuzzArrayRoundtrip(f *testing.F) {
 			for i, b := range raw {
 				vals[i] = int8(b)
 			}
-			fuzzRoundtrip(t, vals)
+			fuzzRoundtrip(t, vals, 1)
 		case 1:
 			vals := make([]int16, len(raw)/2)
 			for i := range vals {
 				vals[i] = int16(uint16(raw[i*2]) | uint16(raw[i*2+1])<<8)
 			}
-			fuzzRoundtrip(t, vals)
+			fuzzRoundtrip(t, vals, 2)
 		case 2:
 			vals := make([]int32, len(raw)/4)
 			for i := range vals {
@@ -454,7 +602,7 @@ func FuzzArrayRoundtrip(f *testing.F) {
 				}
 				vals[i] = int32(u)
 			}
-			fuzzRoundtrip(t, vals)
+			fuzzRoundtrip(t, vals, 4)
 		default:
 			vals := make([]int64, len(raw)/8)
 			for i := range vals {
@@ -464,18 +612,19 @@ func FuzzArrayRoundtrip(f *testing.F) {
 				}
 				vals[i] = int64(u)
 			}
-			fuzzRoundtrip(t, vals)
+			fuzzRoundtrip(t, vals, 8)
 		}
 	})
 }
 
-func fuzzRoundtrip[T Signed](t *testing.T, vals []T) {
+// fuzzRoundtrip round-trips vals and holds the encoding to the size bound: no
+// more than width bytes per value plus a header and a width byte per block.
+func fuzzRoundtrip[T Signed](t *testing.T, vals []T, width int) {
 	t.Helper()
 	buf := AppendArray(nil, vals)
 	blocks := (len(vals) + blockSize - 1) / blockSize
-	if len(buf) > 1+blocks+len(vals)*int(widthOfType[T]()) {
-		t.Fatalf("encoded %dB exceeds the raw words plus framing, %dB",
-			len(buf), 1+blocks+len(vals)*int(widthOfType[T]()))
+	if bound := 1 + blocks + len(vals)*width; len(buf) > bound {
+		t.Fatalf("encoded %dB exceeds the raw words plus framing, %dB", len(buf), bound)
 	}
 	out := make([]T, len(vals))
 	got, err := DecodeArray(buf, len(vals), out)
@@ -495,17 +644,47 @@ func fuzzRoundtrip[T Signed](t *testing.T, vals []T) {
 func FuzzArrayDecode(f *testing.F) {
 	f.Add([]byte{0x00}, uint8(4))
 	f.Add([]byte{0xFF, 0xFF, 0xFF, 0xFF}, uint8(10))
+	f.Add(AppendArray(nil, []int64{511, 511, 511}), uint8(3))
 	f.Fuzz(func(t *testing.T, buf []byte, n uint8) {
-		// Every element type must survive arbitrary bytes without panicking.
-		o8 := make([]int8, n)
-		o16 := make([]int16, n)
-		o32 := make([]int32, n)
-		o64 := make([]int64, n)
-		_, _ = DecodeArray(buf, int(n), o8)
-		_, _ = DecodeArray(buf, int(n), o16)
-		_, _ = DecodeArray(buf, int(n), o32)
-		_, _ = DecodeArray(buf, int(n), o64)
+		// Arbitrary bytes must not panic any element type, and every narrower
+		// type must agree with int64: the same values when they fit, an error
+		// when they do not.
+		wide := make([]int64, n)
+		used, err := DecodeArray(buf, int(n), wide)
+		agreesWithInt64[int8](t, buf, wide, used, err)
+		agreesWithInt64[int16](t, buf, wide, used, err)
+		agreesWithInt64[int32](t, buf, wide, used, err)
 	})
+}
+
+// agreesWithInt64 decodes buf as []T and checks it against the int64 decode of
+// the same bytes.
+func agreesWithInt64[T Signed](t *testing.T, buf []byte, wide []int64, used int, wideErr error) {
+	t.Helper()
+	out := make([]T, len(wide))
+	got, err := DecodeArray(buf, len(wide), out)
+	if wideErr != nil {
+		if err == nil {
+			t.Fatalf("%T decoded what int64 refused with %v", out, wideErr)
+		}
+		return
+	}
+	for _, v := range wide {
+		if !fits[T](v) {
+			if !errors.Is(err, errOutOfRange) {
+				t.Fatalf("%T took %d: got %v, want errOutOfRange", out, v, err)
+			}
+			return
+		}
+	}
+	if err != nil || got != used {
+		t.Fatalf("%T: %v, consumed %d where int64 consumed %d", out, err, got, used)
+	}
+	for i := range wide {
+		if int64(out[i]) != wide[i] {
+			t.Fatalf("%T: idx %d is %d, int64 says %d", out, i, out[i], wide[i])
+		}
+	}
 }
 
 // mkSeq builds a clustered ramp that fits every element width.
@@ -519,7 +698,7 @@ func mkSeq[T Signed](n int, base int64) []T {
 
 func benchEncode[T Signed](b *testing.B, vals []T) {
 	buf := make([]byte, 0, 1<<14)
-	b.SetBytes(int64(len(vals)) * int64(widthOfType[T]()))
+	b.SetBytes(int64(binary.Size(vals)))
 	for b.Loop() {
 		buf = AppendArray(buf[:0], vals)
 	}
@@ -528,7 +707,7 @@ func benchEncode[T Signed](b *testing.B, vals []T) {
 func benchDecode[T Signed](b *testing.B, vals []T) {
 	buf := AppendArray(nil, vals)
 	out := make([]T, len(vals))
-	b.SetBytes(int64(len(vals)) * int64(widthOfType[T]()))
+	b.SetBytes(int64(binary.Size(vals)))
 	for b.Loop() {
 		if _, err := DecodeArray(buf, len(vals), out); err != nil {
 			b.Fatal(err)
@@ -548,35 +727,8 @@ func BenchmarkArrayDecodeInt16(b *testing.B) { benchDecode(b, mkSeq[int16](1024,
 func BenchmarkArrayDecodeInt32(b *testing.B) { benchDecode(b, mkSeq[int32](1024, 1<<20)) }
 func BenchmarkArrayDecodeInt64(b *testing.B) { benchDecode(b, mkSeq[int64](1024, 1<<30)) }
 
-// TestArrayTypedSizeReport shows what encoding the same logical values as a
-// narrower type buys, which is the point of handling each width natively.
-func TestArrayTypedSizeReport(t *testing.T) {
-	r := rand.New(rand.NewPCG(11, 13))
-	const n = 256
-	v16 := make([]int16, n)
-	v32 := make([]int32, n)
-	v64 := make([]int64, n)
-	for i := range v16 {
-		x := int16(r.Uint64()) // full int16 range: incompressible, forces trFixed
-		v16[i], v32[i], v64[i] = x, int32(x), int64(x)
-	}
-	t.Logf("random int16 values, n=%d", n)
-	t.Logf("  as []int16 %5dB  (source %5dB)", len(AppendArray(nil, v16)), n*2)
-	t.Logf("  as []int32 %5dB  (source %5dB)", len(AppendArray(nil, v32)), n*4)
-	t.Logf("  as []int64 %5dB  (source %5dB)", len(AppendArray(nil, v64)), n*8)
-
-	for i := range v16 {
-		x := int16(1000 + i%50) // narrow band: compresses the same at every width
-		v16[i], v32[i], v64[i] = x, int32(x), int64(x)
-	}
-	t.Logf("narrow-band values, n=%d", n)
-	t.Logf("  as []int16 %5dB", len(AppendArray(nil, v16)))
-	t.Logf("  as []int32 %5dB", len(AppendArray(nil, v32)))
-	t.Logf("  as []int64 %5dB", len(AppendArray(nil, v64)))
-}
-
-// TestArraySizeReport documents what the codec achieves on representative
-// shapes and pins the transform each one selects.
+// TestArraySizeReport pins the transform each representative shape selects;
+// with -v it prints the sizes column/README.md quotes.
 func TestArraySizeReport(t *testing.T) {
 	mk := func(n int, f func(i int) int64) []int64 {
 		v := make([]int64, n)
@@ -596,7 +748,7 @@ func TestArraySizeReport(t *testing.T) {
 		{"monotonic ids", mk(256, func(i int) int64 { return 1<<40 + int64(i)*13 }), trDelta},
 		{"timestamps (sec)", mk(256, func(i int) int64 { return 1700000000 + int64(i)*60 }), trDelta},
 		{"clustered +-500", mk(256, func(i int) int64 { return 1<<30 + int64(i*7919%1000) - 500 }), trFOR},
-		{"deltas b_max=8", mk(256, func(i int) int64 { return int64(i) * 200 }), trDelta},
+		{"steps of 200", mk(256, func(i int) int64 { return int64(i) * 200 }), trDelta},
 		{"random int64", mk(256, func(i int) int64 { return int64(rr.Uint64()) }), trRaw},
 		// Not constant: a width-0 block carries no bytes at all, so raw beats the
 		// constant transform's eight-byte value outright.

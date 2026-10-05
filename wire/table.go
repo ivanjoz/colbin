@@ -5,28 +5,18 @@ package wire
 //	table  [key][desc][bytelen][rowcount]  ( [key][desc][payload] )*
 //
 // A table's body is a key run like a struct's, except that each field is a
-// *column* of rowcount values rather than one value. That is the whole of what
-// the old standard mode was: the key that a row-wise list spends once per field
-// per element is spent once per column.
+// *column* of rowcount values rather than one value: the key a row-wise list
+// spends once per field per element is spent once per column.
 //
-// So an array of structs has two encodings and the writer picks:
+// So an array of structs has two encodings and the writer picks, per field:
 //
 //   - a LIST of STRUCT, a key run per element, which wins while there are too
 //     few rows to amortise the per-column framing;
-//   - a TABLE, transposed, which wins from some threshold upward and whose
-//     columns decode through the blocked column codec at about a nanosecond per
-//     element rather than the twenty-odd a key run costs per record.
-//
-// The threshold is a measurement, not a constant to argue about, and it is now a
-// *per-field* decision rather than a per-message one: a record can hold a
-// three-element list and a ten-thousand-row table and encode each the right way.
-//
-// # A column of nothing is not written
+//   - a TABLE, transposed, whose integer columns decode through the blocked
+//     column codec at about a nanosecond per element.
 //
 // A column whose every value is zero is omitted entirely, and the reader takes
-// an absent column key to mean exactly that. There is no flag for it and no
-// mode to turn it on, which is what the old format's omit-empty version byte
-// was: the columns are keyed, so absence already says it.
+// an absent column key to mean exactly that.
 
 import (
 	"github.com/ivanjoz/colbin/column"
@@ -51,15 +41,8 @@ func (w *Writer8) OpenTable(key uint8, rows int) Mark {
 
 // Column writes an integer column under key, and nothing at all when every value
 // is zero: an absent column key means a column of zeros.
-func (w *Writer8) Column(key uint8, values []int64) { writeColumn(w, key, values) }
-
-// Column8, Column16 and Column32 are Column for the slice a caller holds.
-func (w *Writer8) Column8(key uint8, values []int8)   { writeColumn(w, key, values) }
-func (w *Writer8) Column16(key uint8, values []int16) { writeColumn(w, key, values) }
-func (w *Writer8) Column32(key uint8, values []int32) { writeColumn(w, key, values) }
-
-func writeColumn[T column.Signed](w *Writer8, key uint8, values []T) {
-	if len(values) == 0 || allZero(values) {
+func (w *Writer8) Column(key uint8, values []int64) {
+	if allZero(values) {
 		return
 	}
 	mark := w.openComposite(key, classCol, 0)
@@ -67,10 +50,9 @@ func writeColumn[T column.Signed](w *Writer8, key uint8, values []T) {
 	w.Close(mark)
 }
 
-// allZeroInts is allZero for the []int64 a narrow column gathers into.
-func allZeroInts(values []int64) bool { return allZero(values) }
-
-func allZero[T column.Signed](values []T) bool {
+// allZero reports whether a column has nothing to write, which an empty one
+// does not either.
+func allZero(values []int64) bool {
 	for _, value := range values {
 		if value != 0 {
 			return false
@@ -96,7 +78,8 @@ func (w *Writer8) StringColumn(key uint8, values []string) {
 }
 
 // Table returns the row count and a reader over the columns, which are an
-// ordinary key run.
+// ordinary key run. As with Reader.Table, the row count is not bounded by the
+// message and a caller allocating for it must budget rows itself.
 func (r *Reader8) Table() (int, Reader8, bool) {
 	if r.at+2 > len(r.buffer) {
 		r.fail(ErrTruncated)
@@ -123,27 +106,24 @@ func (r *Reader8) Table() (int, Reader8, bool) {
 // Column readers. Each takes the row count, because a column does not carry its
 // own — the table said it once for every column.
 
-func (r *Reader8) Column(rows int, dst []int64) []int64 { return readColumn(r, rows, dst) }
-func (r *Reader8) Column8(rows int, dst []int8) []int8  { return readColumn(r, rows, dst) }
-func (r *Reader8) Column16(rows int, dst []int16) []int16 {
-	return readColumn(r, rows, dst)
-}
-func (r *Reader8) Column32(rows int, dst []int32) []int32 {
-	return readColumn(r, rows, dst)
-}
-
-func readColumn[T column.Signed](r *Reader8, rows int, dst []T) []T {
+func (r *Reader8) Column(rows int, dst []int64) []int64 {
 	body, ok := r.compositeBody(classCol)
 	if !ok {
 		return dst
 	}
+	dst, err := decodeColumn(body, rows, dst)
+	r.Fail(err)
+	return dst
+}
+
+// decodeColumn decodes one column's body into dst, reusing its capacity.
+func decodeColumn(body []byte, rows int, dst []int64) ([]int64, error) {
 	if cap(dst) < rows {
-		dst = make([]T, rows)
+		dst = make([]int64, rows)
 	}
 	dst = dst[:rows]
 	if _, err := column.DecodeArray(body, rows, dst); err != nil {
-		r.fail(err)
-		return nil
+		return nil, err
 	}
-	return dst
+	return dst, nil
 }

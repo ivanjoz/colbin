@@ -93,14 +93,7 @@ func TestUnsupportedMapsAreRefused(t *testing.T) {
 
 func TestMapTruncationIsRefused(t *testing.T) {
 	value := withMaps{Head: 7, Labels: map[string]string{"env": "prod"}, Tail: "t"}
-	message, err := Marshal(&value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for cut := range len(message) {
-		var back withMaps
-		_ = Unmarshal(message[:cut], &back)
-	}
+	checkPrefixes(t, &value, unmarshalInto[withMaps])
 }
 
 func BenchmarkMapAppend(b *testing.B) {
@@ -111,7 +104,7 @@ func BenchmarkMapAppend(b *testing.B) {
 	buffer := make([]byte, 0, 256)
 	b.ReportAllocs()
 	for b.Loop() {
-		buffer = handle.Append(buffer[:0], &value)
+		buffer, _ = handle.Append(buffer[:0], &value)
 	}
 }
 
@@ -120,7 +113,7 @@ func BenchmarkMapUnmarshal(b *testing.B) {
 		Labels: map[string]string{"env": "prod", "region": "sa-east-1"},
 		Counts: map[string]int64{"hits": 12, "misses": 3}}
 	handle := MustCodec[withMaps]()
-	message := handle.Encode(&value)
+	message := must(handle.Encode(&value))
 	var back withMaps
 	b.ReportAllocs()
 	for b.Loop() {

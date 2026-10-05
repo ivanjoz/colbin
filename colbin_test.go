@@ -99,7 +99,10 @@ func TestAppendReusesTheBuffer(t *testing.T) {
 
 func TestCodecHandle(t *testing.T) {
 	handle := colbin.MustCodec[charge]()
-	message := handle.Encode(&sample)
+	message, err := handle.Encode(&sample)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var back charge
 	if err := handle.Unmarshal(message, &back); err != nil {
 		t.Fatal(err)
@@ -122,9 +125,9 @@ func TestFieldIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, want := range map[string]uint8{
-		"CompanyID": 0, "UserID": 1, "RouteID": 2, "Name": 3,
-		"Grants": 4, "ExtraAllowed": 5, "Ratio": 6,
+	for name, want := range map[string]uint16{
+		"CompanyID": 1, "UserID": 2, "RouteID": 3, "Name": 4,
+		"Grants": 5, "ExtraAllowed": 6, "Ratio": 7,
 	} {
 		if ids[name] != want {
 			t.Fatalf("%s has id %d, want %d", name, ids[name], want)

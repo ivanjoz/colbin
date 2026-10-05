@@ -26,7 +26,7 @@
 //! `#[cb(1)]` is the first field, exactly as Go's `cb:"1"` is, and the key it
 //! writes is 0. The subtraction happens once, in `parse_id`, because a key is a
 //! bare nibble or byte with no value to spare for a reserved zero. So narrow
-//! types number 1..=16 and wide ones 1..=256, and `MAX_NARROW_KEY` below is a
+//! types number 1..=16 and wide ones 1..=255, and `MAX_NARROW_KEY` below is a
 //! bound on the key rather than on the id.
 //!
 //! # Attributes
@@ -62,6 +62,8 @@ use syn::{Data, DeriveInput, Fields, Ident, Type, parse_macro_input};
 const MAX_NARROW_KEY: u16 = 15;
 /// What eight key bits buy.
 const MAX_FIELDS: usize = 256;
+/// The largest id a single key run takes: key 255 is where Go links a page.
+const MAX_PAGE_FIELDS: u32 = 255;
 
 #[proc_macro_derive(Colbin, attributes(cb))]
 pub fn derive_colbin(input: TokenStream) -> TokenStream {
@@ -601,10 +603,14 @@ fn parse_id(lit: &syn::LitInt) -> syn::Result<u16> {
             "colbin: field ids are one-based, so 0 is not one: the first field is #[cb(1)]",
         ));
     }
-    if value > MAX_FIELDS as u32 {
+    // Past 255 Go splits a type into pages (`codec/pages.go`), so 256 is not
+    // key 255 there but the first field of the second page. The derive writes
+    // one key run, so it stops where a run ends rather than disagree.
+    if value > MAX_PAGE_FIELDS {
         return Err(syn::Error::new(
             lit.span(),
-            "colbin: a field id is one byte counted from one, so 1..=256",
+            "colbin: field ids run 1..=255 in one key run; past that Go pages the type, \
+             which the derive does not",
         ));
     }
     Ok(value as u16 - 1)

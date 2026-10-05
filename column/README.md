@@ -6,9 +6,9 @@ colbin's column codec: a transform, then blocks of 128 residuals packed at an
 exact bit width chosen per block.
 
 ```go
-buf := varint.AppendArray(nil, []int32{100, 240, 250, 380})
+buf := column.AppendArray(nil, []int32{100, 240, 250, 380})
 out := make([]int32, 4)
-n, err := varint.DecodeArray(buf, 4, out)
+n, err := column.DecodeArray(buf, 4, out)
 ```
 
 ## Why blocks of 128
@@ -21,8 +21,7 @@ bytes for **every** `w`, and a whole number of 64-bit words too. So:
 - the width leaves the element loop, which is what keeps the read fast;
 - the ladder is still one bit fine, which is what keeps the output small.
 
-Those last two are usually a trade and here they are not, which is the whole
-reason this layout replaced the `(k, M)` bit varint that used to live here.
+Those last two are usually a trade, and here they are not.
 
 ## Reading a value is one load
 
@@ -50,10 +49,10 @@ column := [header:1] [base: 8 bytes]? block*
 
 header   bits 0-1  transform: raw / delta / frame-of-reference / constant
          bit  2    zigzag applied to residuals
-         bits 3-7  reserved
+         bits 3-7  reserved, zero
 
 base     delta's first value, or the frame's minimum, zigzagged and in the clear
-         at full width — for delta and FOR only
+         at full width — for delta, FOR and constant only
 
 block   := [width: 1 byte, 0..64] [payload]
 
@@ -62,10 +61,16 @@ block   := [width: 1 byte, 0..64] [payload]
 ```
 
 A constant column has no blocks: the header is followed by the one value, nine
-bytes for any length.
+bytes for any length. An empty column is the single byte `00`.
 
-The element count is not stored. It comes from the record count, matching the
-convention of the other colbin column codecs.
+The element count is not stored. The caller knows it — in colbin, from the
+table's row count.
+
+The encoder writes exactly five headers for a non-empty column — `00` and `04`
+(raw, without and with zigzag), `05` (delta, always zigzagged), `02` (frame of
+reference) and `03` (constant) — and `DecodeArray` refuses every other byte,
+including any reserved bit. It does not check that the transform and the block
+widths are the ones the encoder would have chosen.
 
 ## Transforms
 
@@ -82,17 +87,17 @@ Three rules the measurements insisted on:
    instead sets the first block's width from one element, which measured +97% on
    a column of timestamps.
 2. **The transform is scored against its blocked cost**, not against the
-   column's widest residual. Scoring it the old way picks frame-of-reference for
-   a column of small ids and loses 76%; scoring it this way picks delta.
+   column's widest residual. Scoring it the other way picks frame-of-reference
+   for a column of small ids and loses 76%; scoring it this way picks delta.
 3. **Constant is scored too, not taken on sight.** It is unbeatable on a long
    column and beaten on a short one — three small values are three bytes raw
    against the eight a base costs. And it loses to raw on a column of zeros,
    because a width-0 block carries nothing: 256 zeros are three bytes.
 
-## Measured results
+## Sizes
 
-i7-1355U, Go 1.27. Sizes are `go test ./column -run TestArraySizeReport -v`;
-throughput is `go test ./column -bench Array`, 1024 elements per column.
+`go test ./column -run TestArraySizeReport -v`, which also pins the transform
+each shape selects:
 
 | column, 256 × int64 | raw | encoded | transform |
 |---|---:|---:|---|
@@ -100,44 +105,32 @@ throughput is `go test ./column -bench Array`, 1024 elements per column.
 | monotonic ids | 2048 B | 171 B (8.3%) | delta, width 5 |
 | timestamps (sec) | 2048 B | 235 B (11.5%) | delta, width 7 |
 | clustered ±500 | 2048 B | 331 B (16.2%) | FOR, width 10 |
+| steps of 200 | 2048 B | 298 B (14.6%) | delta, width 9 |
 | random int64 | 2048 B | 2051 B (100.1%) | raw, width 64 |
 | all zeros | 2048 B | 3 B (0.1%) | raw, width 0 |
 | negatives | 2048 B | 107 B (5.2%) | delta, width 3 |
 
-Against the `(k, M)` bit varint this replaced, over the five shapes in
-`experiments/bytealigned`: **smaller on every one of them**, from −59% to +1%.
+The framing is one header byte and one width byte per block, so **+0.1% on
+incompressible data**: a column never costs more than its raw element width plus
+that, which `TestArrayNeverExceedsTheElementWidth` asserts. On a column of one
+to three elements the framing is a large share of a small number.
 
-| 1024 elements | old `(k, M)` | blocked | |
-|---|---:|---:|---|
-| encode int16 | 14.3 µs | 3.4 µs | 4.2× |
-| encode int32 | 15.6 µs | 3.3 µs | 4.7× |
-| encode int64 | 17.4 µs | 3.4 µs | 5.1× |
-| decode int16 | 3.80 µs | 1.31 µs | 2.9× |
-| decode int32 | 3.74 µs | 1.32 µs | 2.8× |
-| decode int64 | 3.37 µs | 1.33 µs | 2.5× |
-
-That is 1.3 ns per element to decode and 3.3 ns to encode. A short column costs
-more per element — 16 elements decode in 47 ns, 3.0 ns each — because the header,
-the base and the block setup are fixed and there is nothing to amortise them
-over.
-
-### What it costs
-
-One byte per block, so **+0.1% on incompressible data**. That is what used to be
-bounded by a `trFixed` fallback; the widest block width bounds it now, and the
-fallback is gone. On a column of one to three elements the framing is a larger
-share and the encoder can land a byte or two above the old codec.
+`go test ./column -bench Array` measures encode and decode per element width.
 
 ## Element types
 
-`int8`, `int16`, `int32`, `int64`, and defined types over them. The width comes
-from `unsafe.Sizeof` on the type parameter, so encoder and decoder derive the
-same width from the same type and it never reaches the wire — which is also why
-`int` is excluded: its width is platform-dependent, so an `[]int` written on a
-64-bit host would decode silently wrong on a 32-bit one.
+`int8`, `int16`, `int32`, `int64`, and defined types over them. Values are
+widened to `int64` internally, so **the encoding depends only on the values**: the
+same values encode to the same bytes as `[]int8` or as `[]int64`, and decode into
+any element type that can hold them. Decoding a value that does not fit the
+destination type is an error, never a silent truncation.
 
-Unsigned slices convert through the same-width signed type, which preserves the
-bit pattern. See `codec/integer.go`.
+`int` is left out because its range differs between platforms: a column written
+from an `[]int` on a 64-bit host could hold values a 32-bit host cannot.
+
+colbin's tables reach the codec through `[]int64`: `gatherInts` in
+`codec/table.go` widens every integer, bool and float field of a row to `int64`
+first — unsigned values by value, `uint64` and floats by bit pattern.
 
 ## Tests
 
@@ -145,13 +138,20 @@ bit pattern. See `codec/integer.go`.
   read back both with slack after the run and with the buffer ending exactly at
   it, so the one-load path and the gather path must agree.
 - **`TestAFullBlockIsAWholeNumberOfBytes`** — the arithmetic the layout rests on.
-- **`TestArrayTransformChoiceIsOptimal`** — no other transform may produce a
-  shorter encoding than the one chosen. This is what `TestArraySearchIsOptimal`
-  checked for the old parameter search.
+- **`TestArrayTransformChoiceIsOptimal`** — every transform the encoder could
+  have picked is written out in full and decoded back; none may be shorter than
+  the one it chose.
+- **`TestArrayEncodingIsIndependentOfType`** — the same values are the same bytes
+  as every element type that holds them, and decode into each.
+- **`TestArrayDecodeRejectsOutOfRange`** — a value too wide for the destination
+  type is an error under every transform.
+- **`TestArrayDecodeRejectsUnwrittenHeaders`** — all 256 header bytes: exactly
+  the ones the encoder writes are accepted.
 - **`TestArrayNeverExceedsTheElementWidth`** — the +0.1% bound, asserted.
 - **`TestArrayElementTypes`** — each width end to end, at its extremes.
 - **`TestArrayDecodeGarbage`**, **`TestArrayTruncated`**, **`FuzzArrayDecode`** —
-  arbitrary and truncated input must never panic.
+  arbitrary and truncated input must never panic, and every narrower type must
+  agree with `int64` on the same bytes.
 
 ## The Rust port
 

@@ -6,9 +6,9 @@ import (
 	"github.com/ivanjoz/colbin/wire"
 )
 
-// The three ways to write the same record, so the cost of each layer is visible:
-// the wire package straight-line (what a generated codec emits), the reflection
-// façade over a cached plan, and compact mode through its typed handle.
+// The ways to write the same record, so the cost of each layer is visible: the
+// wire package straight-line (what a generated codec emits), the reflection
+// façade, and the façade through a Codec handle with its plan already held.
 
 type benchRecord struct {
 	CompanyID    int32  `cb:"1"`
@@ -28,11 +28,12 @@ var benchCharge = benchRecord{
 }
 
 // appendChargeByHand is what a macro or a generator would emit: one call per
-// field, each picking the writer that matches the field's static Go type.
+// field, each picking the writer that matches the field's static Go type, and
+// the same bytes Marshal writes (TestTheHandWrittenBaselineIsTheFormat).
 func appendChargeByHand(buffer []byte, charge *benchRecord) []byte {
-	writer := wire.Writer{Buffer: buffer}
-	writer.U32(0, uint32(charge.CompanyID))
-	writer.U32(1, uint32(charge.UserID))
+	writer := wire.Writer{Buffer: append(buffer, rootStructNarrow)}
+	writer.I32(0, charge.CompanyID)
+	writer.I32(1, charge.UserID)
 	writer.U16(2, charge.RouteID)
 	writer.U16(3, charge.CPU)
 	writer.U16(4, charge.Inference)
@@ -42,6 +43,21 @@ func appendChargeByHand(buffer []byte, charge *benchRecord) []byte {
 	writer.U16(8, charge.Access3)
 	writer.U16(9, charge.Access4)
 	return writer.Buffer
+}
+
+// A baseline that wrote some other encoding would be measuring something else.
+func TestTheHandWrittenBaselineIsTheFormat(t *testing.T) {
+	reflected, err := Marshal(&benchCharge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if byHand := appendChargeByHand(nil, &benchCharge); string(byHand) != string(reflected) {
+		t.Fatalf("by hand %x, Marshal %x", byHand, reflected)
+	}
+	var back benchRecord
+	if err := readChargeByHand(reflected, &back); err != nil || back != benchCharge {
+		t.Fatalf("read by hand: %+v, %v", back, err)
+	}
 }
 
 func BenchmarkAppendByHand(b *testing.B) {
@@ -81,13 +97,13 @@ func BenchmarkCodecAppend(b *testing.B) {
 	buffer := make([]byte, 0, 64)
 	b.ReportAllocs()
 	for b.Loop() {
-		buffer = codec.Append(buffer[:0], &benchCharge)
+		buffer, _ = codec.Append(buffer[:0], &benchCharge)
 	}
 }
 
 func BenchmarkCodecUnmarshal(b *testing.B) {
 	codec := MustCodec[benchRecord]()
-	message := codec.Encode(&benchCharge)
+	message := must(codec.Encode(&benchCharge))
 	back := benchRecord{}
 	b.ReportAllocs()
 	for b.Loop() {
@@ -97,14 +113,17 @@ func BenchmarkCodecUnmarshal(b *testing.B) {
 
 // readChargeByHand is the decode half of what a generator would emit.
 func readChargeByHand(message []byte, charge *benchRecord) error {
+	if len(message) == 0 || message[0] != rootStructNarrow {
+		return wire.ErrBadDescriptor
+	}
 	*charge = benchRecord{}
-	reader := wire.NewReader(message)
+	reader := wire.NewReader(message[1:])
 	for reader.More() {
 		switch reader.Key() {
 		case 0:
-			charge.CompanyID = int32(reader.U32())
+			charge.CompanyID = reader.I32()
 		case 1:
-			charge.UserID = int32(reader.U32())
+			charge.UserID = reader.I32()
 		case 2:
 			charge.RouteID = reader.U16()
 		case 3:

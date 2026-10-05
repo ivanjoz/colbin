@@ -267,6 +267,13 @@ impl<'a> Writer<'a> {
             self.bytes(key, value);
             return;
         };
+        // Past 255 bytes a packed header is five bytes against a raw one's two
+        // or three, so the comparison is of whole fields, not payloads.
+        let packed_header = if stream.len() <= 0xFF { 2 } else { 5 };
+        if packed_header + stream.len() >= blob_header_size(value.len()) + value.len() {
+            self.bytes(key, value);
+            return;
+        }
         if stream.len() <= 0xFF {
             let code = if upper {
                 ESCAPE_PACKED1_UP
@@ -594,6 +601,20 @@ impl<'a> Writer<'a> {
     }
 }
 
+/// What `Writer::blob_header` spends on a raw blob of `size` bytes.
+fn blob_header_size(size: usize) -> usize {
+    let size = size as u64;
+    if size <= INLINE_BLOB_SIZE as u64 {
+        2
+    } else if size <= 0xFFFF {
+        3
+    } else if size <= 0xFFFF_FFFF {
+        5
+    } else {
+        9
+    }
+}
+
 /// Turns a one-byte length placeholder into four, shifting the body up to make
 /// room. Shared by both key widths, which spell the placeholder the same way.
 #[allow(clippy::cast_possible_truncation)]
@@ -723,17 +744,19 @@ impl<'a> Reader<'a> {
     /// [`Reader::u64`]: a signed nibble is `[positive:1][size:3]` and an
     /// unsigned one is a sixteen-code table, so the same four bits mean
     /// different things and only the schema says which.
-    #[allow(clippy::cast_possible_wrap)]
     pub fn i64(&mut self) -> i64 {
         let Some(header) = self.header() else {
             return 0;
         };
         let positive = header & INT_POSITIVE_FLAG != 0;
         let magnitude = self.signed_magnitude();
-        if positive {
-            return magnitude as i64;
+        match super::signed(positive, magnitude) {
+            Some(value) => value,
+            None => {
+                self.fail(Error::FieldTooWide);
+                0
+            }
         }
-        (magnitude as i64).wrapping_neg()
     }
 
     /// Reads the `[size:3]` form: code 0 means the magnitude is one, codes
@@ -797,22 +820,31 @@ impl<'a> Reader<'a> {
         value as u32
     }
 
-    /// Reads a field written by [`Writer::i32`].
-    #[allow(clippy::cast_possible_truncation)]
+    /// Reads a field written by [`Writer::i32`], refusing anything wider.
     pub fn i32(&mut self) -> i32 {
-        self.i64() as i32
+        let value = self.i64();
+        self.within(value)
     }
 
-    /// Reads an `i16` field.
-    #[allow(clippy::cast_possible_truncation)]
+    /// Reads an `i16` field, refusing anything wider.
     pub fn i16(&mut self) -> i16 {
-        self.i64() as i16
+        let value = self.i64();
+        self.within(value)
     }
 
-    /// Reads an `i8` field.
-    #[allow(clippy::cast_possible_truncation)]
+    /// Reads an `i8` field, refusing anything wider.
     pub fn i8(&mut self) -> i8 {
-        self.i64() as i8
+        let value = self.i64();
+        self.within(value)
+    }
+
+    /// Narrows a signed value to its field's type, or fails the read: a value
+    /// past the type is a schema disagreement, not one to truncate.
+    fn within<T: TryFrom<i64> + Default>(&mut self, value: i64) -> T {
+        T::try_from(value).unwrap_or_else(|_| {
+            self.fail(Error::FieldTooWide);
+            T::default()
+        })
     }
 
     /// Reads a field written by [`Writer::f32`].
@@ -1165,6 +1197,18 @@ impl<'a> Reader<'a> {
             return None;
         };
         Some((count, Reader::new(&body[at..])))
+    }
+
+    /// Returns a table's row count and its columns' bytes, which the caller
+    /// reads at the row type's key width: four bits when that type's are, and
+    /// eight when the rows are wide, whatever this run's width is.
+    pub fn table(&mut self) -> Option<(usize, &'a [u8])> {
+        let body = self.composite_body()?;
+        let Some((rows, at)) = read_count(body) else {
+            self.fail(Error::Truncated);
+            return None;
+        };
+        Some((rows, &body[at..]))
     }
 
     /// Returns one narrow list element's body: a length and then a key run.
