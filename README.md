@@ -1,559 +1,474 @@
 # colbin
 
-A byte-aligned binary format for Go structs, built for wires that are
-latency-bound: many small messages, a hot path, a known type on both ends.
+colbin is a binary serialization format for Go structs, with Rust and
+JavaScript (WebAssembly) implementations that read and write the same bytes.
+
+**It gives the compression and performance of Protocol Buffers without a
+precompilation step and without dependencies in Go.** An optional
+self-describing mode, colbin/JSON, makes a message convertible to JSON with
+nothing else on hand.
+
+- **No precompilation step.** The Go struct is the schema. There is no `.proto`
+  file, no `protoc` and no generated types; `cb` field tags are optional.
+- **No dependencies.** The Go module's `go.mod` has no `require` block.
+- **Protobuf-level size and speed.** In the [measurements](#measurements) colbin
+  is at least as small as protobuf on every shape. On slices of structs it is
+  several times smaller, because it writes them as compressed columns. It
+  encodes 2–6× faster and decodes 1.8–7× faster.
+- **Self-describing mode (colbin/JSON).** The schema section travels inside the
+  message, so `ToJSON` renders it without the Go type. The section adds under
+  1% to a table or a document.
 
 ```go
-data, err := colbin.Marshal(&charge)
+data, err := colbin.Marshal(&order)            // a struct, no tags required
 err = colbin.Unmarshal(data, &back)
+
+doc, err := colbin.MarshalSelfDescribing(&order) // colbin/JSON
+text, err := colbin.ToJSON(nil, doc)             // JSON, no schema or type needed
 ```
 
-**No dependencies.** `go.mod` has no `require` block and there is no `go.sum`
-beside it, so importing colbin adds nothing to your module graph — not a
-download, not a version floor, not a line in your SBOM. The benchmarks that need
-protobuf live in their own repository, [colbin-benchmarks][bench-repo], so that
-this one can say that without an asterisk.
+- [The problem](#the-problem)
+- [Design](#design)
+- [Usage](#usage)
+- [Measurements](#measurements)
+- [Limitations](#limitations)
+- [Implementations](#implementations)
+- [Where it is used](#where-it-is-used)
+- [Documents](#documents)
 
-Against protocol buffers on the same six-field record, protobuf driven through
-its generated code:
+## The problem
 
-| one flat record | protobuf | colbin | |
-|---|---:|---:|---|
-| encode, reusing a buffer | 123 ns | **39 ns** | 3.2× |
-| encode, onto a fresh buffer | 140 ns | **76 ns** | 1.8× |
-| decode | 116 ns | **61 ns** | 1.9× |
-| bytes | 32 | **27** | |
+The target is bandwidth between services, storage and clients, without
+changing how the code that produces and consumes the data is written.
 
-| one order, three nested lines | protobuf | colbin | |
-|---|---:|---:|---|
-| encode | 271 ns | **81 ns** | 3.3× |
-| decode | 485 ns | **314 ns** | 1.5× |
-| bytes | 49 | **46** | |
+- **JSON** costs no setup. But every record carries its field names, and every
+  number is decimal text. A list of a thousand records repeats every key a
+  thousand times.
+- **Protocol buffers** remove the names and encode numbers in binary. They need
+  a `.proto` file, a compiler step and generated types kept in sync with the
+  application's own. They also encode a list of records row by row: each row
+  repeats every field tag, and each element pays a tag and a length.
+- **Varints**, used by protobuf for keys, lengths and integers, are compact but
+  decoded byte by byte, in a loop whose trip count depends on the data.
 
-colbin through `Codec[T]`, protobuf through its generated code. Generating the
-colbin codec instead takes the flat record to **27 ns** encode and **55 ns**
-decode — 4.5× and 2.1×.
+colbin is designed around four constraints:
 
-Every number above is reproducible from [colbin-benchmarks][bench-repo] —
-`go test ./bench -bench .`, on an i7-1355U, Go 1.27, best of eight in one run,
-packed5 off. Run a benchmark alone and it lands 5–10% faster than it does in the
-sweep; both sides are measured the same way, so the ratios hold either way.
+1. **The Go struct is the schema.** Field ids come from optional `cb` tags, or
+   are derived from field names when there are none.
+2. **One format for every shape.** A 30-byte message, a table of thousands of
+   rows and a nested document of hundreds of kilobytes use the same encoding.
+   The layout adapts per field, not per message.
+3. **A message can be read without the producer's type.** A schema section,
+   sent out of band or embedded in the message, is enough to render it as JSON.
+4. **Decoding never loops on data.** Every size is either in a header or in a
+   field whose width the header names.
 
-## Why it is fast
+## Design
 
-Nothing is packed across a byte boundary, and **no size is a varint**. A header
-carries the common size and, when it does not fit, names the *width* of the one
-that follows — so no read is ever a loop whose trip count is data, and a string
-field is a sub-slice of the message rather than a copy.
+Each decision below was kept because it measured better than the alternative.
+[`RATIONALE.md`](RATIONALE.md) records the measurements, including the ideas
+that were reverted. [`INTERNALS.md`](INTERNALS.md) specifies the format bit by
+bit.
 
-A field holding its zero value is not written at all, which is where most of the
-saving comes from.
+### Messages are key runs, at one of two key widths
 
-There is one format. There used to be three modes and a byte at the front to
-tell them apart; that byte is now the root value's own descriptor, and it says
-the class and the key width.
+A message is a root descriptor byte followed by a **key run**: a sequence of
+`[key][descriptor][payload]` fields, terminated by the end of the enclosing
+length. The run's key width is chosen per run and recorded in the descriptor
+that opens it:
+
+| | layout | fields | can skip an unknown field |
+|---|---|---|---|
+| **K4** (narrow) | `[key:4][desc:4]`, one byte | ids 1–16 | no: the reader takes the type from its schema |
+| **K8** (wide) | `[key:8][desc:8]`, two bytes | ids 1–255 | yes: the descriptor names a class with a known size rule |
+
+A nested struct opens its own run, so a narrow struct can hold a wide one and
+the reverse. A type with more than 255 fields is split into **pages** of 255.
+Key 255 of each page links to the next, up to id 4 080.
+([INTERNALS §3–4, §6.5](INTERNALS.md#3-narrow-key-runs-k4))
+
+### Field ids: tags are optional
+
+A field's id comes from one of two places.
+
+**From a tag.** `cb:"N"` makes the field id N, and its wire key is N−1. A type
+whose ids all fit in 1–16 uses the one-byte K4 field header.
+
+**From the field name.** A field without a number takes `fnv8` of its name
+(FNV-1a folded to one byte). If that key is taken, it moves to the next free one
+upward. Fields are assigned in declaration order, after all tagged fields. The
+Rust and JavaScript implementations use the same hash, so an untagged Go struct
+is readable from both.
+
+```go
+type Reading struct {          // no tags: ids from the names, K8 keys
+    SensorID  uint64
+    Timestamp int64
+    Value     float64
+}
+
+type Reading struct {          // tags: explicit ids, K4 keys
+    SensorID  uint64  `cb:"1"`
+    Timestamp int64   `cb:"2"`
+    Value     float64 `cb:"3"`
+}
+```
+
+Untagged types stay compatible as long as fields keep their names and their
+relative order:
+- New fields go at the end.
+- A rename keeps the old id if the old name is put in the tag: `cb:"SensorID"`.
+- Reordering is only unsafe when two names hash to the same byte, because
+  declaration order decides which one moves.
+
+What an untagged type costs and gains, measured on a six-field record:
+- **Cost:** derived keys span 0–255, so the type always uses K8. That is one
+  extra byte per present field: 33 B instead of 27, and 44 ns instead of 38 to
+  encode. Decode time is the same.
+- **Gain:** K8 makes every field skippable, so producer and consumer can add
+  fields independently.
+
+Tags are therefore an optimization for size and for the narrow fast path, not a
+requirement. In a table, keys are written per column rather than per row, so
+the key width hardly matters there.
+
+### Scalars are byte-aligned, and sizes are not varints
+
+- **Zero values are omitted.** A field holding `0`, `""`, `false`, or an empty
+  slice or map is not written at all.
+- **Integers are sign-and-magnitude**, with the byte count in the descriptor:
+  - A value takes 1 to 8 bytes, as many as it needs.
+  - In K4, an unsigned field spends no descriptor bit on the sign, so codes
+    0–7 are the value itself: a `bool`, a flag or a small count is one byte,
+    key included.
+  - K8 adds a varint form, which the encoder writes only when it is shorter:
+    3.34 B against 3.60 per field on ids 0–1000.
+- **Floats are written byte-reversed.** The zero bytes of an IEEE-754 value are
+  the low mantissa bytes, and reversing them lets the byte count drop them:
+  `1.0` is 2 bytes, and a `float64` holding an exact `float32` is 5.
+- **Strings and blobs** carry their size in the header when it fits (2 047 bytes
+  in K4). Past that, the header names the width (2, 4 or 8 bytes) of a size
+  that follows. A decoded string is a sub-slice of the message, not a copy.
+- **No size is a varint.** Every read of a size is a single load of a width the
+  header already gave, so decoding never runs a loop whose trip count is data.
+
+([INTERNALS §3.1, §5](INTERNALS.md#31-values))
+
+### Composites carry a byte length
+
+Nested structs, lists, tables and maps are written with a backpatched byte
+length:
+- In K8, that length is what lets a reader skip a composite without knowing its
+  type.
+- In K4, the descriptor names the width of the length (`[key:4][lw:2][k8:1][—:1]`)
+  and the class comes from the schema. Composites therefore do not force the
+  wide width.
+
+Pointers distinguish "absent" from "zero":
+- A nil pointer is omitted.
+- A pointer to a zero value writes an explicit zero, 2 bytes. This is the only
+  value the format writes just to mark presence.
+- A pointer to a slice or a map is encoded as the slice or the map.
+
+### Slices of structs become tables
+
+A `[]Struct` whose element fields are all columnable switches layout at
+**8 rows**:
+
+- **Below 8 rows** it is a **list**: each element is a key run.
+- **From 8 rows up** it is a **table**: one key per column instead of one per
+  field per row.
+
+The choice is made per field, at encode time, and the two layouts have different
+descriptor classes, so the reader dispatches on what it finds.
+
+| six-field row | bytes per row |
+|---|---:|
+| list of structs, 7 rows | 16.9 |
+| table, 1 000 rows | 11.0 |
+
+Each integer column goes through the **column codec**:
+- First, a transform chosen per column: raw, delta, frame-of-reference or
+  constant.
+- Then the residuals are bit-packed in blocks of 128 values, at a width chosen
+  per block. 128 values at `w` bits is exactly `16w` bytes, so every block is
+  byte-aligned and no state crosses a block boundary.
+
+| 256 × int64 | raw | encoded |
+|---|---:|---:|
+| monotonic ids | 2 048 B | 171 B |
+| timestamps | 2 048 B | 235 B |
+| constant zeros | 2 048 B | 3 B |
+| random | 2 048 B | 2 051 B |
+
+Decode runs at 1.3 ns per value and encode at 3.5. A struct containing a nested
+struct or a slice cannot be a column, and it stays a list at any length.
+([INTERNALS §6.2–6.3, §7](INTERNALS.md#62-slices-of-structs-a-list-or-a-table))
+
+### packed5 (opt-in)
+
+`colbin.SetPacked5(true)` packs strings drawn from upper-case letters and
+digits at about 5 bits per character:
+- The encoder decides per string and falls back to plain bytes when packing
+  would not be shorter, so turning it on never grows a message.
+- The choice is recorded in each string's descriptor, so the reader needs no
+  configuration.
+- It costs a pass over every string on both sides, which is why it is off by
+  default.
+
+([INTERNALS §8](INTERNALS.md#8-packed5-packed5))
+
+### The schema section, and colbin/JSON
+
+The wire carries no names and no types. The **schema section** is the type's
+encoding plan serialized: a key, a name and an op code per field. Nested and
+recursive types are hoisted into an indexed struct table, so a recursive type
+describes itself in finite space. It can travel two ways:
+
+- **Out of band**, once per connection. Messages stay exactly the size
+  `Marshal` produces.
+- **Embedded** (`MarshalSelfDescribing`). This is **colbin/JSON**, the
+  self-describing mode: root byte `0xD4`/`0xDC`, then the section, then the
+  body. The body is byte for byte what `Marshal` writes. `Unmarshal` skips the
+  section, and `ToJSON(nil, msg)` renders the message with no schema and no Go
+  type available.
+
+The section is 38 to 448 bytes for the types measured here. On a table or a
+document that is under 1% of the message. On a single small record it is most
+of the message, which is why a stream of small messages should send the
+section once instead.
+
+`ToJSON`'s output has the same content as `encoding/json`'s, with three
+differences:
+- Fields a record omitted are rendered after the ones it holds.
+- Empty slices and maps render as `null`.
+- NaN and infinity are refused.
+
+([INTERNALS §10, §12](INTERNALS.md#10-the-schema-section))
+
+### Dynamic values
+
+`any`, `[]any` and `map[string]any` are carried anywhere a typed field can go.
+A dynamic value writes its own type on the wire: one descriptor byte naming
+integer, float, string, blob, list, map, null, true or false.
+
+An array of records inside a dynamic value is written behind a tag that refers
+to a struct in the section. The rows are then the same table a typed field
+would write. A thousand five-field records take:
+- 26 024 B as a typed `[]User`;
+- 26 067 B as `map[string]any{"rows": users}`;
+- 78 196 B in `encoding/json`.
+
+([INTERNALS §9](INTERNALS.md#9-dynamic-values))
 
 ## Usage
 
-A struct with no tags at all works: each field takes `fnv8` of its name, linear
-probed past anything already used. That key lands anywhere in 0..255, so an
-untagged type uses **eight-bit keys** — which costs a byte per present field and
-buys `Skip` over an unknown one.
-
-```go
-type Charge struct {
-    CompanyID int32   // id = fnv8("CompanyID")
-    Name      string
-}
+```sh
+go get github.com/ivanjoz/colbin
 ```
 
-Numbering the fields is how a type asks for the four-bit key, and the number is
-what a reader in another language has to agree on.
-
-**Field ids start at 1.** Four key bits hold sixteen fields, so a narrow type
-numbers 1..16 and a wide one 1..255. Past that a type is split into pages of 255
-fields, up to id 4080 — see [Pages](#more-than-255-fields-pages).
-
 ```go
-type Charge struct {
-    CompanyID int32  `cb:"1"`
-    UserID    int32  `cb:"2"`
-    RouteID   uint16 `cb:"3"`
-    Name      string `cb:"4"`
+type SaleLine struct {
+    ProductID uint32
+    Quantity  uint32
+    UnitCents int64
 }
 
-data, err := colbin.Marshal(&charge)
+type Sale struct {
+    ID         uint64
+    CreatedAt  int64
+    TotalCents int64
+    Lines      []SaleLine // a table from 8 lines up
+}
+
+data, err := colbin.Marshal(&sale)
+err = colbin.Unmarshal(data, &back)
 ```
 
-The byte on the wire is the id minus one. It has to be: a key is a bare nibble
-or a bare byte with every value spoken for, so there is no spare encoding to
-reserve for a zero that means "absent". `cb:"1"` writes key 0 and `cb:"16"`
-writes key 15.
-
-That subtraction is the only place the two numbers differ, and it is worth
-knowing about in exactly one situation — reading bytes. `colbin.FieldIDs(v)`
-reports the **id**, as the tags do, and the schema section and the bytes carry
-the **key**. So `CompanyID` above is `cb:"1"` in source and in `FieldIDs`, and
-`0` everywhere you inspect the encoding.
-
-### A hot path should hold a handle
-
-`Codec[T]` resolves the plan once and allocates nothing per record.
+**A handle** resolves the type's plan once. After that, encode and decode
+allocate only what the decoded value itself needs:
 
 ```go
-var chargeCodec = colbin.MustCodec[Charge]()
+var saleCodec = colbin.MustCodec[Sale]()
 
-buf := make([]byte, 0, 64)
-for _, charge := range charges {
-    buf = chargeCodec.Append(buf[:0], &charge)
-    send(buf)
-}
+buf, err = saleCodec.Append(buf[:0], &sale)
+err = saleCodec.Unmarshal(buf, &back)
 ```
 
-### A hotter one should generate the codec
-
-`codec.Generate` emits the straight-line calls you would write by hand against
-`wire`, and measures the same. It encodes three times faster than the handle;
-decode gains less, because the handle already ends in the same reader calls:
+**Generated code**: `codec.Generate` emits the straight-line calls against the
+`wire` package that one would write by hand.
 
 | ten-field record | encode | decode |
 |---|---:|---:|
 | hand-written against `wire` | 7.6 ns | 22.4 ns |
-| generated | **6.9 ns** | 22.9 ns |
+| `codec.Generate` | 6.9 ns | 22.9 ns |
 | `Codec[T]` handle | 23.5 ns | 27.6 ns |
 | `Marshal` / `Unmarshal` | 52.7 ns | 48.5 ns |
 
-Taken in one run; absolute figures move ±20% between runs on this machine, so
-compare rows against each other rather than against a number taken elsewhere.
-
-```go
-source, _ := codec.GenerateString("billing", Charge{})
-os.WriteFile("charge_colbin.go", []byte(source), 0o644)
-```
-
-## Key widths
-
-A field id is four bits or eight, chosen **per key run** rather than per message.
-
-| | cost | buys |
-|---|---|---|
-| 4-bit | — | the fast path |
-| 8-bit | a byte per present field | 256 ids, `Skip` over an unknown field |
-
-### The three ways to hand colbin a struct
-
-Same six-field sensor reading, same run, protobuf through its generated code:
-
-| | encode | decode | bytes |
-|---|---:|---:|---:|
-| protobuf | 114 ns | 107 ns | 32 |
-| **colbin + tags** (4-bit keys) | **37.4 ns** | 71.2 ns | **27** |
-| colbin untagged (8-bit keys) | 43.4 ns | 71.3 ns | 33 |
-| colbin + tags + packed5 | 44.8 ns | 69.8 ns | **27** |
-
-Untagged costs 16% on encode and six bytes — one per present field; its decode
-is within noise of the tagged one. All of that is the key width, not the
-hashing, which happens once when the plan is built.
-
-packed5 on this record is pure cost: its only string is `"C"`, which it cannot
-shorten, so the bytes stay at 27 and the encode pays 20% for trying. On a
-record that plays to it — a product with a SKU, a name and three category
-strings — it saves real bytes at a real price:
-
-| string-heavy product | encode | decode | bytes |
-|---|---:|---:|---:|
-| protobuf | 158 ns | 350 ns | 81 |
-| **colbin + tags** | **40.3 ns** | **190 ns** | 81 |
-| colbin + tags + packed5 | 123 ns | 405 ns | **72** |
-
-Nine bytes, 11%, for three times the encode cost and twice the decode. **Turn it
-on only when strings dominate the record and size matters more than speed.**
-
-### The two widths encode integers differently
-
-They are optimised separately, because what is scarce differs.
-
-**K4** has four descriptor bits and a reader that already knows the type. An
-unsigned field therefore spends no sign bit: all sixteen codes carry
-information, `0..7` being the value itself with no payload at all and `8..15` a
-magnitude of one to eight bytes. A `bool`, a small count or a flag is a single
-byte, key included, and the widths are exact — a seven-byte magnitude costs
-seven where the signed form still rounds it to eight.
-
-**K8** has already spent a byte on the key, so its descriptor starts empty. It
-gets a second form: a varint that carries three value bits in the descriptor and
-seven per byte after it. The writer emits it **only when it is shorter** than the
-sign-and-magnitude form, so nothing on the wire ever got bigger — a random
-`int64` still takes the byte count, because seven bits per byte loses to eight
-once a value is wide.
-
-| average bytes per field | sign+magnitude | with varint |
-|---|---:|---:|
-| small ids 0..1000 | 3.60 | **3.34** |
-| deltas −1000..1000 | 3.67 | **3.42** |
-| random int32 / int64 | 5.99 / 9.99 | 5.99 / 9.99 |
-
-A signed field zigzags into the varint and an unsigned one does not, which is
-safe for the same reason the K4 split is: the schema picks the reader. An
-unknown field stays skippable either way — the varint is self-delimiting and
-lives under a class, which is what `Skip` walks.
-
-A type goes wide when it has an id above sixteen, an untagged field, or an
-`any` — whose descriptor has to name its own class, which four bits cannot. A
-nested struct, slice of structs, map or table does
-*not* force it: a narrow descriptor carries the byte length those need, with the
-class coming from the schema. Nothing else changes, and a
-narrow-keyed struct can hold a wide-keyed one or the reverse — the width is in
-the descriptor that opens each run.
-
-**A narrow message cannot skip an unknown field.** Four descriptor bits have no
-room for a class, so a reader that does not know a key cannot size it. Adding a
-field is a coordinated deploy of both sides unless the type is on the wide path.
-
-### More than 255 fields: pages
-
-A key is a byte, so one key run holds 256 of them. A type numbered past 255 is
-split into **pages** of 255 fields — `page = (id-1)/255`, `key = (id-1)%255` —
-and key 255 of each page holds the next page as an ordinary nested struct. The
-wire needs nothing new, and the cost of a field is the same on every page.
-
-- Every field of a paged type needs a `cb` number; a hashed key could land on
-  the link.
-- A page with nothing set is not written, and nor is the link to it, so pages
-  past the last field in use cost nothing.
-- The JSON and `DecodeAny` walks write every page's fields into one object; the
-  schema section flags each page so that a reader in another language does the
-  same.
-- `FieldIDs` reports each field's id as tagged, up to 4080 (sixteen pages).
-- `codec.Generate` refuses a paged type, and so does the Rust derive past id
-  255; use `Codec[T]`.
-
-## packed5
-
-`colbin.SetPacked5(true)` turns on a string encoding worth about five bits per
-character on upper-case alphanumerics. It is **off by default** and it is a
-*writer* setting: the encoding is recorded in each string's own descriptor, so a
-decoder reads either form without being told.
-
-The encoder chooses per string, so turning it on can never make a message
-larger. It costs a pass over every string on both sides, and leaves the key
-width alone.
-
-The setting is process-wide: two libraries in one binary share it. It is safe to
-change while other goroutines encode — a message written across the switch
-holds either form, or both, and every reader reads it.
-
-## Supported types
-
-| | |
-|---|---|
-| yes | `bool`, every sized `int`/`uint`, `float32/64`, `string`, `[]byte`, slices of integers and of strings, nested structs, `[]struct`, recursive types, `map` with string or integer keys, pointers to any scalar, string or struct, `any`, `[]any`, `map[string]any` |
-| not yet | arrays, pointers to slices and maps, maps of structs, `map[any]T` |
-
-`int` and `uint` encode as their 64-bit forms, so a message written on one
-platform reads on another.
-
-### Pointers are how a field says "absent" rather than "zero"
-
-A nil pointer is omitted and costs nothing. A non-nil pointer *to* a zero value
-— `new(int32)`, a `*string` to `""` — writes an explicit zero, two bytes, because
-otherwise it would be indistinguishable from nil. That is the one value in the
-format written solely to say it is there.
-
-```go
-type Patch struct {
-    Name  *string `cb:"1"` // nil: leave it alone. &"": clear it.
-    Limit *int32  `cb:"2"`
-}
-```
-
-A pointer to a struct needs no explicit zero: a struct is written whether or not
-it is empty, so an absent key is nil and an empty one is a pointer to a zero
-struct. Pointers to slices and maps are refused — on this wire a nil one and an
-empty one are the same bytes, and what `*[]T` nil should mean is not settled.
-
-## A slice of structs picks its own layout
-
-Past a threshold, a `[]Struct` field is **transposed into a table**: one key per
-column rather than one per field per row, with each column through the blocked
-column codec.
-
-| six-field row | |
-|---|---:|
-| list of structs, 7 rows | 16.9 B/row |
-| table, 1000 rows | **11.0 B/row** |
-
-The choice is made per field on the row count, and the two are different
-descriptor classes, so a reader dispatches on what it finds. A struct with a
-nested struct or a slice inside it cannot be a column and stays row-wise however
-long it gets.
-
-## Reading a message without the Go type
-
-The wire carries no type — that is where the speed comes from — so a browser, a
-`jq`-style tool or any dynamically typed client cannot name a field or tell a
-float from an integer. A **schema section** gives it those. It is the same plan
-the encoder already resolves from the struct, written out as bytes: a key, a
-name and a type code per field, with nested structs hoisted into an indexed
-table so a recursive type describes itself in finite space.
-
-Send it once per connection, then send ordinary messages:
+**Reading without the type:**
 
 ```go
 schema, _ := colbin.SchemaFor[Sale]()
-send(schema.Bytes())                       // once
+section := schema.Bytes()                      // send once
 
-for _, sale := range sales {
-    data, _ := colbin.Marshal(&sale)       // unchanged, and unchanged in size
-    send(data)
-}
+parsed, _ := colbin.ParseSchema(section)       // on the reader
+text, _ := colbin.ToJSON(parsed, message)
+value, _ := colbin.DecodeAny(parsed, message)  // map[string]any
+
+standalone, _ := colbin.MarshalSelfDescribing(&sale)   // colbin/JSON
+text, _ = colbin.ToJSON(nil, standalone)
 ```
 
-and on the other side:
+## Measurements
 
-```go
-schema, _ := colbin.ParseSchema(section)
-text, _ := colbin.ToJSON(schema, message)  // {"ID":1,"UserID":42,...}
-value, _ := colbin.DecodeAny(schema, message)
-```
+**Setup.** Measured on an i7-1355U with Go 1.27.0, best of three runs, by
+`bench/formats_test.go` in [colbin-benchmarks][bench-repo]:
+- **JSON** is `encoding/json`.
+- **protobuf** runs through its generated code. Tables and documents are
+  written as the `repeated` fields of a wrapper message, which is byte for byte
+  what generated code emits.
+- **colbin** is `Codec[T]` with tagged types, appending to a reused buffer.
+- **colbin/JSON** is `MarshalSelfDescribing`, which allocates its result.
+- Decoding allocates a fresh value per call in JSON and protobuf, and reuses
+  one in colbin.
 
-`colbin.MarshalSelfDescribing(&sale)` puts the section in front of the body
-instead, for a document that has to stand alone. Its root byte is `0xD4` or
-`0xDC` — the schema bit, `0x04` — and `Unmarshal` steps over the section, so a
-self-describing message still decodes into the Go type.
+| shape | content |
+|---|---|
+| Reading | one record, six fields, one of them an `[]int32` |
+| Order | one record with three nested lines |
+| Product | one record of mostly strings: SKU, name, three categories |
+| Metrics | 2 000 rows × 3 integers, one message |
+| Sales | 300 rows with 1 514 nested lines, one message |
+| Dataset | six tables, 2 617 rows, one message |
 
-It is the wrong default for a stream. Measured on the corpus:
+### Size (bytes)
 
-| table | schema | B/message | schema/msg |
+| | JSON | protobuf | colbin | colbin + packed5 | colbin/JSON |
+|---|---:|---:|---:|---:|---:|
+| Reading | 110 | 32 | 27 | 27 | 87 |
+| Order | 198 | 49 | 46 | 44 | 121 |
+| Product | 148 | 81 | 81 | 72 | 137 |
+| Metrics | 88 645 | 26 000 | 3 979 | 3 979 | 4 017 |
+| Sales | 186 938 | 34 168 | 26 875 | 26 875 | 27 058 |
+| Dataset | 317 364 | 80 503 | 49 434 | 47 992 | 49 882 |
+
+| gzip | JSON | colbin | colbin/JSON |
 |---|---:|---:|---:|
-| users | 61 B | 61.9 B | 1.0x |
-| sales (with detail) | 173 B | 89.5 B | 1.9x |
-| metrics | 28 B | 10.8 B | 2.6x |
+| Metrics | 9 548 | 2 638 | 2 675 |
+| Sales | 20 702 | 17 393 | 17 546 |
+| Dataset | 38 029 | 27 509 | 27 849 |
 
-The JSON is what `encoding/json` would have written for the same record, down to
-the escaping and the spelling of numbers — with two exceptions the wire forces:
-an empty slice or map is indistinguishable from a nil one and comes out `null`,
-and a NaN or an infinity is **refused** rather than quietly written as `null`.
-`DecodeAny` keeps them.
+**Reading the size tables:**
+- **Single flat records.** colbin and protobuf are within a few bytes. Both
+  omit zeros and write one key per present field, and the difference is
+  colbin's one-byte K4 header against protobuf's tag varint.
+- **Lists of records.** The difference is the table layout: the 2 000 metric
+  rows take 26 000 B in protobuf and 3 979 B in colbin.
+- **Sales** gains less than Metrics because only sales with 8 or more lines
+  are written as tables (see the corpus split below).
+- **colbin/JSON** costs the size of its section.
+- **gzip** still finds redundancy in colbin, and the gzipped colbin stays
+  smaller than gzipped JSON.
 
-Going straight to text is also the faster direction, because the intermediate
-`map[string]any` is where all the allocation is:
+### Time
 
-| 100 corpus users | ns/op | B/op |
-|---|---:|---:|
-| `colbin.AppendJSON` | 29 500 | 6 512 |
-| `encoding/json` on the structs | 40 000 | 14 327 |
-| `colbin.DecodeAny` | 41 000 | 54 712 |
+| encode | JSON | protobuf | colbin | colbin + packed5 | colbin/JSON |
+|---|---:|---:|---:|---:|---:|
+| Reading | 414 ns | 118 ns | 40 ns | 50 ns | 134 ns |
+| Order | 700 ns | 267 ns | 122 ns | 145 ns | 273 ns |
+| Product | 416 ns | 168 ns | 44 ns | 129 ns | 230 ns |
+| Metrics | 236 µs | 179 µs | 30 µs | 30 µs | 38 µs |
+| Sales | 467 µs | 227 µs | 95 µs | 94 µs | 154 µs |
+| Dataset | 886 µs | 480 µs | 141 µs | 166 µs | 228 µs |
 
-Writing colbin *from* JSON is not in this package: it needs type inference, and
-it is a separate job. It is a built one — in Rust rather than in Go, because the
-case that wanted it was a browser. `colbin::build::encode` takes JSON text and
-returns a message and the section that describes it, and `rust/ENCODER.md` is
-what it infers, refuses and warns about. Go reads what it writes; that is what
-`go test ./js/vectors` checks.
+| decode (into the Go type) | JSON | protobuf | colbin | colbin + packed5 | colbin/JSON |
+|---|---:|---:|---:|---:|---:|
+| Reading | 958 ns | 172 ns | 64 ns | 63 ns | 65 ns |
+| Order | 1 717 ns | 540 ns | 279 ns | 337 ns | 288 ns |
+| Product | 882 ns | 389 ns | 210 ns | 419 ns | 204 ns |
+| Metrics | 546 µs | 213 µs | 31 µs | 29 µs | 30 µs |
+| Sales | 1 187 µs | 250 µs | 140 µs | 144 µs | 140 µs |
+| Dataset | 2 023 µs | 564 µs | 229 µs | 278 µs | 236 µs |
 
-## `map[string]any`, for the part of the answer that has no type
-
-A service answering a browser often holds a shape like this, and the values have
-no declared type for the schema to describe:
-
-```go
-data, _ := colbin.MarshalSelfDescribing(map[string]any{
-    "rows":  sales,   // []Sale
-    "total": len(sales),
-    "page":  1,
-})
-```
-
-`any`, `[]any` and `map[string]any` are carried anywhere a field, a slice element
-or a map value can go. Such a value is the one thing in colbin that puts its type
-*on* the wire — one descriptor byte saying integer, float, string, blob, list,
-map, `null`, `true` or `false`.
-
-**An array of records does not pay for that per row.** A `[]Sale` inside an `any`
-is written behind a tag naming a struct the schema section describes, and the
-rows behind it are byte for byte what a typed `[]Sale` field writes — the table,
-the column codec, all of it. A `[]any` that happens to hold one record type is
-promoted to the same thing, so an answer assembled dynamically costs what a typed
-one costs; a mixed one falls back to a list of self-describing values. On a
-thousand five-field records:
-
-| | bytes |
-|---|---:|
-| `[]User` as the whole message | 26 024 |
-| the same inside `map[string]any{"rows": …}` | **26 067** |
-| `encoding/json` | 78 196 |
-
-Two caveats worth reading before you rely on it:
-
-- **A struct inside an `any` needs `MarshalSelfDescribing`.** The tag names a
-  struct *in the section*, and plain `Marshal` has no section — so there it falls
-  back to writing the record as an object with its field names spelled out, which
-  is the same document and several times the bytes. If you send an out-of-band
-  schema, the schema describes the map and not what the map turned out to hold,
-  so the same applies.
-- **The keys are on the wire, per message.** A dynamic map spells every key as a
-  string every time, which is exactly what a declared type saves you. Use it for
-  the subtree whose shape is genuinely unknown, not instead of a struct.
-
-It decodes back into Go as well, with the normalisation `DecodeAny` documents:
-records come back as `map[string]any`, integers as `int64` (or `uint64` past
-2^63), and both float widths as `float64`. Dynamic maps are written in key order,
-so the same value always encodes to the same bytes.
-
-## Layout
-
-```
-wire/     the format: field framing, all three key-run framings,
-          composites, tables, opt-in packed5
-column/   the column codec: blocks of 128 residuals at a chosen bit width
-codec/    the reflection façade and the source generator
-packed5/  the opt-in string packing
-corpus/   a reproducible, real-shaped dataset: users, products, sales
-```
-
-Those are the Go packages, beside the Rust and JavaScript ports in `rust/` and
-`js/` and the vector generators that pin them. The comparison against protocol
-buffers is not here —
-it lives in [colbin-benchmarks][bench-repo], for the reasons in
-[Benchmarks](#benchmarks) below.
-
-### The corpus
-
-`corpus.Generate(corpus.Seed, corpus.Small)` builds the same seven tables every
-time — users, products, categories, stores, sales with nested `Detail
-[]SaleLine`, events and metrics. Money is integer cents throughout; a sale holds
-no string and no float.
-
-The line count per sale straddles the table threshold on purpose, so one dataset
-reaches both layouts:
-
-| 300 sales, 1 514 lines | sales | lines | B/line |
+| to JSON text | colbin, section held | colbin/JSON | `json.Marshal` from the structs |
 |---|---:|---:|---:|
-| list of structs (<8 lines) | 246 | 820 | 21.9 |
-| table, transposed (≥8) | 54 | 694 | **12.8** |
+| Reading | 332 ns | 864 ns | 414 ns |
+| Order | 573 ns | 1 289 ns | 700 ns |
+| Product | 488 ns | 1 014 ns | 416 ns |
+| Metrics | 162 µs | 168 µs | 236 µs |
+| Sales | 429 µs | 450 µs | 467 µs |
+| Dataset | 707 µs | 718 µs | 886 µs |
 
-#### Against protocol buffers, same rows both sides
+**Reading the time tables:**
+- **colbin/JSON decodes** at plain colbin's speed, because the section is
+  skipped.
+- **colbin/JSON encodes** slower than plain colbin because it serializes the
+  section and allocates a new buffer every call.
+- **Rendering JSON from colbin/JSON** parses the section per call, about
+  0.5 µs. That is visible on single records and negligible on tables.
+- **packed5** costs 3× on encode and 2× on decode for the string-heavy Product,
+  for a saving of 9 bytes (11%). On numeric data it costs nothing and saves
+  nothing.
 
-`bench/corpus.pb.go` in [colbin-benchmarks][bench-repo] is the protobuf twin,
-field for field. Cents are `int64`
-rather than `sint64` because every amount is non-negative and int64 is the
-shorter of the two — protobuf gets its best form, not the matching one.
+### The corpus split between lists and tables
 
-| table | rows | protobuf | colbin | |
-|---|---:|---:|---:|---:|
-| users | 100 | 6 275 | 6 187 | −1.4% |
-| products | 200 | 12 996 | 12 876 | −0.9% |
-| **sales** (nested detail) | 300 | 33 489 | **26 856** | **−19.8%** |
-| metrics | 2 000 | 22 000 | 21 680 | −1.5% |
-| total | | 74 760 | **67 599** | −9.6% |
+The Sales shape generates line counts on both sides of the threshold, so both
+layouts appear in one dataset:
 
-Per row, in one run:
-
-| | protobuf | colbin | |
+| 300 sales, 1 514 lines | sales | lines | bytes per line |
 |---|---:|---:|---:|
-| user encode | 141 ns | **35 ns** | 4.0× |
-| user decode | 244 ns | **86 ns** | 2.9× |
-| sale encode | 616 ns | **363 ns** | 1.7× |
-| sale decode | 967 ns | **504 ns** | 1.9× |
-| metric encode | 61 ns | **15 ns** | 4.0× |
+| list (< 8 lines) | 246 | 820 | 21.9 |
+| table (≥ 8 lines) | 54 | 694 | 12.8 |
 
-Decoding a sale allocates 5.1 times against protobuf's 9.1.
+### In the browser
 
-Note the shape of the size result: on flat records the two formats are within
-1.5% of each other — both omit zero fields and write a key per present field, so
-there is little to choose between them. **The whole of colbin's size advantage is
-in the nested table**, where a slice of integer-only structs is transposed into
-columns and protobuf has no equivalent.
+The npm package decodes a table into a flat typed buffer in WebAssembly. A row
+builder, generated per field signature and cached, then turns that buffer into
+objects, so no JSON text is produced or parsed. Measured on 1 000 product
+records under Node 24 (`bun run bench` in `js/`):
 
-`go test ./corpus -run Report -v` prints bytes per row for every table;
-`go test ./bench -run CorpusSizes -v`, in [colbin-benchmarks][bench-repo],
-prints the comparison above.
+| | wire | gzip | to objects |
+|---|---:|---:|---:|
+| JSON + `JSON.parse` | 106 670 B | 12 124 B | 0.26 ms |
+| colbin + `codec.unmarshal` | 30 475 B | 3 250 B | 0.14 ms |
 
-`wire` and `column` have no reflection and no type registry — they are driven by
-a caller that already knows the Go type, which is what `codec.Generate` emits.
-
-### The column codec
-
-An integer column is a transform — raw, delta, frame-of-reference or constant —
-then blocks of 128 residuals packed at an exact bit width chosen per block. 128
-values at `w` bits is exactly `16w` bytes, so a block is byte-aligned at both
-ends and no state crosses a boundary.
-
-| 256 × int64 | raw | encoded |
-|---|---:|---:|
-| monotonic ids | 2048 B | 171 B |
-| timestamps | 2048 B | 235 B |
-| all zeros | 2048 B | 3 B |
-| random | 2048 B | 2051 B |
-
-1.3 ns per element to decode, 3.5 to encode.
-
-## Benchmarks
-
-Every comparative number in this README — the tables at the top, the corpus
-sizes above — is produced by a **separate repository**:
-
-**→ [github.com/ivanjoz/colbin-benchmarks][bench-repo]**
+### Reproducing
 
 ```sh
-git clone https://github.com/ivanjoz/colbin-benchmarks
-cd colbin-benchmarks
-go test ./bench -bench . -benchmem       # the timing tables
-go test ./bench -run CorpusSizes -v      # the size comparison
+git clone https://github.com/ivanjoz/colbin-benchmarks && cd colbin-benchmarks
+go test ./bench -run FormatSizes -v          # sizes, and round-trip checks
+go test ./bench -bench Formats -benchmem     # timings
 ```
 
-### Why it is a separate repository
+The corpus is generated deterministically by `corpus.Generate`, and that
+repository pins it with a SHA-256 checksum. Comparative benchmarks live there
+so that colbin's `go.mod` stays free of protobuf.
 
-Because a dependency you do not use still costs you something. protobuf was only
-ever imported by those benchmarks and by the tool that generates their input —
-never by a line of colbin itself. A consumer never downloaded it either; Go
-fetches only modules whose packages are actually imported.
+## Limitations
 
-But `require google.golang.org/protobuf` in this `go.mod` still reached them:
-it became a minimum-version constraint in their build, a line in their `go.sum`,
-an entry in `go mod graph`, and a row in whatever dependency audit their
-employer runs. That is a real cost to charge someone for a comparison they are
-not running, and "zero dependencies" is not a claim you can make with an asterisk
-attached.
+- **K4 messages cannot skip unknown fields.** Adding a field to a type whose
+  ids are all in 1–16 requires deploying the producer and the consumer
+  together. Untagged types, ids above 16, or an `any` field put the type on K8.
+- **Untagged ids depend on field names and declaration order**, as described
+  under [Field ids](#field-ids-tags-are-optional).
+- **Not supported yet:** fixed-size arrays, `map[K]*Struct` and `map[any]T`.
+  `int` and `uint` are encoded as 64-bit.
+- **An empty slice and a nil slice are the same on the wire.** Both decode as
+  nil, and a pointer to an empty slice decodes as a nil pointer.
+- **No compatibility promise across minor versions while on `0.x`.** Every
+  side must run the same version, and a mismatch shows up as corrupt data
+  rather than a version error.
+- **Known implementation gaps** are listed in
+  [INTERNALS §20](INTERNALS.md#20-known-gaps). For example, the Rust reader
+  does not yet handle a pointer to a struct (op 27), or narrow maps.
 
-So it moved, and CI here fails if it ever comes back — the check inspects the
-module graph rather than just building, because a test-only dependency compiles
-fine and still shows up downstream.
+## Implementations
 
-### The corpus is pinned, not just generated
-
-`corpus.Generate` is deterministic, but the benchmarks repository does not rely
-on that alone. It materialises the corpus as canonical JSON and pins all three
-scales with SHA-256, so a reported measurement names the exact dataset that
-produced it — verifiable with `sha256sum`, no Go required.
-
-Two things make that worth the trouble. Go's compatibility promise does not
-cover the `math/rand` bit stream in writing; it is stable because changing it
-would break too much, which is why `math/rand/v2` shipped as a new package
-rather than a fix to the old one. And `corpus.Event` carries a
-`map[string]string` — Go randomises map iteration order, so the *colbin* bytes
-for the Events table are not stable run to run, while `encoding/json` sorts map
-keys and the JSON is. The checksum only means something because of that second
-fact, and there is a test in that repository asserting it.
-
-## Documents
-
-- `BYTE_ALIGNED_PLAN.md` — the design, its measurements, and what is still open
-- `RATIONALE.md` — the decisions, including the ones the measurements reversed
-  and the optimisations that did not pay
-- `wire/README.md`, `column/README.md` — the layouts
-- `rust/README.md` — the Rust port
-- `js/README.md` — the npm package, and the numbers the browser client hits
-- `PACKAGE_PLAN.md` — why the client decodes to objects without JSON text
-- [colbin-benchmarks][bench-repo] — the comparison against protocol buffers, and
-  the corpus materialised and pinned by checksum
-
-## Rust
-
-`rust/` is the same format in Rust: the wire at all three key framings, the
-column codec, packed5, and a `#[derive(Colbin)]` that emits the straight-line
-encode and decode rather than a reflective walk.
+| | location | notes |
+|---|---|---|
+| Go | the repository root | the reference implementation: reflection codec, `Codec[T]`, code generator, schema section, JSON rendering |
+| Rust | `rust/` | `#[derive(Colbin)]` emits straight-line encode and decode; JSON → colbin encoder with schema inference ([`rust/ENCODER.md`](rust/ENCODER.md)) |
+| JavaScript | `js/`, npm `colbin` | the Rust crate compiled to WebAssembly; decodes to objects, columns or JSON text, encodes from JSON |
 
 ```rust
 #[derive(Colbin)]
@@ -561,52 +476,57 @@ struct Charge {
     #[cb(1)] company_id: u32,
     #[cb(2)] note: String,
 }
-```
-
-The two ports are pinned to each other rather than to a description.
-`rust/vectors/main.go` writes a corpus with the Go codecs — the messages, the
-field ids and the columns — and the Rust tests assert both directions against
-it, so neither side can move without the other failing.
-
-```sh
-go run ./rust/vectors && go test ./rust/vectors
-cargo test -p colbin --features derive
-```
-
-## JavaScript, in the browser and on Node
-
-`js/` is the client: the Rust implementation compiled to WebAssembly, published
-to npm as [`colbin`](https://www.npmjs.com/package/colbin), with a wrapper that
-turns a message into JavaScript objects **without JSON text in the middle**.
-
-```sh
-npm install colbin
+let message = charge.encode();
+let back = Charge::decode(&message)?;
 ```
 
 ```js
 import { Codec } from 'colbin'
-
 const codec = await Codec.open()
-codec.setSchema(section)                 // sent once per connection
-const rows = codec.unmarshal(message)    // objects, no JSON.parse
+codec.setSchema(section)
+const rows = codec.unmarshal(message)
 ```
 
-A thousand product records decode to objects in 0.14 ms, against 0.26 ms for
-`JSON.parse` on the same data — from 3.5x fewer bytes on the wire, and exactly
-past 2^53, which `JSON.parse` is not. `js/README.md` has the whole surface and
-the measurements; the demo at [colbin.un.pe](https://colbin.un.pe) is a consumer
-of the published package rather than a copy of it.
+The implementations are pinned to each other with test corpora that Go writes:
+- **Rust** decodes Go's bytes, encodes the same bytes from the same values, and
+  renders every document walk to Go's exact JSON.
+- **JavaScript** does the same for every type in its corpus, and refuses every
+  single-byte corruption that Go refuses.
+- **CI** regenerates each corpus and fails on any difference.
 
-## Status
+([INTERNALS §18](INTERNALS.md#18-keeping-three-implementations-in-step))
 
-Alpha. The wire format is settled, the Go façade covers everything in the table
-above, and the Rust port covers the same ground — including the schema section,
-which it now both writes and reads. An `any` is carried as a dynamic value; an
-interface with methods is not.
+## Where it is used
 
-One tag drives all three implementations, and while on `0.x` there is no
-wire-compatibility promise across minor versions: a Go service on 0.3 and a
-browser on 0.2 will not interoperate, and the failure looks like corrupt data
-rather than a version error. Pin both.
+colbin is used in [Genix](https://github.com/ivanjoz/genix), a self-hostable
+ERP and e-commerce platform:
+
+- **Backups.** Tenant data exports, one `.colbin.zstd` entry per batch of
+  table rows.
+- **[genix-orm](https://github.com/ivanjoz/genix-orm).** Struct, slice and map
+  columns stored as colbin blobs in ScyllaDB, and whole records in DynamoDB.
+- **Configuration and sessions.** The per-company configuration document, and
+  the session token.
+- **Next:** responses from the Genix backend to its frontend, through the npm
+  package.
+
+Two more projects use it:
+
+- **[fareward](https://github.com/ivanjoz/fareward)**, inside Genix: framing
+  between the Go client and the Rust services (credits, locks, budgets, the
+  request log). Go uses `Codec[T]` and Rust uses `#[derive(Colbin)]`.
+- **[genix-search](https://github.com/ivanjoz/genix-search)**: query requests
+  and responses.
+
+## Documents
+
+| | |
+|---|---|
+| [`INTERNALS.md`](INTERNALS.md) | the format bit by bit, the Go codec, the Rust crate, the WebAssembly module, the npm package, cross-language testing and release |
+| [`RATIONALE.md`](RATIONALE.md) | the decisions and the measurements behind them, including reverted ones |
+| [`rust/README.md`](rust/README.md) | the Rust crate and its derive |
+| [`rust/ENCODER.md`](rust/ENCODER.md) | encoding JSON to colbin: inference, refusals, warnings |
+| [`js/README.md`](js/README.md) | the npm package |
+| [colbin-benchmarks][bench-repo] | the comparative benchmarks and the pinned corpus |
 
 [bench-repo]: https://github.com/ivanjoz/colbin-benchmarks
