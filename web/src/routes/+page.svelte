@@ -32,7 +32,7 @@
 
   // Which of `unmarshal`'s two paths this example's shape takes — a table at
   // the root gets the materializer, anything else the JSON-text fallback.
-  // PACKAGE_PLAN.md §5.
+  // INTERNALS.md §16.3.
   let unmarshalPath = $state<'materialize' | 'json' | undefined>()
   let unmarshalMs = $state(0)
 
@@ -82,8 +82,8 @@
 
     // Run together rather than one after the other: both go through the one
     // handle `$lib/codec` holds, and firing them at once is what shows that
-    // sharing a handle across concurrent callers is safe (PACKAGE_PLAN.md
-    // §6.1) — each call is a synchronous run of wasm calls with nothing in the
+    // sharing a handle across concurrent callers is safe (INTERNALS.md
+    // §16.2) — each call is a synchronous run of wasm calls with nothing in the
     // middle for the other to interleave into.
     const unmarshalStarted = performance.now()
     const [inspected, unmarshaled] = await Promise.all([

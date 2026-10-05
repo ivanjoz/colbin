@@ -1,9 +1,9 @@
-// The `Codec` handle — PACKAGE_PLAN.md §6.
+// The `Codec` handle — INTERNALS.md §16.2.
 //
 // Everything the module can do hangs off one instance, and the instance is
 // what holds the schema. That is the shape the format's recommended delivery
 // already implies: a section is sent once per connection, so the thing that
-// parses it should outlive the message that follows it (§6.1).
+// parses it should outlive the message that follows it.
 //
 // # Why the operations are synchronous
 //
@@ -120,8 +120,8 @@ export type MarshalOptions = {
   /**
    * Decode the message that was just built and walk it against the input
    * before handing it back, failing rather than returning bytes that do not
-   * read back. Off by default: it costs about 70% on top of the encode
-   * (PACKAGE_PLAN.md §2.2), and what it catches is a codec bug rather than a
+   * read back. Off by default: it costs about 70% on top of the encode, and
+   * what it catches is a codec bug rather than a
    * caller's mistake. Worth turning on in a test suite, and in the first
    * deployment of anything whose shapes are new.
    */
@@ -140,7 +140,7 @@ export type DecodeOptions = {
 }
 
 /** Which path a call took. `materialize` never writes JSON text; `json` is the
- * fallback for anything that is not the table shape §5 covers. */
+ * fallback for anything that is not the table shape INTERNALS.md §16.3 covers. */
 export type Path = 'materialize' | 'json'
 
 const encoder = new TextEncoder()
@@ -195,8 +195,8 @@ export class Codec {
     this.#held = section && section.length > 0 ? section : null
   }
 
-  /** Which path the last {@link unmarshal} took. §5.4: a caller that wants to
-   * know it landed on the slow one should not have to guess. */
+  /** Which path the last {@link unmarshal} took: a caller that wants to know
+   * it landed on the slow one should not have to guess. */
   get lastPath(): Path {
     return this.#lastPath
   }
@@ -236,7 +236,7 @@ export class Codec {
    * The columns themselves, for a caller feeding a grid or a chart that never
    * wants row objects — it skips even the 7 µs the row build costs.
    *
-   * Returns `null` when the message is not the table shape §5 covers, since
+   * Returns `null` when the message is not the table shape the fast path covers, since
    * there is no honest column view of a nested document; such a caller should
    * fall back to {@link unmarshal}.
    */
@@ -326,7 +326,7 @@ export class Codec {
     return typeof this.#exports.inspect_message === 'function'
   }
 
-  /** Whether this handle's module carries §5's fast path. True of every build
+  /** Whether this handle's module carries the fast path. True of every build
    * this package ships; false only for a module a caller supplied. */
   get canMaterialize(): boolean {
     return typeof this.#exports.materialize === 'function'
@@ -376,7 +376,7 @@ export class Codec {
     )
   }
 
-  /** Turns the ABI's negative length into the thrown error §6 promises. */
+  /** Turns the ABI's negative length into the thrown `ColbinError`. */
   #call(length: number): number {
     if (length < 0) throw new ColbinError(this.#diagnostic())
     return length
@@ -392,7 +392,7 @@ export class Codec {
    * the handle's own otherwise.
    *
    * Compared by identity, not by content: re-parsing a section the instance
-   * already holds is exactly the cost §6.1 says a handle exists to avoid, and
+   * already holds is exactly the cost a handle exists to avoid, and
    * a caller who mutates a section's bytes in place and passes the same object
    * again is not a case worth a memcmp per message.
    */
@@ -479,7 +479,7 @@ export type CodecEntry = {
  * connection to hold a schema for.
  *
  * They share one lazily-opened codec rather than opening a fresh one per call:
- * a fresh instance per message is what §6.1 argued against, and none of these
+ * a fresh instance per message is what the handle exists to avoid, and none of these
  * hold a schema across calls, so there is nothing for the sharing to leak.
  */
 export function convenience(entry: CodecEntry): Convenience {

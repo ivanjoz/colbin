@@ -31,7 +31,7 @@ struct Charge {
 }
 
 #[test]
-fn the_benchmark_record_is_the_bytes_the_plan_documents() {
+fn the_benchmark_record_is_the_bytes_internals_documents() {
     let charge = Charge {
         company_id: 7,
         user_id: 42,
@@ -41,8 +41,8 @@ fn the_benchmark_record_is_the_bytes_the_plan_documents() {
         ..Charge::colbin_zero()
     };
     let message = charge.encode();
-    // BYTE_ALIGNED_PLAN.md §2.6's worked example, ten bytes rather than its
-    // twelve: an unsigned field spends no sign bit, so all sixteen nibble codes
+    // The benchmark record in ten bytes: an unsigned field spends no sign bit
+    // (INTERNALS.md §3.1), so all sixteen nibble codes
     // carry information and 0..=7 are the value itself. 7 and 5 are therefore a
     // whole field in one byte each. The same bytes are pinned against Go in
     // tests/vectors.rs under `charge.benchmark`.

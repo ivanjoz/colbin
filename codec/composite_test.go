@@ -31,8 +31,9 @@ func TestNestedStructsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A composite no longer forces the wide width: §2.5's narrow composite
-	// nibble carries the byte length with the class coming from the schema.
+	// A composite no longer forces the wide width: the narrow composite nibble
+	// (INTERNALS.md §3.2) carries the byte length with the class coming from
+	// the schema.
 	if message[0] != rootStructNarrow {
 		t.Fatalf("root is %#02x, want the narrow descriptor", message[0])
 	}

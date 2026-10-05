@@ -1,5 +1,5 @@
 // The package as a consumer receives it: the built `dist/`, all three entries,
-// and the `Codec` handle's whole surface — PACKAGE_PLAN.md §4 and §6.
+// and the `Codec` handle's whole surface — INTERNALS.md §16.
 //
 // These import `../dist/*.js` rather than `../src/*.ts`, which is the point:
 // everything else in this directory tests the module, and this tests the
@@ -33,7 +33,7 @@ const tableText = textOf(table)
  * a browser can do, and what Node cannot: `fetch` refuses a `file:` URL
  * outright. So the URL is asserted to point at a real file and the bytes are
  * handed to `open` directly. The fetch itself is exercised for real by the
- * demo site, through Vite, in `web/tests/browser.mjs` (§9).
+ * demo site, through Vite, in `web/tests/browser.mjs`.
  */
 const entries = [
   { name: 'colbin (inline)', open: () => inlineEntry.Codec.open() },
@@ -88,7 +88,7 @@ test('the handle holds a schema across messages', async () => {
   const { message, section } = codec.marshal(tableText)
   codec.setSchema(section)
   // Twice, because the second call is the one that exercises the instance
-  // already holding the parsed section rather than re-parsing it (§6.1).
+  // already holding the parsed section rather than re-parsing it (INTERNALS.md §16.2).
   assert.deepEqual(codec.unmarshal(message), table.json)
   assert.deepEqual(codec.unmarshal(message), table.json)
 

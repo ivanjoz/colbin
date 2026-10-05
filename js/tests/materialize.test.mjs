@@ -58,7 +58,7 @@ for (const name of [
 
 test('a non-ASCII table exercises the per-string decode fallback', () => {
   // An all-ASCII corpus would never reach the byte-offset-vs-UTF-16-offset
-  // trap §5.3 calls out, so this is its own fixture rather than reused text.
+  // trap, so this is its own fixture rather than reused text.
   const json = JSON.stringify(
     Array.from({ length: 9 }, (_, i) => ({
       id: i,

@@ -60,7 +60,7 @@ func agreesWithEncodingJSON[T any](t *testing.T, name string, rows []T, sample i
 	}
 }
 
-// Phase 3 and 4: the flat records and the nested one, over real-shaped data
+// The flat records and the nested one, over real-shaped data
 // rather than over a literal chosen to pass.
 func TestJSONAgreesWithEncodingJSONAcrossTheCorpus(t *testing.T) {
 	built := Generate(Seed, Small)
@@ -73,7 +73,7 @@ func TestJSONAgreesWithEncodingJSONAcrossTheCorpus(t *testing.T) {
 	agreesWithEncodingJSON(t, "metrics", built.Metrics, 40)
 }
 
-// Phase 5: the same sale type in both layouts. The corpus straddles the table
+// The same sale type in both layouts. The corpus straddles the table
 // threshold on purpose, so this picks one of each rather than hoping.
 func TestJSONReadsBothSaleLayouts(t *testing.T) {
 	const threshold = 8 // codec.tableThreshold
@@ -120,7 +120,7 @@ func TestSelfDescribingSalesAcrossTheCorpus(t *testing.T) {
 	}
 }
 
-// Phase 9's size table: what a schema costs, against what it describes.
+// The size table: what a schema costs, against what it describes.
 //
 // It prints rather than asserts, because the numbers are the deliverable:
 // `go test ./corpus -run ReportSchema -v` is how you see whether a section is
@@ -172,7 +172,7 @@ func meanSize[T any](t *testing.T, rows []T) float64 {
 	return float64(total) / float64(len(rows))
 }
 
-// Phase 9's benchmarks: the JSON walk against encoding/json, on the same rows.
+// The JSON walk against encoding/json, on the same rows.
 //
 // The comparison is not quite like for like and is worth having anyway.
 // encoding/json starts from a Go struct; this starts from bytes on a wire, which

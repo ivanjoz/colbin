@@ -1,6 +1,6 @@
 // The default entry: the module travels inside the JavaScript.
 //
-// PACKAGE_PLAN.md §3 — inline base64 is the default because it needs no
+// INTERNALS.md §16.1 — inline base64 is the default because it needs no
 // bundler configuration and has no runtime 404 mode. A consumer who would
 // rather ship the `.wasm` as an asset imports `colbin/asset`, and one running
 // on Node resolves the package's `node` condition instead, which reads the

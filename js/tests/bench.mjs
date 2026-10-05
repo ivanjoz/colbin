@@ -81,7 +81,7 @@ for (let round = 0; round < 12; round++) decodes.push(decodeOnce())
 decodes.sort((a, b) => a - b)
 
 /** The fast path end to end: wasm's column gather plus the JS row builder —
- * PACKAGE_PLAN.md §5.1's calibration, kept live rather than measured once. */
+ * INTERNALS.md §16.3, kept live rather than measured once. */
 function materializeOnce() {
   const e = fresh()
   let at = e.alloc(section.length)
@@ -142,7 +142,7 @@ console.log(`JSON.parse        ${pad(parse)} ms   ${against(encode, parse)} for 
 console.log(`JSON.stringify    ${pad(stringify)} ms   ${against(decodes[0], stringify)} for colbin decode`)
 console.log(`JSON.parse        ${pad(parse)} ms   ${against(materializes[0], parse)} for colbin materialize`)
 
-// PACKAGE_PLAN.md §10: the regression gate, for CI.
+// INTERNALS.md §19: the regression gate, for CI.
 //
 // The threshold is a *ratio* against `JSON.parse` measured in the same process
 // on the same data, never a millisecond figure — a shared runner's absolute
@@ -158,7 +158,7 @@ if (process.argv.includes('--check')) {
   if (ratio > ceiling) {
     console.error(
       `materialize is ${ratio.toFixed(2)}x JSON.parse, over the ${ceiling}x ceiling — ` +
-        'PACKAGE_PLAN.md §2 is the whole justification for this design, so this fails the build',
+        'INTERNALS.md §16.3 is the whole justification for this design, so this fails the build',
     )
     process.exit(1)
   }

@@ -222,7 +222,7 @@ fn a_truncated_table_message_is_refused_rather_than_panicking() {
     }
 }
 
-/// PACKAGE_PLAN.md §9's case: an integer past 2^53, which `JSON.parse` would
+/// INTERNALS.md §16.3's case: an integer past 2^53, which `JSON.parse` would
 /// have rounded before a JS caller ever saw it. Built by hand because the
 /// corpus's own table cases do not happen to carry one.
 #[test]

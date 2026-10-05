@@ -46,8 +46,7 @@ package wire
 // path: a LIST, or a TABLE with the columns transposed. Two bytes for the whole
 // array, and the rows cost what they cost in a typed field.
 //
-// This is the `ANY` door BYTE_ALIGNED_PLAN.md §2.6 reserved, spent on the thing
-// it was reserved for.
+// INTERNALS.md §9 lists every kind and what it is written as.
 //
 // # None of it exists at four key bits
 //

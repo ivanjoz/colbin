@@ -36,7 +36,7 @@ use crate::wire::{Reader, Reader8, Writer, Writer8};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// Root descriptors, from `BYTE_ALIGNED_PLAN.md` §2.1. Both are even and above
+/// Root descriptors; `INTERNALS.md` §2.1 lists them. Both are even and above
 /// 0x90, which is what no message the old format wrote could begin with — so an
 /// old reader rejects a new message rather than misparsing it.
 pub const ROOT_STRUCT_NARROW: u8 = 0xD0;

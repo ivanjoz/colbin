@@ -1,7 +1,7 @@
 //! A second sink beside [`crate::json`]: columns into a flat buffer instead of
 //! decimal text, for a caller that can build its own objects from typed views.
 //!
-//! Mirrors `PACKAGE_PLAN.md` §5 in the browser package this crate feeds. Only
+//! Mirrors `INTERNALS.md` §16.3 in the browser package this crate feeds. Only
 //! the table shape is covered — a root wrapped in the one-field envelope
 //! (`Plan::is_envelope`), whose field is an array of structs the wire actually
 //! encoded as a transposed table ([`crate::wire::Reader::is_table`]). Every

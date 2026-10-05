@@ -9,8 +9,8 @@ fields before it runs. So the rules live here, and the implementation in
 `rust/tests/{parse,infer,build,verify}.rs`.
 
 They were written for the AssemblyScript module this replaced (`web/PLAN.md` §3
-and §4, and `web/REFACTOR_PLAN.md` §5.1–5.2, both deleted with it in
-`RUST_WASM_PLAN.md` phase 8). The rules did not change with the language: a
+and §4, and `web/REFACTOR_PLAN.md` §5.1–5.2, both deleted with it when
+`rust/wasm` replaced it). The rules did not change with the language: a
 document has to infer to the same schema in either, or the same input encodes to
 different bytes.
 
