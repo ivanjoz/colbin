@@ -71,23 +71,26 @@ func TestBoolIsOneByte(t *testing.T) {
 	}
 }
 
-// The header holds eleven bits of size, and past that its three size bits name
-// the width of the size that follows instead, so there is no size a string
-// cannot carry and the escape costs two bytes rather than four.
+// A string of up to eight bytes is sized by its nibble and carries no length at
+// all. Past that it is the length form, whose length is one byte to 253, then
+// 0xFE and a u16, then 0xFF and a u32 — so there is no size a string cannot
+// carry, and every step costs only what the size needs.
 func TestStringSizes(t *testing.T) {
 	for _, size := range []int{
-		1, 200, inlineBlobSize, inlineBlobSize + 1, 70_000, 300_000, 1 << 22,
+		1, 8, 9, 200, inlineLength, inlineLength + 1, 0xFFFF, 0x1_0000, 300_000, 1 << 22,
 	} {
 		value := strings.Repeat("x", size)
 		writer := Writer{}
 		writer.String(2, value)
-		header := 2 // [key|more|size hi][size lo]
+		header := 1 // [key|nibble], the nibble sizing the string
 		switch {
-		case size <= inlineBlobSize:
+		case size <= maxSized:
+		case size <= inlineLength:
+			header = 2 // [key|1100][length]
 		case size <= 0xFFFF:
-			header = 3 // [key|more|escape] then two bytes
+			header = 4 // [key|1100][0xFE][u16]
 		default:
-			header = 5 // ... then four
+			header = 6 // [key|1100][0xFF][u32]
 		}
 		if len(writer.Buffer) != header+size {
 			t.Fatalf("size %d wrote %d bytes, want %d", size, len(writer.Buffer), header+size)
@@ -98,6 +101,10 @@ func TestStringSizes(t *testing.T) {
 		}
 		if reader.More() {
 			t.Fatalf("size %d: trailing bytes", size)
+		}
+		reader = NewReader(writer.Buffer)
+		if got := reader.Bytes(); string(got) != value {
+			t.Fatalf("size %d read as bytes gave %d bytes", size, len(got))
 		}
 	}
 }
@@ -142,42 +149,111 @@ func TestNothingHasASizeCeiling(t *testing.T) {
 }
 
 // A size is what an unauthenticated peer controls. There is no continuation run
-// to make unbounded any more — the header names the size's width outright — so
-// what is left to refuse is a size larger than this platform can address, an
-// escape code this version does not assign, and a size the message does not
-// contain.
+// to make unbounded — the length's first byte names its width outright — so what
+// is left to refuse is a length the message does not contain, a length whose own
+// bytes are not all there, and a form the read at hand does not take.
 func TestARunawaySizeIsRefused(t *testing.T) {
-	// Key 1, more flag, the eight-byte escape, then a size filling all of it —
-	// past the address space at either int width.
-	message := []byte{0b0001_1000 | escape8Bytes}
-	for range 8 {
-		message = append(message, 0xFF)
-	}
-	reader := NewReader(message)
-	reader.Bytes()
-	if reader.Err() != ErrSizeTooLarge {
-		t.Fatalf("a size past the address space gave %v", reader.Err())
-	}
-
-	// An escape code this version does not assign.
-	reader = NewReader([]byte{0b0001_1000 | 5, 0, 0, 0, 0})
-	reader.Bytes()
-	if reader.Err() != ErrBadEscape {
-		t.Fatalf("an unassigned escape gave %v", reader.Err())
-	}
-
-	// A size the message does not contain.
-	reader = NewReader([]byte{0b0001_1000 | escape4Bytes, 0xFF, 0xFF, 0x00, 0x00})
+	// Key 1, the length form, the u32 escape and a length past the message. The
+	// length is kept under 2^31 so a 32-bit build, where a larger one is past
+	// what the platform can address and refused as ErrSizeTooLarge first, tests
+	// the same thing.
+	reader := NewReader([]byte{0x1C, length32, 0xFF, 0xFF, 0xFF, 0x7F})
 	reader.Bytes()
 	if reader.Err() != ErrTruncated {
-		t.Fatalf("a size past the message gave %v", reader.Err())
+		t.Fatalf("a length past the message gave %v", reader.Err())
 	}
-
-	// And an escape whose own bytes are not all there.
-	reader = NewReader([]byte{0b0001_1000 | escape4Bytes, 0xFF})
+	reader = NewReader([]byte{0x1C, length16, 0xFF, 0xFF, 0})
 	reader.Bytes()
 	if reader.Err() != ErrTruncated {
-		t.Fatalf("a truncated escape gave %v", reader.Err())
+		t.Fatalf("a u16 length past the message gave %v", reader.Err())
+	}
+
+	// An escape whose own bytes are not all there.
+	for _, message := range [][]byte{{0x1C, length32, 0xFF}, {0x1C, length16, 0xFF}, {0x1C}} {
+		reader = NewReader(message)
+		reader.Bytes()
+		if reader.Err() != ErrTruncated {
+			t.Fatalf("% x gave %v", message, reader.Err())
+		}
+	}
+
+	// A sized field whose bytes are not all there.
+	reader = NewReader([]byte{0x1B, 1, 2, 3})
+	reader.Uint()
+	if reader.Err() != ErrTruncated {
+		t.Fatalf("an eight-byte field holding three gave %v", reader.Err())
+	}
+
+	// Forms the read does not take: a string with no payload, the flags `11` on a
+	// string, a packed string read as bytes, a length form on an unsigned field
+	// that is not an explicit zero, and an integer array sized by the nibble.
+	for _, refused := range []struct {
+		message []byte
+		read    func(*Reader)
+	}{
+		{[]byte{0x10}, func(r *Reader) { _ = r.String() }},
+		{[]byte{0x13}, func(r *Reader) { r.Bytes() }},
+		{[]byte{0x1F, 1, 'x'}, func(r *Reader) { _ = r.String() }},
+		{[]byte{0x1D, 1, 0}, func(r *Reader) { r.Bytes() }},
+		{[]byte{0x1C, 1, 5}, func(r *Reader) { r.Uint() }},
+		{[]byte{0x1D, 0}, func(r *Reader) { r.Uint() }},
+		{[]byte{0x1D, 0}, func(r *Reader) { r.Int() }},
+		{[]byte{0x14, 5}, func(r *Reader) { r.Ints(nil) }},
+		{[]byte{0x1D, 0}, func(r *Reader) { r.Strings(nil) }},
+		{[]byte{0x1E, 0}, func(r *Reader) { r.StructBody() }},
+	} {
+		reader = NewReader(refused.message)
+		refused.read(&reader)
+		if reader.Err() != ErrBadEscape {
+			t.Fatalf("% x gave %v", refused.message, reader.Err())
+		}
+		// A form a read refuses is still a field a skip steps over.
+		reader = NewReader(refused.message)
+		if !reader.Skip() || reader.More() {
+			t.Fatalf("% x could not be skipped: %v", refused.message, reader.Err())
+		}
+	}
+
+	// A length that is not a whole number of elements.
+	reader = NewReader([]byte{0x1D, 3, 1, 2, 3})
+	reader.Int16s(nil)
+	if reader.Err() != ErrTruncated {
+		t.Fatalf("three bytes of two-byte elements gave %v", reader.Err())
+	}
+
+	// A negative magnitude wider than an int64.
+	reader = NewReader([]byte{0x1C, 9, 1, 0, 0, 0, 0, 0, 0, 0, 0})
+	reader.Int()
+	if reader.Err() != ErrFieldTooWide {
+		t.Fatalf("a nine-byte negative magnitude gave %v", reader.Err())
+	}
+	reader = NewReader([]byte{0x1C, 8, 1, 0, 0, 0, 0, 0, 0, 0x80})
+	reader.Int()
+	if reader.Err() != ErrFieldTooWide {
+		t.Fatalf("-(2^63+1) gave %v", reader.Err())
+	}
+}
+
+// Writers use the shortest length; readers take any. A length written longer
+// than it needs to be reads the same, which is what lets a writer that cannot
+// know a length in advance reserve room for it.
+func TestALongerLengthFormReadsTheSame(t *testing.T) {
+	for _, message := range [][]byte{
+		{0x1C, 3, 'a', 'b', 'c'},
+		{0x1C, length16, 3, 0, 'a', 'b', 'c'},
+		{0x1C, length32, 3, 0, 0, 0, 'a', 'b', 'c'},
+		{0x16, 'a', 'b', 'c'},
+	} {
+		reader := NewReader(message)
+		if got := reader.String(); got != "abc" || reader.Err() != nil || reader.More() {
+			t.Fatalf("% x read as %q, %v", message, got, reader.Err())
+		}
+	}
+	for _, message := range [][]byte{{0x1C, 0}, {0x1C, length16, 0, 0}, {0x1C, length32, 0, 0, 0, 0}} {
+		reader := NewReader(message)
+		if got := reader.Uint(); got != 0 || reader.Err() != nil || reader.More() {
+			t.Fatalf("% x read as %d, %v", message, got, reader.Err())
+		}
 	}
 }
 
@@ -252,9 +328,9 @@ func TestBigArrayCount(t *testing.T) {
 	writer := Writer{}
 	writer.Ints(1, values)
 	// One width for the whole array: the widest element is 299, so every element
-	// costs two bytes, behind a five-byte header — one for the flags and four for
-	// a count past 255.
-	if want := 5 + 300*2; len(writer.Buffer) != want {
+	// costs two bytes, behind a four-byte header — the key and flags, then 0xFE
+	// and a u16 for a length past 253.
+	if want := 4 + 300*2; len(writer.Buffer) != want {
 		t.Fatalf("300 elements took %d bytes, want %d", len(writer.Buffer), want)
 	}
 	reader := NewReader(writer.Buffer)
@@ -316,32 +392,40 @@ func TestTruncatedMessagesAreRefused(t *testing.T) {
 			t.Fatalf("a cut at %d of %d: refused %v, between fields %v",
 				cut, len(full), refused, between[cut])
 		}
+		// A reader that knows none of the keys steps over every field, and has
+		// to refuse exactly the same cuts: a skip sizes a field as a read does.
+		reader = NewReader(full[:cut])
+		for reader.More() && reader.Skip() {
+		}
+		if refused := reader.Err() != nil; refused == between[cut] {
+			t.Fatalf("skipping, a cut at %d of %d: refused %v, between fields %v",
+				cut, len(full), refused, between[cut])
+		}
 	}
 }
 
-// Every unsigned nibble code is assigned: 0..7 are the value itself and 8..15
-// are byte counts one through eight.
-//
-// Because there is no sign bit to spend, the widths are exact — a seven-byte
-// magnitude costs seven bytes, where the signed form still rounds it up to
-// eight.
+// The nibble is a size, and an unsigned value takes the fewest bytes that hold
+// it: 1..4 ride in the nibble, and past that nibble 4..11 is exactly one to
+// eight bytes. Zero is not written, except explicitly, as the length form with
+// nothing in it.
 func TestEverySizeCodeIsAssigned(t *testing.T) {
 	for _, expect := range []struct {
 		magnitude uint64
-		code      uint8
-		width     int
+		nibble    uint8
+		payload   int
 	}{
-		{0, 0, 0}, // 0..7 ride in the nibble with no payload at all
-		{2, 2, 0},
-		{7, 7, 0},
-		{8, 8, 1}, // the first value that needs a byte
-		{1 << 8, 9, 2},
-		{1 << 16, 10, 3},
-		{1 << 24, 11, 4},
-		{1 << 32, 12, 5},
-		{1 << 40, 13, 6},
-		{1 << 48, 14, 7}, // exact, where the signed form rounds up to eight
-		{1 << 56, 15, 8},
+		{0, 12, 1}, // the explicit zero: 1100 and a length of nothing
+		{1, 0, 0},
+		{4, 3, 0},
+		{5, 4, 1}, // the first value that needs a byte
+		{255, 4, 1},
+		{1 << 8, 5, 2},
+		{1 << 16, 6, 3},
+		{1 << 24, 7, 4},
+		{1 << 32, 8, 5},
+		{1 << 40, 9, 6},
+		{1 << 48, 10, 7}, // exact at every width, seven included
+		{1 << 56, 11, 8},
 	} {
 		writer := Writer{}
 		// Key 1 with a zero value writes nothing, so the zero case goes through
@@ -351,15 +435,183 @@ func TestEverySizeCodeIsAssigned(t *testing.T) {
 		} else {
 			writer.Uint(1, expect.magnitude)
 		}
-		if got := writer.Buffer[0] & 0b1111; got != expect.code {
-			t.Fatalf("%#x used nibble code %d, want %d", expect.magnitude, got, expect.code)
+		if got := writer.Buffer[0] & 0b1111; got != expect.nibble {
+			t.Fatalf("%#x used nibble %d, want %d", expect.magnitude, got, expect.nibble)
 		}
-		if got := len(writer.Buffer) - 1; got != expect.width {
-			t.Fatalf("%#x wrote %d magnitude bytes, want %d", expect.magnitude, got, expect.width)
+		if got := len(writer.Buffer) - 1; got != expect.payload {
+			t.Fatalf("%#x wrote %d payload bytes, want %d", expect.magnitude, got, expect.payload)
 		}
 		reader := NewReader(writer.Buffer)
-		if got := reader.Uint(); got != expect.magnitude {
-			t.Fatalf("%#x round-tripped as %#x", expect.magnitude, got)
+		if got := reader.Uint(); got != expect.magnitude || reader.Err() != nil {
+			t.Fatalf("%#x round-tripped as %#x, %v", expect.magnitude, got, reader.Err())
+		}
+	}
+}
+
+// The signed table parts from the unsigned one at nibble 3, which is −1, and in
+// the length form, which carries a negative magnitude.
+func TestSignedForms(t *testing.T) {
+	for _, expect := range []struct {
+		value int64
+		bytes []byte
+	}{
+		{1, []byte{0x10}},
+		{3, []byte{0x12}},
+		{-1, []byte{0x13}},
+		{4, []byte{0x14, 4}},
+		{255, []byte{0x14, 0xFF}},
+		{256, []byte{0x15, 0, 1}},
+		{-2, []byte{0x1C, 1, 2}},
+		{-256, []byte{0x1C, 2, 0, 1}},
+		{math.MaxInt64, []byte{0x1B, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F}},
+		{math.MinInt64, []byte{0x1C, 8, 0, 0, 0, 0, 0, 0, 0, 0x80}},
+	} {
+		writer := Writer{}
+		writer.Int(1, expect.value)
+		if !bytes.Equal(writer.Buffer, expect.bytes) {
+			t.Fatalf("Int(%d) wrote % x, want % x", expect.value, writer.Buffer, expect.bytes)
+		}
+		writer = Writer{}
+		if expect.value == int64(int32(expect.value)) {
+			writer.I32(1, int32(expect.value))
+			if !bytes.Equal(writer.Buffer, expect.bytes) {
+				t.Fatalf("I32(%d) wrote % x, want % x", expect.value, writer.Buffer, expect.bytes)
+			}
+		}
+		reader := NewReader(expect.bytes)
+		if got := reader.Int(); got != expect.value || reader.Err() != nil {
+			t.Fatalf("% x read as %d, %v", expect.bytes, got, reader.Err())
+		}
+	}
+	// The explicit zero is the same bytes for a signed field as for every other.
+	writer := Writer{}
+	writer.Zero(1)
+	reader := NewReader(writer.Buffer)
+	if got := reader.Int(); got != 0 || reader.Err() != nil || reader.More() {
+		t.Fatalf("an explicit zero read as %d, %v", got, reader.Err())
+	}
+}
+
+// An integer array's width comes from the element type and the values: a signed
+// type is two's complement at the narrowest width that holds every element, an
+// unsigned one magnitudes at the narrowest that holds the largest. The length is
+// in bytes and the count is not written.
+func TestArrayForms(t *testing.T) {
+	for _, expect := range []struct {
+		name  string
+		write func(*Writer)
+		bytes []byte
+	}{
+		{"int8 range", func(w *Writer) { w.Ints(1, []int64{127, -128}) }, []byte{0x1C, 2, 0x7F, 0x80}},
+		{"past int8", func(w *Writer) { w.Ints(1, []int64{128}) }, []byte{0x1D, 2, 0x80, 0}},
+		{"past int8 below", func(w *Writer) { w.Int16s(1, []int16{-129}) }, []byte{0x1D, 2, 0x7F, 0xFF}},
+		{"uint16 to a byte", func(w *Writer) { w.Uint16s(1, []uint16{200}) }, []byte{0x1C, 1, 200}},
+		{"uint64 to a byte", func(w *Writer) { w.Uint64s(1, []uint64{200}) }, []byte{0x1C, 1, 200}},
+		{"uint64 top bit", func(w *Writer) { w.Uint64s(1, []uint64{1 << 63}) },
+			[]byte{0x1F, 8, 0, 0, 0, 0, 0, 0, 0, 0x80}},
+		{"int32 wide", func(w *Writer) { w.Int32s(1, []int32{-1, 1 << 20}) },
+			[]byte{0x1E, 8, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0x10, 0}},
+	} {
+		writer := Writer{}
+		expect.write(&writer)
+		if !bytes.Equal(writer.Buffer, expect.bytes) {
+			t.Fatalf("%s wrote % x, want % x", expect.name, writer.Buffer, expect.bytes)
+		}
+	}
+	// A []uint64 is magnitudes, so one past 2^63 reads back as itself, and one
+	// that fits a byte costs a byte.
+	reader := NewReader([]byte{0x1F, 8, 0, 0, 0, 0, 0, 0, 0, 0x80, 0x2C, 1, 200})
+	if got := reader.Uint64s(nil); len(got) != 1 || got[0] != 1<<63 {
+		t.Fatalf("[]uint64{1<<63} read as %v", got)
+	}
+	if got := reader.Uint64s(nil); len(got) != 1 || got[0] != 200 {
+		t.Fatalf("[]uint64{200} read as %v", got)
+	}
+	// And the same byte read as a signed type is sign-extended.
+	reader = NewReader([]byte{0x1C, 1, 200})
+	if got := reader.Int16s(nil); len(got) != 1 || got[0] != -56 {
+		t.Fatalf("0xC8 read as an int16 gave %v", got)
+	}
+}
+
+// A string array carries no count: the reader walks the sizes inside the field's
+// length, and an element that runs past it is refused rather than read into the
+// next field.
+func TestStringArrayForm(t *testing.T) {
+	writer := Writer{}
+	writer.Strings(1, []string{"ab", "", "c"})
+	if want := []byte{0x1C, 6, 2, 'a', 'b', 0, 1, 'c'}; !bytes.Equal(writer.Buffer, want) {
+		t.Fatalf("wrote % x, want % x", writer.Buffer, want)
+	}
+	reader := NewReader([]byte{0x1C, 3, 2, 'a', 'b', 0x20})
+	if got := reader.Strings(nil); len(got) != 1 || got[0] != "ab" || reader.Key() != 2 {
+		t.Fatalf("read %q", got)
+	}
+	reader = NewReader([]byte{0x1C, 3, 3, 'a', 'b', 0x20})
+	reader.Strings(nil)
+	if reader.Err() != ErrTruncated {
+		t.Fatalf("an element past its field gave %v", reader.Err())
+	}
+}
+
+// Every shape a narrow field can take is stepped over by Skip, landing exactly
+// on the field after it. This is the property the nibble exists for.
+func TestSkipStepsOverEveryShape(t *testing.T) {
+	writers := []func(*Writer){
+		func(w *Writer) { w.Uint(3, 2) },
+		func(w *Writer) { w.Uint(3, 1<<40) },
+		func(w *Writer) { w.Int(3, -1) },
+		func(w *Writer) { w.Int(3, -1_234_567) },
+		func(w *Writer) { w.Bool(3, true) },
+		func(w *Writer) { w.F64(3, 0.1) },
+		func(w *Writer) { w.String(3, "abc") },
+		func(w *Writer) { w.String(3, strings.Repeat("x", 300)) },
+		func(w *Writer) { w.String(3, strings.Repeat("x", 70_000)) },
+		func(w *Writer) { w.PackedString(3, "RESPONSES-GO-539") },
+		func(w *Writer) { w.Int32s(3, []int32{-1, 1 << 20}) },
+		func(w *Writer) { w.Strings(3, []string{"a", "", strings.Repeat("b", 300)}) },
+		func(w *Writer) { w.Zero(3) },
+		func(w *Writer) {
+			mark := w.OpenStruct(3)
+			w.String(0, strings.Repeat("s", 400))
+			w.Close(mark)
+		},
+		func(w *Writer) {
+			list := w.OpenList(3, 2)
+			for range 2 {
+				element := w.OpenElement()
+				w.Uint(0, 9)
+				w.CloseElement(element)
+			}
+			w.Close(list)
+		},
+		func(w *Writer) {
+			table := w.OpenTable(3, 3)
+			w.Column(0, []int64{1, 2, 3})
+			w.Strings(1, []string{"x", "y", "z"})
+			w.Close(table)
+		},
+		func(w *Writer) {
+			entries := w.OpenMap(3, 1)
+			w.ElementString("k")
+			w.ElementInt(-5)
+			w.Close(entries)
+		},
+	}
+	for index, write := range writers {
+		writer := Writer{}
+		writer.U16(1, 7)
+		write(&writer)
+		writer.String(2, "after")
+		reader := NewReader(writer.Buffer)
+		if reader.U16() != 7 || reader.Key() != 3 {
+			t.Fatalf("shape %d: the field before it read wrong", index)
+		}
+		if !reader.Skip() {
+			t.Fatalf("shape %d: %v", index, reader.Err())
+		}
+		if !reader.More() || reader.Key() != 2 || reader.String() != "after" || reader.More() {
+			t.Fatalf("shape %d: the skip landed wrong (% x)", index, writer.Buffer[:min(len(writer.Buffer), 32)])
 		}
 	}
 }
@@ -493,11 +745,12 @@ func TestALargeUnsignedElementIsNotMistakenForNegative(t *testing.T) {
 
 // The cross-language vector. The Rust port asserts these same three literals in
 // rust/src/wire.rs, so neither side can move without the other failing — and
-// the message is 3703 bytes, so it is pinned by its length, its first 64 bytes
+// the message is 3704 bytes, so it is pinned by its length, its first 64 bytes
 // and an FNV-1a of all of it rather than by pasted hex.
 //
-// It covers every shape the escaped sizes touch: an array count past its inline
-// byte, per-element lengths, and a blob past the eleven bits the header carries.
+// It covers every shape the lengths touch: a negative in the length form, a
+// string past one byte of length, per-element sizes, and an array whose length
+// takes the u16 escape.
 func TestTheCrossLanguageVector(t *testing.T) {
 	writer := Writer{}
 	writer.Int(0, -1234567)
@@ -513,27 +766,33 @@ func TestTheCrossLanguageVector(t *testing.T) {
 	writer.Ints(6, ids)
 	writer.String(7, strings.Repeat("z", 3000))
 
-	if len(writer.Buffer) != 3703 {
-		t.Fatalf("the vector is %d bytes, want 3703", len(writer.Buffer))
+	if len(writer.Buffer) != vectorLength {
+		t.Fatalf("the vector is %d bytes, want %d", len(writer.Buffer), vectorLength)
 	}
-	prefix := []byte{
-		0x03, 0x87, 0xD6, 0x12, 0x1D, 0x7B, 0xA8, 0xDA, 0x76, 0x9B, 0x01, 0x21, 0x30, 0x10,
-		0x72, 0x65, 0x73, 0x70, 0x6F, 0x6E, 0x73, 0x65, 0x73, 0x2E, 0x67, 0x6F, 0x3A, 0x35,
-		0x33, 0x39, 0x44, 0x03, 0x87, 0xD6, 0x12, 0x00, 0x4F, 0x34, 0x8B, 0xFF, 0x03, 0x00,
-		0x00, 0x00, 0x50, 0x03, 0x10, 0x72, 0x65, 0x73, 0x70, 0x6F, 0x6E, 0x73, 0x65, 0x73,
-		0x2E, 0x67, 0x6F, 0x3A, 0x35, 0x33, 0x39, 0x1E,
-	}
-	if !bytes.Equal(writer.Buffer[:64], prefix) {
-		t.Fatalf("the vector's first 64 bytes are %x", writer.Buffer[:64])
+	if !bytes.Equal(writer.Buffer[:64], vectorPrefix) {
+		t.Fatalf("the vector's first 64 bytes are %#v", writer.Buffer[:64])
 	}
 	var checksum uint64 = 14695981039346656037
 	for _, value := range writer.Buffer {
 		checksum ^= uint64(value)
 		checksum *= 1099511628211
 	}
-	if checksum != 0xCEBFF42A73FF1A4C {
+	if checksum != vectorChecksum {
 		t.Fatalf("the vector's FNV-1a is 0x%016X", checksum)
 	}
+}
+
+const (
+	vectorLength   = 3704
+	vectorChecksum = 0x0960B36FDCDB8B59
+)
+
+var vectorPrefix = []byte{
+	0x0C, 0x03, 0x87, 0xD6, 0x12, 0x19, 0x7B, 0xA8, 0xDA, 0x76, 0x9B, 0x01, 0x20, 0x3C,
+	0x10, 0x72, 0x65, 0x73, 0x70, 0x6F, 0x6E, 0x73, 0x65, 0x73, 0x2E, 0x67, 0x6F, 0x3A,
+	0x35, 0x33, 0x39, 0x4E, 0x0C, 0x87, 0xD6, 0x12, 0x00, 0x4F, 0x34, 0x8B, 0xFF, 0x03,
+	0x00, 0x00, 0x00, 0x5C, 0x31, 0x10, 0x72, 0x65, 0x73, 0x70, 0x6F, 0x6E, 0x73, 0x65,
+	0x73, 0x2E, 0x67, 0x6F, 0x3A, 0x35, 0x33, 0x39,
 }
 
 // TestNarrowListElementWidths pins the length form a list element takes at every

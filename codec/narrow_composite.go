@@ -9,11 +9,12 @@ package codec
 // One shape genuinely differs rather than merely repeating. A wide list's
 // element carries a descriptor and a length, because a wide reader may not know
 // what the element is. A narrow one carries a length alone — its shape is the
-// schema's to know — which is a byte per element, and the reason a narrow list
-// of small structs is smaller than a wide one rather than merely equal.
+// schema's to know, and the list's own length is what a reader that does not
+// know the field steps over — which is a byte per element, and the reason a
+// narrow list of small structs is smaller than a wide one rather than merely
+// equal.
 
 import (
-	"fmt"
 	"reflect"
 	"unsafe"
 
@@ -189,8 +190,8 @@ func readNarrowBody(parent *wire.Reader, body []byte, wideKeys bool, plan *typeP
 	parent.Fail(sub.Err())
 }
 
-// readNarrowRun is the narrow twin of readRun. An unknown key ends it rather
-// than being stepped over, which is what four descriptor bits cost.
+// readNarrowRun is the narrow twin of readRun, and like it steps over a key the
+// type does not declare: the nibble sizes the field, composite or not.
 func readNarrowRun(reader *wire.Reader, plan *typePlan, record unsafe.Pointer, buf *scratch) {
 	if !buf.enter() {
 		reader.Fail(buf.err)
@@ -198,13 +199,12 @@ func readNarrowRun(reader *wire.Reader, plan *typePlan, record unsafe.Pointer, b
 	}
 	defer buf.leave()
 	for reader.More() {
-		key := reader.Key()
-		field := plan.find(key)
+		field := plan.find(reader.Key())
 		if field == nil {
-			reader.Fail(fmt.Errorf(
-				"message holds field id %d, which the type does not declare, "+
-					"and a narrow key cannot be skipped", int(key)+1))
-			return
+			if !reader.Skip() {
+				return
+			}
+			continue
 		}
 		readField(reader, field, record, buf)
 	}
@@ -262,15 +262,14 @@ func readNarrowTable(reader *wire.Reader, field *planField, at unsafe.Pointer, b
 	data := (*sliceHeader)(at).data
 	columns := wire.NewReader(body)
 	for columns.More() {
-		key := columns.Key()
-		column := field.sub.find(key)
+		column := field.sub.find(columns.Key())
 		if column == nil {
-			// A narrow key cannot be skipped, so an unknown column ends the
-			// table rather than being stepped over.
-			reader.Fail(fmt.Errorf(
-				"a table holds column id %d, which the row type does not declare, "+
-					"and a narrow key cannot be skipped", int(key)+1))
-			return
+			// A column the row type no longer declares, stepped over like any
+			// other unknown key.
+			if !columns.Skip() {
+				break
+			}
+			continue
 		}
 		if column.op == opString {
 			scratchColumns.strings = columns.Strings(scratchColumns.strings[:0])

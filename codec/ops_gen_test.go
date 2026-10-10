@@ -63,11 +63,9 @@ import (
 	"github.com/ivanjoz/colbin/wire"
 )
 `)
-	for _, width := range []struct{ suffix, writer, reader, unknown string }{
-		// An unknown narrow key ends the walk, and an unknown wide one is
-		// stepped over, which is what the wide width is for.
-		{"", "wire.Writer", "wire.Reader", "return key, false"},
-		{"Wide", "wire.Writer8", "wire.Reader8", "if !reader.Skip() {\nreturn\n}\ncontinue"},
+	for _, width := range []struct{ suffix, writer, reader string }{
+		{"", "wire.Writer", "wire.Reader"},
+		{"Wide", "wire.Writer8", "wire.Reader8"},
 	} {
 		// The flat walks: a simple plan holds value ops and nothing else, so the
 		// switch needs no default.
@@ -86,18 +84,15 @@ import (
 		}
 		out.WriteString("default:\nreturn false\n}\nreturn true\n}\n")
 
-		// The narrow walk hands an unknown key back, for the error to name.
-		result, end := " (unknown uint8, ok bool)", "return 0, true\n"
-		if width.suffix != "" {
-			result, end = "", ""
-		}
+		// An unknown key is stepped over at either width: the narrow nibble sizes
+		// a field as the wide descriptor does.
 		fmt.Fprintf(&out, "\n// readScalars%s reads a simple plan. See scalars.go.\n", width.suffix)
-		fmt.Fprintf(&out, "func readScalars%s(reader *%s, plan *typePlan, record unsafe.Pointer)%s {\n", width.suffix, width.reader, result)
-		fmt.Fprintf(&out, "for reader.More() {\nkey := reader.Key()\nfield := plan.find(key)\nif field == nil {\n%s\n}\nat := unsafe.Add(record, field.offset)\nswitch field.op {\n", width.unknown)
+		fmt.Fprintf(&out, "func readScalars%s(reader *%s, plan *typePlan, record unsafe.Pointer) {\n", width.suffix, width.reader)
+		out.WriteString("for reader.More() {\nfield := plan.find(reader.Key())\nif field == nil {\nif !reader.Skip() {\nreturn\n}\ncontinue\n}\nat := unsafe.Add(record, field.offset)\nswitch field.op {\n")
 		for _, row := range valueOps {
 			readArm(&out, row)
 		}
-		out.WriteString("default:\nreader.Fail(errNotValueOp(field.op))\n}\n}\n" + end + "}\n")
+		out.WriteString("default:\nreader.Fail(errNotValueOp(field.op))\n}\n}\n}\n")
 
 		fmt.Fprintf(&out, "\n// readValue%s reads one value op, and reports false for an op that is not\n// one, which the caller handles.\n", width.suffix)
 		fmt.Fprintf(&out, "func readValue%s(reader *%s, op fieldOp, at unsafe.Pointer) bool {\nswitch op {\n", width.suffix, width.reader)

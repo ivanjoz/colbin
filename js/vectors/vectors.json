@@ -20,11 +20,11 @@
         "Word": 7
       },
       "section": "6701000d0004466c616700010454696e79010205536d616c6c0203064d656469756d0304054c617267650405044279746505060448616c66060704576f72640708054769616e7408090653696e676c65090a06446f75626c650a0b04546578740b0c04426c6f620c",
-      "message": "d0011180220080340000008047000000000000008058ff69ffff7bffffffff8fffffffffffffffff993fc0a9c002b004686f6c61c004007f80ff",
-      "selfDescribing": "d46701000d0004466c616700010454696e79010205536d616c6c0203064d656469756d0304054c617267650405044279746505060448616c66060704576f72640708054769616e7408090653696e676c65090a06446f75626c650a0b04546578740b0c04426c6f620c011180220080340000008047000000000000008058ff69ffff7bffffffff8fffffffffffffffff993fc0a9c002b004686f6c61c004007f80ff",
+      "message": "d0001c01802c0200803c04000000804c08000000000000008054ff65ffff77ffffffff8bffffffffffffffff953fc0a5c002b7686f6c61c7007f80ff",
+      "selfDescribing": "d46701000d0004466c616700010454696e79010205536d616c6c0203064d656469756d0304054c617267650405044279746505060448616c66060704576f72640708054769616e7408090653696e676c65090a06446f75626c650a0b04546578740b0c04426c6f620c001c01802c0200803c04000000804c08000000000000008054ff65ffff77ffffffff8bffffffffffffffff953fc0a5c002b7686f6c61c7007f80ff",
       "json": "{\"Flag\":true,\"Tiny\":-128,\"Small\":-32768,\"Medium\":-2147483648,\"Large\":-9223372036854775808,\"Byte\":255,\"Half\":65535,\"Word\":4294967295,\"Giant\":18446744073709551615,\"Single\":1.5,\"Double\":-2.25,\"Text\":\"hola\",\"Blob\":\"AH+A/w==\"}",
       "refused": 75,
-      "corruptions": 174
+      "corruptions": 180
     },
     {
       "name": "scalars-zero",
@@ -72,8 +72,8 @@
         "Word": 7
       },
       "section": "6701000d0004466c616700010454696e79010205536d616c6c0203064d656469756d0304054c617267650405044279746505060448616c66060704576f72640708054769616e7408090653696e676c65090a06446f75626c650a0b04546578740b0c04426c6f620c",
-      "message": "d0993f80a93ff0",
-      "selfDescribing": "d46701000d0004466c616700010454696e79010205536d616c6c0203064d656469756d0304054c617267650405044279746505060448616c66060704576f72640708054769616e7408090653696e676c65090a06446f75626c650a0b04546578740b0c04426c6f620c993f80a93ff0",
+      "message": "d0953f80a53ff0",
+      "selfDescribing": "d46701000d0004466c616700010454696e79010205536d616c6c0203064d656469756d0304054c617267650405044279746505060448616c66060704576f72640708054769616e7408090653696e676c65090a06446f75626c650a0b04546578740b0c04426c6f620c953f80a53ff0",
       "json": "{\"Single\":1,\"Double\":1,\"Flag\":false,\"Tiny\":0,\"Small\":0,\"Medium\":0,\"Large\":0,\"Byte\":0,\"Half\":0,\"Word\":0,\"Giant\":0,\"Text\":\"\",\"Blob\":null}",
       "refused": 7,
       "corruptions": 21
@@ -91,11 +91,11 @@
         "Unsigned": 4
       },
       "section": "36010006000454696e790d0105536d616c6c0e02064d656469756d0f03054c61726765100408556e7369676e6564120505546578747314",
-      "message": "d0020380ff00007f0014030080ffff00000000ff7f0000260300000080ffffffff0000000000000000ffffff7f00000000360300000000000000800000000000000000ffffffffffffff7f4c030000000001000000ffffffff5003000161ff2c010000787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878",
-      "selfDescribing": "d436010006000454696e790d0105536d616c6c0e02064d656469756d0f03054c61726765100408556e7369676e6564120505546578747314020380ff00007f0014030080ffff00000000ff7f0000260300000080ffffffff0000000000000000ffffff7f00000000360300000000000000800000000000000000ffffffffffffff7f4c030000000001000000ffffffff5003000161ff2c010000787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878",
+      "message": "d00c0380007f1d0600800000ff7f2e0c0000008000000000ffffff7f3f1800000000000000800000000000000000ffffffffffffff7f4e0c0000000001000000ffffffff5cfe3401000161ff2c010000787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878",
+      "selfDescribing": "d436010006000454696e790d0105536d616c6c0e02064d656469756d0f03054c61726765100408556e7369676e65641205055465787473140c0380007f1d0600800000ff7f2e0c0000008000000000ffffff7f3f1800000000000000800000000000000000ffffffffffffff7f4e0c0000000001000000ffffffff5cfe3401000161ff2c010000787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878",
       "json": "{\"Tiny\":[-128,0,127],\"Small\":[-32768,0,32767],\"Medium\":[-2147483648,0,2147483647],\"Large\":[-9223372036854775808,0,9223372036854775807],\"Unsigned\":[0,1,4294967295],\"Texts\":[\"\",\"a\",\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"]}",
-      "refused": 60,
-      "corruptions": 1197
+      "refused": 56,
+      "corruptions": 1140
     },
     {
       "name": "optionals-nil",
@@ -125,11 +125,11 @@
         "Ratio": 2
       },
       "section": "2501000400044e616d65180b0105436f756e7418030205526174696f180a0304466c61671800",
-      "message": "d0000019002030",
-      "selfDescribing": "d42501000400044e616d65180b0105436f756e7418030205526174696f180a0304466c61671800000019002030",
+      "message": "d00c001c002c003c00",
+      "selfDescribing": "d42501000400044e616d65180b0105436f756e7418030205526174696f180a0304466c616718000c001c002c003c00",
       "json": "{\"Name\":\"\",\"Count\":0,\"Ratio\":0,\"Flag\":false}",
-      "refused": 16,
-      "corruptions": 21
+      "refused": 22,
+      "corruptions": 27
     },
     {
       "name": "nested",
@@ -140,11 +140,11 @@
         "Inner": 1
       },
       "section": "2702000200024944070105496e6e6572150100030003534b550b010351747906020543656e747304",
-      "message": "d00809100b00054142432d31122acf07",
-      "selfDescribing": "d42702000200024944070105496e6e6572150100030003534b550b010351747906020543656e7473040809100b00054142432d31122acf07",
+      "message": "d004091c0a084142432d311125cf07",
+      "selfDescribing": "d42702000200024944070105496e6e6572150100030003534b550b010351747906020543656e74730404091c0a084142432d311125cf07",
       "json": "{\"ID\":9,\"Inner\":{\"SKU\":\"ABC-1\",\"Qty\":2,\"Cents\":1999}}",
-      "refused": 23,
-      "corruptions": 48
+      "refused": 12,
+      "corruptions": 45
     },
     {
       "name": "list",
@@ -156,11 +156,11 @@
         "Note": 1
       },
       "section": "2e020003000249440701044e6f74650b02054c696e6573160100030003534b550b010351747906020543656e747304",
-      "message": "d00110067069636b7570202c030d0008534b552d303030301129c70d0008534b552d303030311229ec0e0008534b552d30303032132a1101",
-      "selfDescribing": "d42e020003000249440701044e6f74650b02054c696e6573160100030003534b550b010351747906020543656e7473040110067069636b7570202c030d0008534b552d303030301129c70d0008534b552d303030311229ec0e0008534b552d30303032132a1101",
+      "message": "d000197069636b75702c29030c0b534b552d303030301024c70c0b534b552d303030311124ec0d0b534b552d3030303212251101",
+      "selfDescribing": "d42e020003000249440701044e6f74650b02054c696e6573160100030003534b550b010351747906020543656e74730400197069636b75702c29030c0b534b552d303030301024c70c0b534b552d303030311124ec0d0b534b552d3030303212251101",
       "json": "{\"ID\":1,\"Note\":\"pickup\",\"Lines\":[{\"SKU\":\"SKU-0000\",\"Qty\":1,\"Cents\":199},{\"SKU\":\"SKU-0001\",\"Qty\":2,\"Cents\":236},{\"SKU\":\"SKU-0002\",\"Qty\":3,\"Cents\":273}]}",
-      "refused": 58,
-      "corruptions": 168
+      "refused": 32,
+      "corruptions": 156
     },
     {
       "name": "list-one",
@@ -172,11 +172,11 @@
         "Note": 1
       },
       "section": "2e020003000249440701044e6f74650b02054c696e6573160100030003534b550b010351747906020543656e747304",
-      "message": "d002200f010d0008534b552d303030301129c7",
-      "selfDescribing": "d42e020003000249440701044e6f74650b02054c696e6573160100030003534b550b010351747906020543656e74730402200f010d0008534b552d303030301129c7",
+      "message": "d0012c0e010c0b534b552d303030301024c7",
+      "selfDescribing": "d42e020003000249440701044e6f74650b02054c696e6573160100030003534b550b010351747906020543656e747304012c0e010c0b534b552d303030301024c7",
       "json": "{\"ID\":2,\"Lines\":[{\"SKU\":\"SKU-0000\",\"Qty\":1,\"Cents\":199}],\"Note\":\"\"}",
-      "refused": 26,
-      "corruptions": 57
+      "refused": 18,
+      "corruptions": 54
     },
     {
       "name": "list-empty",
@@ -188,10 +188,10 @@
         "Note": 1
       },
       "section": "2e020003000249440701044e6f74650b02054c696e6573160100030003534b550b010351747906020543656e747304",
-      "message": "d003",
-      "selfDescribing": "d42e020003000249440701044e6f74650b02054c696e6573160100030003534b550b010351747906020543656e74730403",
+      "message": "d002",
+      "selfDescribing": "d42e020003000249440701044e6f74650b02054c696e6573160100030003534b550b010351747906020543656e74730402",
       "json": "{\"ID\":3,\"Note\":\"\",\"Lines\":null}",
-      "refused": 5,
+      "refused": 4,
       "corruptions": 6
     },
     {
@@ -203,10 +203,10 @@
         "ID": 0
       },
       "section": "2d0200020002494407010543656c6c7316010003000950726f64756374494407010351747907020543656e747304",
-      "message": "d004186d40001a05d00700000000000002aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a101a0003d1583f1aeb4763fd68ac1f8df5a3b17e34d68fc6fad1583f203205e603000000000000055a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb506",
-      "selfDescribing": "d42d0200020002494407010543656c6c7316010003000950726f64756374494407010351747907020543656e74730404186d40001a05d00700000000000002aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a101a0003d1583f1aeb4763fd68ac1f8df5a3b17e34d68fc6fad1583f203205e603000000000000055a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb506",
+      "message": "d0031d6d400c1a05d00700000000000002aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a1c1a0003d1583f1aeb4763fd68ac1f8df5a3b17e34d68fc6fad1583f2c3205e603000000000000055a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb506",
+      "selfDescribing": "d42d0200020002494407010543656c6c7316010003000950726f64756374494407010351747907020543656e747304031d6d400c1a05d00700000000000002aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a1c1a0003d1583f1aeb4763fd68ac1f8df5a3b17e34d68fc6fad1583f2c3205e603000000000000055a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb506",
       "json": "{\"ID\":4,\"Cells\":[{\"ProductID\":1000,\"Qty\":1,\"Cents\":499},{\"ProductID\":1001,\"Qty\":2,\"Cents\":512},{\"ProductID\":1002,\"Qty\":3,\"Cents\":525},{\"ProductID\":1003,\"Qty\":4,\"Cents\":538},{\"ProductID\":1004,\"Qty\":5,\"Cents\":551},{\"ProductID\":1005,\"Qty\":6,\"Cents\":564},{\"ProductID\":1006,\"Qty\":7,\"Cents\":577},{\"ProductID\":1007,\"Qty\":1,\"Cents\":590},{\"ProductID\":1008,\"Qty\":2,\"Cents\":603},{\"ProductID\":1009,\"Qty\":3,\"Cents\":616},{\"ProductID\":1010,\"Qty\":4,\"Cents\":629},{\"ProductID\":1011,\"Qty\":5,\"Cents\":642},{\"ProductID\":1012,\"Qty\":6,\"Cents\":655},{\"ProductID\":1013,\"Qty\":7,\"Cents\":668},{\"ProductID\":1014,\"Qty\":1,\"Cents\":681},{\"ProductID\":1015,\"Qty\":2,\"Cents\":694},{\"ProductID\":1016,\"Qty\":3,\"Cents\":707},{\"ProductID\":1017,\"Qty\":4,\"Cents\":720},{\"ProductID\":1018,\"Qty\":5,\"Cents\":733},{\"ProductID\":1019,\"Qty\":6,\"Cents\":746},{\"ProductID\":1020,\"Qty\":7,\"Cents\":759},{\"ProductID\":1021,\"Qty\":1,\"Cents\":772},{\"ProductID\":1022,\"Qty\":2,\"Cents\":785},{\"ProductID\":1023,\"Qty\":3,\"Cents\":798},{\"ProductID\":1024,\"Qty\":4,\"Cents\":811},{\"ProductID\":1025,\"Qty\":5,\"Cents\":824},{\"ProductID\":1026,\"Qty\":6,\"Cents\":837},{\"ProductID\":1027,\"Qty\":7,\"Cents\":850},{\"ProductID\":1028,\"Qty\":1,\"Cents\":863},{\"ProductID\":1029,\"Qty\":2,\"Cents\":876},{\"ProductID\":1030,\"Qty\":3,\"Cents\":889},{\"ProductID\":1031,\"Qty\":4,\"Cents\":902},{\"ProductID\":1032,\"Qty\":5,\"Cents\":915},{\"ProductID\":1033,\"Qty\":6,\"Cents\":928},{\"ProductID\":1034,\"Qty\":7,\"Cents\":941},{\"ProductID\":1035,\"Qty\":1,\"Cents\":954},{\"ProductID\":1036,\"Qty\":2,\"Cents\":967},{\"ProductID\":1037,\"Qty\":3,\"Cents\":980},{\"ProductID\":1038,\"Qty\":4,\"Cents\":993},{\"ProductID\":1039,\"Qty\":5,\"Cents\":1006},{\"ProductID\":1040,\"Qty\":6,\"Cents\":1019},{\"ProductID\":1041,\"Qty\":7,\"Cents\":1032},{\"ProductID\":1042,\"Qty\":1,\"Cents\":1045},{\"ProductID\":1043,\"Qty\":2,\"Cents\":1058},{\"ProductID\":1044,\"Qty\":3,\"Cents\":1071},{\"ProductID\":1045,\"Qty\":4,\"Cents\":1084},{\"ProductID\":1046,\"Qty\":5,\"Cents\":1097},{\"ProductID\":1047,\"Qty\":6,\"Cents\":1110},{\"ProductID\":1048,\"Qty\":7,\"Cents\":1123},{\"ProductID\":1049,\"Qty\":1,\"Cents\":1136},{\"ProductID\":1050,\"Qty\":2,\"Cents\":1149},{\"ProductID\":1051,\"Qty\":3,\"Cents\":1162},{\"ProductID\":1052,\"Qty\":4,\"Cents\":1175},{\"ProductID\":1053,\"Qty\":5,\"Cents\":1188},{\"ProductID\":1054,\"Qty\":6,\"Cents\":1201},{\"ProductID\":1055,\"Qty\":7,\"Cents\":1214},{\"ProductID\":1056,\"Qty\":1,\"Cents\":1227},{\"ProductID\":1057,\"Qty\":2,\"Cents\":1240},{\"ProductID\":1058,\"Qty\":3,\"Cents\":1253},{\"ProductID\":1059,\"Qty\":4,\"Cents\":1266},{\"ProductID\":1060,\"Qty\":5,\"Cents\":1279},{\"ProductID\":1061,\"Qty\":6,\"Cents\":1292},{\"ProductID\":1062,\"Qty\":7,\"Cents\":1305},{\"ProductID\":1063,\"Qty\":1,\"Cents\":1318}]}",
-      "refused": 48,
+      "refused": 40,
       "corruptions": 339
     },
     {
@@ -218,11 +218,11 @@
         "ID": 0
       },
       "section": "2d0200020002494407010543656c6c7316010003000950726f64756374494407010351747907020543656e747304",
-      "message": "d005182408000c000ae8a7affefaecb7effefb10050003d1583f200c000af301d8a08627d218a493",
-      "selfDescribing": "d42d0200020002494407010543656c6c7316010003000950726f64756374494407010351747907020543656e74730405182408000c000ae8a7affefaecb7effefb10050003d1583f200c000af301d8a08627d218a493",
+      "message": "d004051d24080c0c000ae8a7affefaecb7effefb1c050003d1583f2c0c000af301d8a08627d218a493",
+      "selfDescribing": "d42d0200020002494407010543656c6c7316010003000950726f64756374494407010351747907020543656e74730404051d24080c0c000ae8a7affefaecb7effefb1c050003d1583f2c0c000af301d8a08627d218a493",
       "json": "{\"ID\":5,\"Cells\":[{\"ProductID\":1000,\"Qty\":1,\"Cents\":499},{\"ProductID\":1001,\"Qty\":2,\"Cents\":512},{\"ProductID\":1002,\"Qty\":3,\"Cents\":525},{\"ProductID\":1003,\"Qty\":4,\"Cents\":538},{\"ProductID\":1004,\"Qty\":5,\"Cents\":551},{\"ProductID\":1005,\"Qty\":6,\"Cents\":564},{\"ProductID\":1006,\"Qty\":7,\"Cents\":577},{\"ProductID\":1007,\"Qty\":1,\"Cents\":590}]}",
-      "refused": 49,
-      "corruptions": 120
+      "refused": 41,
+      "corruptions": 123
     },
     {
       "name": "table-below-threshold",
@@ -233,11 +233,11 @@
         "ID": 0
       },
       "section": "2d0200020002494407010543656c6c7316010003000950726f64756374494407010351747907020543656e747304",
-      "message": "d0061039070709e803112af3010709e903122a00020709ea03132a0d020709eb03142a1a020709ec03152a27020709ed03162a34020709ee03172a4102",
-      "selfDescribing": "d42d0200020002494407010543656c6c7316010003000950726f64756374494407010351747907020543656e747304061039070709e803112af3010709e903122a00020709ea03132a0d020709eb03142a1a020709ec03152a27020709ed03162a34020709ee03172a4102",
+      "message": "d004061c3c070705e8031025f3010705e903112500020705ea0312250d020705eb0313251a020805ec0314052527020805ed0314062534020805ee031407254102",
+      "selfDescribing": "d42d0200020002494407010543656c6c7316010003000950726f64756374494407010351747907020543656e74730404061c3c070705e8031025f3010705e903112500020705ea0312250d020705eb0313251a020805ec0314052527020805ed0314062534020805ee031407254102",
       "json": "{\"ID\":6,\"Cells\":[{\"ProductID\":1000,\"Qty\":1,\"Cents\":499},{\"ProductID\":1001,\"Qty\":2,\"Cents\":512},{\"ProductID\":1002,\"Qty\":3,\"Cents\":525},{\"ProductID\":1003,\"Qty\":4,\"Cents\":538},{\"ProductID\":1004,\"Qty\":5,\"Cents\":551},{\"ProductID\":1005,\"Qty\":6,\"Cents\":564},{\"ProductID\":1006,\"Qty\":7,\"Cents\":577}]}",
-      "refused": 83,
-      "corruptions": 183
+      "refused": 52,
+      "corruptions": 195
     },
     {
       "name": "table-wide",
@@ -248,10 +248,10 @@
         "ID": 0
       },
       "section": "2d0200020002494407010543656c6c7316010003000950726f64756374494407010351747907020543656e747304",
-      "message": "d0071a9e010000ff2c010000005705d00700000000000002aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02aaaaaaaaaaaaaaaaaaaa2a10750003d1583f1aeb4763fd68ac1f8df5a3b17e34d68fc6fad1583f1aeb4763fd68ac1f8df5a3b17e34d68fc6fad1583f1aeb470363fd68ac1f8df5a3b17e34d68fc6fad1583f1aeb4763fd68ac1f8df5a3b17e34d68fc6fad1583f1aeb4763fd68ac1f8d03f5a3b17e34d68fc6fad1583f1aeb47630d20c705e603000000000000055a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d6055a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d6055a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6b",
-      "selfDescribing": "d42d0200020002494407010543656c6c7316010003000950726f64756374494407010351747907020543656e747304071a9e010000ff2c010000005705d00700000000000002aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02aaaaaaaaaaaaaaaaaaaa2a10750003d1583f1aeb4763fd68ac1f8df5a3b17e34d68fc6fad1583f1aeb4763fd68ac1f8df5a3b17e34d68fc6fad1583f1aeb470363fd68ac1f8df5a3b17e34d68fc6fad1583f1aeb4763fd68ac1f8df5a3b17e34d68fc6fad1583f1aeb4763fd68ac1f8d03f5a3b17e34d68fc6fad1583f1aeb47630d20c705e603000000000000055a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d6055a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d6055a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6b",
+      "message": "d004071dfe9e01ff2c0100000c5705d00700000000000002aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02aaaaaaaaaaaaaaaaaaaa2a1c750003d1583f1aeb4763fd68ac1f8df5a3b17e34d68fc6fad1583f1aeb4763fd68ac1f8df5a3b17e34d68fc6fad1583f1aeb470363fd68ac1f8df5a3b17e34d68fc6fad1583f1aeb4763fd68ac1f8df5a3b17e34d68fc6fad1583f1aeb4763fd68ac1f8d03f5a3b17e34d68fc6fad1583f1aeb47630d2cc705e603000000000000055a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d6055a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d6055a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6b",
+      "selfDescribing": "d42d0200020002494407010543656c6c7316010003000950726f64756374494407010351747907020543656e74730404071dfe9e01ff2c0100000c5705d00700000000000002aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02aaaaaaaaaaaaaaaaaaaa2a1c750003d1583f1aeb4763fd68ac1f8df5a3b17e34d68fc6fad1583f1aeb4763fd68ac1f8df5a3b17e34d68fc6fad1583f1aeb470363fd68ac1f8df5a3b17e34d68fc6fad1583f1aeb4763fd68ac1f8df5a3b17e34d68fc6fad1583f1aeb4763fd68ac1f8d03f5a3b17e34d68fc6fad1583f1aeb47630d2cc705e603000000000000055a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d6055a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d6055a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6badb5d65a6b",
       "json": "{\"ID\":7,\"Cells\":[{\"ProductID\":1000,\"Qty\":1,\"Cents\":499},{\"ProductID\":1001,\"Qty\":2,\"Cents\":512},{\"ProductID\":1002,\"Qty\":3,\"Cents\":525},{\"ProductID\":1003,\"Qty\":4,\"Cents\":538},{\"ProductID\":1004,\"Qty\":5,\"Cents\":551},{\"ProductID\":1005,\"Qty\":6,\"Cents\":564},{\"ProductID\":1006,\"Qty\":7,\"Cents\":577},{\"ProductID\":1007,\"Qty\":1,\"Cents\":590},{\"ProductID\":1008,\"Qty\":2,\"Cents\":603},{\"ProductID\":1009,\"Qty\":3,\"Cents\":616},{\"ProductID\":1010,\"Qty\":4,\"Cents\":629},{\"ProductID\":1011,\"Qty\":5,\"Cents\":642},{\"ProductID\":1012,\"Qty\":6,\"Cents\":655},{\"ProductID\":1013,\"Qty\":7,\"Cents\":668},{\"ProductID\":1014,\"Qty\":1,\"Cents\":681},{\"ProductID\":1015,\"Qty\":2,\"Cents\":694},{\"ProductID\":1016,\"Qty\":3,\"Cents\":707},{\"ProductID\":1017,\"Qty\":4,\"Cents\":720},{\"ProductID\":1018,\"Qty\":5,\"Cents\":733},{\"ProductID\":1019,\"Qty\":6,\"Cents\":746},{\"ProductID\":1020,\"Qty\":7,\"Cents\":759},{\"ProductID\":1021,\"Qty\":1,\"Cents\":772},{\"ProductID\":1022,\"Qty\":2,\"Cents\":785},{\"ProductID\":1023,\"Qty\":3,\"Cents\":798},{\"ProductID\":1024,\"Qty\":4,\"Cents\":811},{\"ProductID\":1025,\"Qty\":5,\"Cents\":824},{\"ProductID\":1026,\"Qty\":6,\"Cents\":837},{\"ProductID\":1027,\"Qty\":7,\"Cents\":850},{\"ProductID\":1028,\"Qty\":1,\"Cents\":863},{\"ProductID\":1029,\"Qty\":2,\"Cents\":876},{\"ProductID\":1030,\"Qty\":3,\"Cents\":889},{\"ProductID\":1031,\"Qty\":4,\"Cents\":902},{\"ProductID\":1032,\"Qty\":5,\"Cents\":915},{\"ProductID\":1033,\"Qty\":6,\"Cents\":928},{\"ProductID\":1034,\"Qty\":7,\"Cents\":941},{\"ProductID\":1035,\"Qty\":1,\"Cents\":954},{\"ProductID\":1036,\"Qty\":2,\"Cents\":967},{\"ProductID\":1037,\"Qty\":3,\"Cents\":980},{\"ProductID\":1038,\"Qty\":4,\"Cents\":993},{\"ProductID\":1039,\"Qty\":5,\"Cents\":1006},{\"ProductID\":1040,\"Qty\":6,\"Cents\":1019},{\"ProductID\":1041,\"Qty\":7,\"Cents\":1032},{\"ProductID\":1042,\"Qty\":1,\"Cents\":1045},{\"ProductID\":1043,\"Qty\":2,\"Cents\":1058},{\"ProductID\":1044,\"Qty\":3,\"Cents\":1071},{\"ProductID\":1045,\"Qty\":4,\"Cents\":1084},{\"ProductID\":1046,\"Qty\":5,\"Cents\":1097},{\"ProductID\":1047,\"Qty\":6,\"Cents\":1110},{\"ProductID\":1048,\"Qty\":7,\"Cents\":1123},{\"ProductID\":1049,\"Qty\":1,\"Cents\":1136},{\"ProductID\":1050,\"Qty\":2,\"Cents\":1149},{\"ProductID\":1051,\"Qty\":3,\"Cents\":1162},{\"ProductID\":1052,\"Qty\":4,\"Cents\":1175},{\"ProductID\":1053,\"Qty\":5,\"Cents\":1188},{\"ProductID\":1054,\"Qty\":6,\"Cents\":1201},{\"ProductID\":1055,\"Qty\":7,\"Cents\":1214},{\"ProductID\":1056,\"Qty\":1,\"Cents\":1227},{\"ProductID\":1057,\"Qty\":2,\"Cents\":1240},{\"ProductID\":1058,\"Qty\":3,\"Cents\":1253},{\"ProductID\":1059,\"Qty\":4,\"Cents\":1266},{\"ProductID\":1060,\"Qty\":5,\"Cents\":1279},{\"ProductID\":1061,\"Qty\":6,\"Cents\":1292},{\"ProductID\":1062,\"Qty\":7,\"Cents\":1305},{\"ProductID\":1063,\"Qty\":1,\"Cents\":1318},{\"ProductID\":1064,\"Qty\":2,\"Cents\":1331},{\"ProductID\":1065,\"Qty\":3,\"Cents\":1344},{\"ProductID\":1066,\"Qty\":4,\"Cents\":1357},{\"ProductID\":1067,\"Qty\":5,\"Cents\":1370},{\"ProductID\":1068,\"Qty\":6,\"Cents\":1383},{\"ProductID\":1069,\"Qty\":7,\"Cents\":1396},{\"ProductID\":1070,\"Qty\":1,\"Cents\":1409},{\"ProductID\":1071,\"Qty\":2,\"Cents\":1422},{\"ProductID\":1072,\"Qty\":3,\"Cents\":1435},{\"ProductID\":1073,\"Qty\":4,\"Cents\":1448},{\"ProductID\":1074,\"Qty\":5,\"Cents\":1461},{\"ProductID\":1075,\"Qty\":6,\"Cents\":1474},{\"ProductID\":1076,\"Qty\":7,\"Cents\":1487},{\"ProductID\":1077,\"Qty\":1,\"Cents\":1500},{\"ProductID\":1078,\"Qty\":2,\"Cents\":1513},{\"ProductID\":1079,\"Qty\":3,\"Cents\":1526},{\"ProductID\":1080,\"Qty\":4,\"Cents\":1539},{\"ProductID\":1081,\"Qty\":5,\"Cents\":1552},{\"ProductID\":1082,\"Qty\":6,\"Cents\":1565},{\"ProductID\":1083,\"Qty\":7,\"Cents\":1578},{\"ProductID\":1084,\"Qty\":1,\"Cents\":1591},{\"ProductID\":1085,\"Qty\":2,\"Cents\":1604},{\"ProductID\":1086,\"Qty\":3,\"Cents\":1617},{\"ProductID\":1087,\"Qty\":4,\"Cents\":1630},{\"ProductID\":1088,\"Qty\":5,\"Cents\":1643},{\"ProductID\":1089,\"Qty\":6,\"Cents\":1656},{\"ProductID\":1090,\"Qty\":7,\"Cents\":1669},{\"ProductID\":1091,\"Qty\":1,\"Cents\":1682},{\"ProductID\":1092,\"Qty\":2,\"Cents\":1695},{\"ProductID\":1093,\"Qty\":3,\"Cents\":1708},{\"ProductID\":1094,\"Qty\":4,\"Cents\":1721},{\"ProductID\":1095,\"Qty\":5,\"Cents\":1734},{\"ProductID\":1096,\"Qty\":6,\"Cents\":1747},{\"ProductID\":1097,\"Qty\":7,\"Cents\":1760},{\"ProductID\":1098,\"Qty\":1,\"Cents\":1773},{\"ProductID\":1099,\"Qty\":2,\"Cents\":1786},{\"ProductID\":1100,\"Qty\":3,\"Cents\":1799},{\"ProductID\":1101,\"Qty\":4,\"Cents\":1812},{\"ProductID\":1102,\"Qty\":5,\"Cents\":1825},{\"ProductID\":1103,\"Qty\":6,\"Cents\":1838},{\"ProductID\":1104,\"Qty\":7,\"Cents\":1851},{\"ProductID\":1105,\"Qty\":1,\"Cents\":1864},{\"ProductID\":1106,\"Qty\":2,\"Cents\":1877},{\"ProductID\":1107,\"Qty\":3,\"Cents\":1890},{\"ProductID\":1108,\"Qty\":4,\"Cents\":1903},{\"ProductID\":1109,\"Qty\":5,\"Cents\":1916},{\"ProductID\":1110,\"Qty\":6,\"Cents\":1929},{\"ProductID\":1111,\"Qty\":7,\"Cents\":1942},{\"ProductID\":1112,\"Qty\":1,\"Cents\":1955},{\"ProductID\":1113,\"Qty\":2,\"Cents\":1968},{\"ProductID\":1114,\"Qty\":3,\"Cents\":1981},{\"ProductID\":1115,\"Qty\":4,\"Cents\":1994},{\"ProductID\":1116,\"Qty\":5,\"Cents\":2007},{\"ProductID\":1117,\"Qty\":6,\"Cents\":2020},{\"ProductID\":1118,\"Qty\":7,\"Cents\":2033},{\"ProductID\":1119,\"Qty\":1,\"Cents\":2046},{\"ProductID\":1120,\"Qty\":2,\"Cents\":2059},{\"ProductID\":1121,\"Qty\":3,\"Cents\":2072},{\"ProductID\":1122,\"Qty\":4,\"Cents\":2085},{\"ProductID\":1123,\"Qty\":5,\"Cents\":2098},{\"ProductID\":1124,\"Qty\":6,\"Cents\":2111},{\"ProductID\":1125,\"Qty\":7,\"Cents\":2124},{\"ProductID\":1126,\"Qty\":1,\"Cents\":2137},{\"ProductID\":1127,\"Qty\":2,\"Cents\":2150},{\"ProductID\":1128,\"Qty\":3,\"Cents\":2163},{\"ProductID\":1129,\"Qty\":4,\"Cents\":2176},{\"ProductID\":1130,\"Qty\":5,\"Cents\":2189},{\"ProductID\":1131,\"Qty\":6,\"Cents\":2202},{\"ProductID\":1132,\"Qty\":7,\"Cents\":2215},{\"ProductID\":1133,\"Qty\":1,\"Cents\":2228},{\"ProductID\":1134,\"Qty\":2,\"Cents\":2241},{\"ProductID\":1135,\"Qty\":3,\"Cents\":2254},{\"ProductID\":1136,\"Qty\":4,\"Cents\":2267},{\"ProductID\":1137,\"Qty\":5,\"Cents\":2280},{\"ProductID\":1138,\"Qty\":6,\"Cents\":2293},{\"ProductID\":1139,\"Qty\":7,\"Cents\":2306},{\"ProductID\":1140,\"Qty\":1,\"Cents\":2319},{\"ProductID\":1141,\"Qty\":2,\"Cents\":2332},{\"ProductID\":1142,\"Qty\":3,\"Cents\":2345},{\"ProductID\":1143,\"Qty\":4,\"Cents\":2358},{\"ProductID\":1144,\"Qty\":5,\"Cents\":2371},{\"ProductID\":1145,\"Qty\":6,\"Cents\":2384},{\"ProductID\":1146,\"Qty\":7,\"Cents\":2397},{\"ProductID\":1147,\"Qty\":1,\"Cents\":2410},{\"ProductID\":1148,\"Qty\":2,\"Cents\":2423},{\"ProductID\":1149,\"Qty\":3,\"Cents\":2436},{\"ProductID\":1150,\"Qty\":4,\"Cents\":2449},{\"ProductID\":1151,\"Qty\":5,\"Cents\":2462},{\"ProductID\":1152,\"Qty\":6,\"Cents\":2475},{\"ProductID\":1153,\"Qty\":7,\"Cents\":2488},{\"ProductID\":1154,\"Qty\":1,\"Cents\":2501},{\"ProductID\":1155,\"Qty\":2,\"Cents\":2514},{\"ProductID\":1156,\"Qty\":3,\"Cents\":2527},{\"ProductID\":1157,\"Qty\":4,\"Cents\":2540},{\"ProductID\":1158,\"Qty\":5,\"Cents\":2553},{\"ProductID\":1159,\"Qty\":6,\"Cents\":2566},{\"ProductID\":1160,\"Qty\":7,\"Cents\":2579},{\"ProductID\":1161,\"Qty\":1,\"Cents\":2592},{\"ProductID\":1162,\"Qty\":2,\"Cents\":2605},{\"ProductID\":1163,\"Qty\":3,\"Cents\":2618},{\"ProductID\":1164,\"Qty\":4,\"Cents\":2631},{\"ProductID\":1165,\"Qty\":5,\"Cents\":2644},{\"ProductID\":1166,\"Qty\":6,\"Cents\":2657},{\"ProductID\":1167,\"Qty\":7,\"Cents\":2670},{\"ProductID\":1168,\"Qty\":1,\"Cents\":2683},{\"ProductID\":1169,\"Qty\":2,\"Cents\":2696},{\"ProductID\":1170,\"Qty\":3,\"Cents\":2709},{\"ProductID\":1171,\"Qty\":4,\"Cents\":2722},{\"ProductID\":1172,\"Qty\":5,\"Cents\":2735},{\"ProductID\":1173,\"Qty\":6,\"Cents\":2748},{\"ProductID\":1174,\"Qty\":7,\"Cents\":2761},{\"ProductID\":1175,\"Qty\":1,\"Cents\":2774},{\"ProductID\":1176,\"Qty\":2,\"Cents\":2787},{\"ProductID\":1177,\"Qty\":3,\"Cents\":2800},{\"ProductID\":1178,\"Qty\":4,\"Cents\":2813},{\"ProductID\":1179,\"Qty\":5,\"Cents\":2826},{\"ProductID\":1180,\"Qty\":6,\"Cents\":2839},{\"ProductID\":1181,\"Qty\":7,\"Cents\":2852},{\"ProductID\":1182,\"Qty\":1,\"Cents\":2865},{\"ProductID\":1183,\"Qty\":2,\"Cents\":2878},{\"ProductID\":1184,\"Qty\":3,\"Cents\":2891},{\"ProductID\":1185,\"Qty\":4,\"Cents\":2904},{\"ProductID\":1186,\"Qty\":5,\"Cents\":2917},{\"ProductID\":1187,\"Qty\":6,\"Cents\":2930},{\"ProductID\":1188,\"Qty\":7,\"Cents\":2943},{\"ProductID\":1189,\"Qty\":1,\"Cents\":2956},{\"ProductID\":1190,\"Qty\":2,\"Cents\":2969},{\"ProductID\":1191,\"Qty\":3,\"Cents\":2982},{\"ProductID\":1192,\"Qty\":4,\"Cents\":2995},{\"ProductID\":1193,\"Qty\":5,\"Cents\":3008},{\"ProductID\":1194,\"Qty\":6,\"Cents\":3021},{\"ProductID\":1195,\"Qty\":7,\"Cents\":3034},{\"ProductID\":1196,\"Qty\":1,\"Cents\":3047},{\"ProductID\":1197,\"Qty\":2,\"Cents\":3060},{\"ProductID\":1198,\"Qty\":3,\"Cents\":3073},{\"ProductID\":1199,\"Qty\":4,\"Cents\":3086},{\"ProductID\":1200,\"Qty\":5,\"Cents\":3099},{\"ProductID\":1201,\"Qty\":6,\"Cents\":3112},{\"ProductID\":1202,\"Qty\":7,\"Cents\":3125},{\"ProductID\":1203,\"Qty\":1,\"Cents\":3138},{\"ProductID\":1204,\"Qty\":2,\"Cents\":3151},{\"ProductID\":1205,\"Qty\":3,\"Cents\":3164},{\"ProductID\":1206,\"Qty\":4,\"Cents\":3177},{\"ProductID\":1207,\"Qty\":5,\"Cents\":3190},{\"ProductID\":1208,\"Qty\":6,\"Cents\":3203},{\"ProductID\":1209,\"Qty\":7,\"Cents\":3216},{\"ProductID\":1210,\"Qty\":1,\"Cents\":3229},{\"ProductID\":1211,\"Qty\":2,\"Cents\":3242},{\"ProductID\":1212,\"Qty\":3,\"Cents\":3255},{\"ProductID\":1213,\"Qty\":4,\"Cents\":3268},{\"ProductID\":1214,\"Qty\":5,\"Cents\":3281},{\"ProductID\":1215,\"Qty\":6,\"Cents\":3294},{\"ProductID\":1216,\"Qty\":7,\"Cents\":3307},{\"ProductID\":1217,\"Qty\":1,\"Cents\":3320},{\"ProductID\":1218,\"Qty\":2,\"Cents\":3333},{\"ProductID\":1219,\"Qty\":3,\"Cents\":3346},{\"ProductID\":1220,\"Qty\":4,\"Cents\":3359},{\"ProductID\":1221,\"Qty\":5,\"Cents\":3372},{\"ProductID\":1222,\"Qty\":6,\"Cents\":3385},{\"ProductID\":1223,\"Qty\":7,\"Cents\":3398},{\"ProductID\":1224,\"Qty\":1,\"Cents\":3411},{\"ProductID\":1225,\"Qty\":2,\"Cents\":3424},{\"ProductID\":1226,\"Qty\":3,\"Cents\":3437},{\"ProductID\":1227,\"Qty\":4,\"Cents\":3450},{\"ProductID\":1228,\"Qty\":5,\"Cents\":3463},{\"ProductID\":1229,\"Qty\":6,\"Cents\":3476},{\"ProductID\":1230,\"Qty\":7,\"Cents\":3489},{\"ProductID\":1231,\"Qty\":1,\"Cents\":3502},{\"ProductID\":1232,\"Qty\":2,\"Cents\":3515},{\"ProductID\":1233,\"Qty\":3,\"Cents\":3528},{\"ProductID\":1234,\"Qty\":4,\"Cents\":3541},{\"ProductID\":1235,\"Qty\":5,\"Cents\":3554},{\"ProductID\":1236,\"Qty\":6,\"Cents\":3567},{\"ProductID\":1237,\"Qty\":7,\"Cents\":3580},{\"ProductID\":1238,\"Qty\":1,\"Cents\":3593},{\"ProductID\":1239,\"Qty\":2,\"Cents\":3606},{\"ProductID\":1240,\"Qty\":3,\"Cents\":3619},{\"ProductID\":1241,\"Qty\":4,\"Cents\":3632},{\"ProductID\":1242,\"Qty\":5,\"Cents\":3645},{\"ProductID\":1243,\"Qty\":6,\"Cents\":3658},{\"ProductID\":1244,\"Qty\":7,\"Cents\":3671},{\"ProductID\":1245,\"Qty\":1,\"Cents\":3684},{\"ProductID\":1246,\"Qty\":2,\"Cents\":3697},{\"ProductID\":1247,\"Qty\":3,\"Cents\":3710},{\"ProductID\":1248,\"Qty\":4,\"Cents\":3723},{\"ProductID\":1249,\"Qty\":5,\"Cents\":3736},{\"ProductID\":1250,\"Qty\":6,\"Cents\":3749},{\"ProductID\":1251,\"Qty\":7,\"Cents\":3762},{\"ProductID\":1252,\"Qty\":1,\"Cents\":3775},{\"ProductID\":1253,\"Qty\":2,\"Cents\":3788},{\"ProductID\":1254,\"Qty\":3,\"Cents\":3801},{\"ProductID\":1255,\"Qty\":4,\"Cents\":3814},{\"ProductID\":1256,\"Qty\":5,\"Cents\":3827},{\"ProductID\":1257,\"Qty\":6,\"Cents\":3840},{\"ProductID\":1258,\"Qty\":7,\"Cents\":3853},{\"ProductID\":1259,\"Qty\":1,\"Cents\":3866},{\"ProductID\":1260,\"Qty\":2,\"Cents\":3879},{\"ProductID\":1261,\"Qty\":3,\"Cents\":3892},{\"ProductID\":1262,\"Qty\":4,\"Cents\":3905},{\"ProductID\":1263,\"Qty\":5,\"Cents\":3918},{\"ProductID\":1264,\"Qty\":6,\"Cents\":3931},{\"ProductID\":1265,\"Qty\":7,\"Cents\":3944},{\"ProductID\":1266,\"Qty\":1,\"Cents\":3957},{\"ProductID\":1267,\"Qty\":2,\"Cents\":3970},{\"ProductID\":1268,\"Qty\":3,\"Cents\":3983},{\"ProductID\":1269,\"Qty\":4,\"Cents\":3996},{\"ProductID\":1270,\"Qty\":5,\"Cents\":4009},{\"ProductID\":1271,\"Qty\":6,\"Cents\":4022},{\"ProductID\":1272,\"Qty\":7,\"Cents\":4035},{\"ProductID\":1273,\"Qty\":1,\"Cents\":4048},{\"ProductID\":1274,\"Qty\":2,\"Cents\":4061},{\"ProductID\":1275,\"Qty\":3,\"Cents\":4074},{\"ProductID\":1276,\"Qty\":4,\"Cents\":4087},{\"ProductID\":1277,\"Qty\":5,\"Cents\":4100},{\"ProductID\":1278,\"Qty\":6,\"Cents\":4113},{\"ProductID\":1279,\"Qty\":7,\"Cents\":4126},{\"ProductID\":1280,\"Qty\":1,\"Cents\":4139},{\"ProductID\":1281,\"Qty\":2,\"Cents\":4152},{\"ProductID\":1282,\"Qty\":3,\"Cents\":4165},{\"ProductID\":1283,\"Qty\":4,\"Cents\":4178},{\"ProductID\":1284,\"Qty\":5,\"Cents\":4191},{\"ProductID\":1285,\"Qty\":6,\"Cents\":4204},{\"ProductID\":1286,\"Qty\":7,\"Cents\":4217},{\"ProductID\":1287,\"Qty\":1,\"Cents\":4230},{\"ProductID\":1288,\"Qty\":2,\"Cents\":4243},{\"ProductID\":1289,\"Qty\":3,\"Cents\":4256},{\"ProductID\":1290,\"Qty\":4,\"Cents\":4269},{\"ProductID\":1291,\"Qty\":5,\"Cents\":4282},{\"ProductID\":1292,\"Qty\":6,\"Cents\":4295},{\"ProductID\":1293,\"Qty\":7,\"Cents\":4308},{\"ProductID\":1294,\"Qty\":1,\"Cents\":4321},{\"ProductID\":1295,\"Qty\":2,\"Cents\":4334},{\"ProductID\":1296,\"Qty\":3,\"Cents\":4347},{\"ProductID\":1297,\"Qty\":4,\"Cents\":4360},{\"ProductID\":1298,\"Qty\":5,\"Cents\":4373},{\"ProductID\":1299,\"Qty\":6,\"Cents\":4386}]}",
-      "refused": 86,
+      "refused": 75,
       "corruptions": 1263
     },
     {
@@ -263,10 +263,10 @@
         "ID": 0
       },
       "section": "2f0200020002494407010543656c6c7316010103000950726f6475637449440701054c6162656c0b130543656e747304",
-      "message": "d00808187a1400b00f05a00f00000000000002aaaaaaaa2a01c83c14016102626203636363016102626203636363016102626203636363016102626203636363016102626203636363016102626203636363016102626213b0250500000000000000000bd297bef4a52f7de94b5ffad297bef4a52f7de94b5ffad297bef401",
-      "selfDescribing": "d42f0200020002494407010543656c6c7316010103000950726f6475637449440701054c6162656c0b130543656e7473040808187a1400b00f05a00f00000000000002aaaaaaaa2a01c83c14016102626203636363016102626203636363016102626203636363016102626203636363016102626203636363016102626203636363016102626213b0250500000000000000000bd297bef4a52f7de94b5ffad297bef4a52f7de94b5ffad297bef401",
+      "message": "d004081d7a1400b00f05a00f00000000000002aaaaaaaa2a01c83c14016102626203636363016102626203636363016102626203636363016102626203636363016102626203636363016102626203636363016102626213b0250500000000000000000bd297bef4a52f7de94b5ffad297bef4a52f7de94b5ffad297bef401",
+      "selfDescribing": "d42f0200020002494407010543656c6c7316010103000950726f6475637449440701054c6162656c0b130543656e74730404081d7a1400b00f05a00f00000000000002aaaaaaaa2a01c83c14016102626203636363016102626203636363016102626203636363016102626203636363016102626203636363016102626203636363016102626213b0250500000000000000000bd297bef4a52f7de94b5ffad297bef4a52f7de94b5ffad297bef401",
       "json": "{\"ID\":8,\"Cells\":[{\"ProductID\":2000,\"Label\":\"a\",\"Cents\":0},{\"ProductID\":2001,\"Label\":\"bb\",\"Cents\":1001},{\"ProductID\":2002,\"Label\":\"ccc\",\"Cents\":2002},{\"ProductID\":2003,\"Label\":\"a\",\"Cents\":3003},{\"ProductID\":2004,\"Label\":\"bb\",\"Cents\":4004},{\"ProductID\":2005,\"Label\":\"ccc\",\"Cents\":5005},{\"ProductID\":2006,\"Label\":\"a\",\"Cents\":6006},{\"ProductID\":2007,\"Label\":\"bb\",\"Cents\":7007},{\"ProductID\":2008,\"Label\":\"ccc\",\"Cents\":8008},{\"ProductID\":2009,\"Label\":\"a\",\"Cents\":9009},{\"ProductID\":2010,\"Label\":\"bb\",\"Cents\":10010},{\"ProductID\":2011,\"Label\":\"ccc\",\"Cents\":11011},{\"ProductID\":2012,\"Label\":\"a\",\"Cents\":12012},{\"ProductID\":2013,\"Label\":\"bb\",\"Cents\":13013},{\"ProductID\":2014,\"Label\":\"ccc\",\"Cents\":14014},{\"ProductID\":2015,\"Label\":\"a\",\"Cents\":15015},{\"ProductID\":2016,\"Label\":\"bb\",\"Cents\":16016},{\"ProductID\":2017,\"Label\":\"ccc\",\"Cents\":17017},{\"ProductID\":2018,\"Label\":\"a\",\"Cents\":18018},{\"ProductID\":2019,\"Label\":\"bb\",\"Cents\":19019}]}",
-      "refused": 108,
+      "refused": 106,
       "corruptions": 381
     },
     {
@@ -315,11 +315,11 @@
         "Tags": 19
       },
       "section": "6703010500044e616d650b01064279436f646517000701020543656c6c7317010702130454616773141406436f756e747317000200030003534b550b010351747906020543656e7473040103000950726f6475637449440701054c6162656c0b130543656e747304",
-      "message": "d800900573746f726501e018029003612d31d007000241311329fa9005656d707479d00002e016028101d80c01900157138e00000000000107d802000713c80b02046f70656e046c61746514e009019005646f6f727302",
-      "selfDescribing": "dc6703010500044e616d650b01064279436f646517000701020543656c6c7317010702130454616773141406436f756e747317000200030003534b550b010351747906020543656e7473040103000950726f6475637449440701054c6162656c0b130543656e74730400900573746f726501e018029003612d31d007000241311329fa9005656d707479d00002e016028101d80c01900157138e00000000000107d802000713c80b02046f70656e046c61746514e009019005646f6f727302",
+      "message": "d800900573746f726501e017029003612d31d0060541311224fa9005656d707479d00002e016028101d80c01900157138e00000000000107d802000713c80b02046f70656e046c61746514e009019005646f6f727302",
+      "selfDescribing": "dc6703010500044e616d650b01064279436f646517000701020543656c6c7317010702130454616773141406436f756e747317000200030003534b550b010351747906020543656e7473040103000950726f6475637449440701054c6162656c0b130543656e74730400900573746f726501e017029003612d31d0060541311224fa9005656d707479d00002e016028101d80c01900157138e00000000000107d802000713c80b02046f70656e046c61746514e009019005646f6f727302",
       "json": "{\"Name\":\"store\",\"ByCode\":{\"a-1\":{\"SKU\":\"A1\",\"Qty\":3,\"Cents\":250},\"empty\":{\"SKU\":\"\",\"Qty\":0,\"Cents\":0}},\"Cells\":{\"-1\":{\"Label\":\"W\",\"Cents\":1099511627776,\"ProductID\":0},\"7\":{\"ProductID\":7,\"Label\":\"\",\"Cents\":0}},\"Tags\":[\"open\",\"late\"],\"Counts\":{\"doors\":2}}",
-      "refused": 121,
-      "corruptions": 261
+      "refused": 115,
+      "corruptions": 258
     },
     {
       "name": "maps",
@@ -330,10 +330,10 @@
         "Labels": 0
       },
       "section": "1901000200064c6162656c731700000106436f756e7473170101",
-      "message": "d0000c010003656e76000470726f6410050109070963",
-      "selfDescribing": "d41901000200064c6162656c731700000106436f756e7473170101000c010003656e76000470726f6410050109070963",
+      "message": "d00c0c010003656e76000470726f641c050109070963",
+      "selfDescribing": "d41901000200064c6162656c731700000106436f756e74731701010c0c010003656e76000470726f641c050109070963",
       "json": "{\"Labels\":{\"env\":\"prod\"},\"Counts\":{\"7\":99}}",
-      "refused": 32,
+      "refused": 28,
       "corruptions": 66
     },
     {
@@ -366,11 +366,11 @@
         "Name": 2
       },
       "section": "3c010007010249440702044e616d650b0305456d61696c0b0407436f756e7472790b050341676505060641637469766500070943726561746564417404",
-      "message": "d011200e4f6c69766961204573636f62617230206f6c697669612e6573636f6261723040636f72702e6578616d706c652e6f7267400243525824617c5e5f9d6a",
-      "selfDescribing": "d43c010007010249440702044e616d650b0305456d61696c0b0407436f756e7472790b05034167650506064163746976650007094372656174656441740411200e4f6c69766961204573636f62617230206f6c697669612e6573636f6261723040636f72702e6578616d706c652e6f7267400243525824617c5e5f9d6a",
+      "message": "d0102c0e4f6c69766961204573636f6261723c206f6c697669612e6573636f6261723040636f72702e6578616d706c652e6f7267454352542460775e5f9d6a",
+      "selfDescribing": "d43c010007010249440702044e616d650b0305456d61696c0b0407436f756e7472790b050341676505060641637469766500070943726561746564417404102c0e4f6c69766961204573636f6261723c206f6c697669612e6573636f6261723040636f72702e6578616d706c652e6f7267454352542460775e5f9d6a",
       "json": "{\"ID\":1,\"Name\":\"Olivia Escobar\",\"Email\":\"olivia.escobar0@corp.example.org\",\"Country\":\"CR\",\"Age\":36,\"Active\":true,\"CreatedAt\":1788698462}",
-      "refused": 31,
-      "corruptions": 192
+      "refused": 17,
+      "corruptions": 189
     },
     {
       "name": "corpus-product",
@@ -386,11 +386,11 @@
         "Tags": 7
       },
       "section": "3e01000701024944070203534b550b03044e616d650b040a507269636543656e747304050553746f636b07060a43617465676f727949440607045461677314",
-      "message": "d011200f4e4f525445432d5442582d3030303030115265696e666f72636564204c61646465724a4fc358136670030a52455455524e41424c45034e455708494d504f52544544",
-      "selfDescribing": "d43e01000701024944070203534b550b03044e616d650b040a507269636543656e747304050553746f636b07060a43617465676f72794944060704546167731411200f4e4f525445432d5442582d3030303030115265696e666f72636564204c61646465724a4fc358136670030a52455455524e41424c45034e455708494d504f52544544",
+      "message": "d0102c0f4e4f525445432d5442582d303030303c115265696e666f72636564204c6164646572454fc3541364067c180a52455455524e41424c45034e455708494d504f52544544",
+      "selfDescribing": "d43e01000701024944070203534b550b03044e616d650b040a507269636543656e747304050553746f636b07060a43617465676f727949440607045461677314102c0f4e4f525445432d5442582d303030303c115265696e666f72636564204c6164646572454fc3541364067c180a52455455524e41424c45034e455708494d504f52544544",
       "json": "{\"ID\":1,\"SKU\":\"NORTEC-TBX-0000\",\"Name\":\"Reinforced Ladder\",\"PriceCents\":49999,\"Stock\":19,\"CategoryID\":6,\"Tags\":[\"RETURNABLE\",\"NEW\",\"IMPORTED\"]}",
-      "refused": 38,
-      "corruptions": 210
+      "refused": 31,
+      "corruptions": 213
     },
     {
       "name": "corpus-store",
@@ -404,11 +404,11 @@
         "Lon": 5
       },
       "section": "2201000501024944060204436f64650b0304436974790b04034c61740a05034c6f6e0a",
-      "message": "d01120064d455830303130064d657869636f4fc052dddd1a21ea365fc0636c28e0c9d9d3",
-      "selfDescribing": "d42201000501024944060204436f64650b0304436974790b04034c61740a05034c6f6e0a1120064d455830303130064d657869636f4fc052dddd1a21ea365fc0636c28e0c9d9d3",
+      "message": "d010294d4558303031394d657869636f4bc052dddd1a21ea365bc0636c28e0c9d9d3",
+      "selfDescribing": "d42201000501024944060204436f64650b0304436974790b04034c61740a05034c6f6e0a10294d4558303031394d657869636f4bc052dddd1a21ea365bc0636c28e0c9d9d3",
       "json": "{\"ID\":1,\"Code\":\"MEX001\",\"City\":\"Mexico\",\"Lat\":-75.46662,\"Lon\":-155.37999}",
-      "refused": 23,
-      "corruptions": 108
+      "refused": 11,
+      "corruptions": 102
     },
     {
       "name": "corpus-metric",
@@ -420,10 +420,10 @@
         "Value": 3
       },
       "section": "1b01000301085365726965734944070202417404030556616c756504",
-      "message": "d018352c0ab955693aeb03",
-      "selfDescribing": "d41b01000301085365726965734944070202417404030556616c75650418352c0ab955693aeb03",
+      "message": "d01435270ab9556935eb03",
+      "selfDescribing": "d41b01000301085365726965734944070202417404030556616c7565041435270ab9556935eb03",
       "json": "{\"SeriesID\":53,\"At\":1767225610,\"Value\":1003}",
-      "refused": 12,
+      "refused": 7,
       "corruptions": 33
     },
     {
@@ -436,10 +436,10 @@
         "ParentID": 3
       },
       "section": "1a010003010249440602044e616d650b0308506172656e74494406",
-      "message": "d011200c546f6f6c7320536166657479",
-      "selfDescribing": "d41a010003010249440602044e616d650b0308506172656e7449440611200c546f6f6c7320536166657479",
+      "message": "d0102c0c546f6f6c7320536166657479",
+      "selfDescribing": "d41a010003010249440602044e616d650b0308506172656e74494406102c0c546f6f6c7320536166657479",
       "json": "{\"ID\":1,\"Name\":\"Tools Safety\",\"ParentID\":0}",
-      "refused": 11,
+      "refused": 9,
       "corruptions": 48
     },
     {
@@ -458,10 +458,10 @@
         "UserID": 2
       },
       "section": "ac0200090102494408020655736572494407030753746f7265494406040943726561746564417404050d537562746f74616c43656e747304060854617843656e747304070a546f74616c43656e74730408095061696443656e747304090644657461696c16010006010950726f6475637449440702085175616e74697479070309556e697443656e747304040a446973636f756e744250060505546178425006060a546f74616c43656e747304",
-      "message": "d0112824314c81796c6a5ba24d016a5c217bfe6e018bfe6e01901e020a18272139c759e80369c7111849213b98870149dc0559e8036bdb4c01",
-      "selfDescribing": "d4ac0200090102494408020655736572494407030753746f7265494406040943726561746564417404050d537562746f74616c43656e747304060854617843656e747304070a546f74616c43656e74730408095061696443656e747304090644657461696c16010006010950726f6475637449440702085175616e74697479070309556e697443656e747304040a446973636f756e744250060505546178425006060a546f74616c43656e747304112824314c81796c6a5ba24d016a5c217bfe6e018bfe6e01901e020a18272139c759e80369c7111849213b98870149dc0559e8036bdb4c01",
+      "message": "d0102424304781796c6a56a24d01655c2176fe6e0186fe6e019c1e020a14272034c755e80364c7111449203698870145dc0555e80366db4c01",
+      "selfDescribing": "d4ac0200090102494408020655736572494407030753746f7265494406040943726561746564417404050d537562746f74616c43656e747304060854617843656e747304070a546f74616c43656e74730408095061696443656e747304090644657461696c16010006010950726f6475637449440702085175616e74697479070309556e697443656e747304040a446973636f756e744250060505546178425006060a546f74616c43656e747304102424304781796c6a56a24d01655c2176fe6e0186fe6e019c1e020a14272034c755e80364c7111449203698870145dc0555e80366db4c01",
       "json": "{\"ID\":1,\"UserID\":36,\"StoreID\":1,\"CreatedAt\":1785493889,\"SubtotalCents\":85410,\"TaxCents\":8540,\"TotalCents\":93950,\"PaidCents\":93950,\"Detail\":[{\"ProductID\":39,\"Quantity\":1,\"UnitCents\":199,\"TaxBP\":1000,\"TotalCents\":199,\"DiscountBP\":0},{\"ProductID\":73,\"Quantity\":1,\"UnitCents\":100248,\"DiscountBP\":1500,\"TaxBP\":1000,\"TotalCents\":85211}]}",
-      "refused": 68,
+      "refused": 41,
       "corruptions": 171
     },
     {
@@ -480,10 +480,10 @@
         "UserID": 2
       },
       "section": "ac0200090102494408020655736572494407030753746f7265494406040943726561746564417404050d537562746f74616c43656e747304060854617843656e747304070a546f74616c43656e74730408095061696443656e747304090644657461696c16010006010950726f6475637449440702085175616e74697479070309556e697443656e747304040a446973636f756e744250060505546178425006060a546f74616c43656e747304",
-      "message": "d0180e2847314ccf8af7695befa2036a469f7b3542048b35420498a51110130008423fc69eb34b2874346e708d166a99709e2007000255a575550130240010c309f301f3012f27b70b1f4ec732e703c732c3091f4ec732b70b4fc3390b1f4e2f27401a000b00000000000000000080bb0000000000803e000000000000501c000ce8438334488334488334883e344883e8438334488334883e340860240010c309f301f3012f27b70b1f4e8e65a306c732c3095deac7328c0a4fc3390b1f4e2f27",
-      "selfDescribing": "d4ac0200090102494408020655736572494407030753746f7265494406040943726561746564417404050d537562746f74616c43656e747304060854617843656e747304070a546f74616c43656e74730408095061696443656e747304090644657461696c16010006010950726f6475637449440702085175616e74697479070309556e697443656e747304040a446973636f756e744250060505546178425006060a546f74616c43656e747304180e2847314ccf8af7695befa2036a469f7b3542048b35420498a51110130008423fc69eb34b2874346e708d166a99709e2007000255a575550130240010c309f301f3012f27b70b1f4ec732e703c732c3091f4ec732b70b4fc3390b1f4e2f27401a000b00000000000000000080bb0000000000803e000000000000501c000ce8438334488334488334883e344883e8438334488334883e340860240010c309f301f3012f27b70b1f4e8e65a306c732c3095deac7328c0a4fc3390b1f4e2f27",
+      "message": "d0140e24473047cf8af76956efa20365469f76354204863542049da5111c130008423fc69eb34b2874346e708d166a99709e2c07000255a57555013c240010c309f301f3012f27b70b1f4ec732e703c732c3091f4ec732b70b4fc3390b1f4e2f274c1a000b00000000000000000080bb0000000000803e0000000000005c1c000ce8438334488334488334883e344883e8438334488334883e34086c240010c309f301f3012f27b70b1f4e8e65a306c732c3095deac7328c0a4fc3390b1f4e2f27",
+      "selfDescribing": "d4ac0200090102494408020655736572494407030753746f7265494406040943726561746564417404050d537562746f74616c43656e747304060854617843656e747304070a546f74616c43656e74730408095061696443656e747304090644657461696c16010006010950726f6475637449440702085175616e74697479070309556e697443656e747304040a446973636f756e744250060505546178425006060a546f74616c43656e747304140e24473047cf8af76956efa20365469f76354204863542049da5111c130008423fc69eb34b2874346e708d166a99709e2c07000255a57555013c240010c309f301f3012f27b70b1f4ec732e703c732c3091f4ec732b70b4fc3390b1f4e2f274c1a000b00000000000000000080bb0000000000803e0000000000005c1c000ce8438334488334488334883e344883e8438334488334883e34086c240010c309f301f3012f27b70b1f4e8e65a306c732c3095deac7328c0a4fc3390b1f4e2f27",
       "json": "{\"ID\":14,\"UserID\":71,\"StoreID\":1,\"CreatedAt\":1777830607,\"SubtotalCents\":238319,\"TaxCents\":40774,\"TotalCents\":279093,\"PaidCents\":279093,\"Detail\":[{\"ProductID\":66,\"Quantity\":1,\"UnitCents\":2499,\"DiscountBP\":0,\"TaxBP\":1000,\"TotalCents\":2499},{\"ProductID\":63,\"Quantity\":1,\"UnitCents\":499,\"DiscountBP\":0,\"TaxBP\":2100,\"TotalCents\":499},{\"ProductID\":198,\"Quantity\":1,\"UnitCents\":499,\"DiscountBP\":0,\"TaxBP\":2100,\"TotalCents\":499},{\"ProductID\":158,\"Quantity\":1,\"UnitCents\":10031,\"DiscountBP\":0,\"TaxBP\":2100,\"TotalCents\":10031},{\"ProductID\":179,\"Quantity\":1,\"UnitCents\":2999,\"DiscountBP\":0,\"TaxBP\":2100,\"TotalCents\":2999},{\"ProductID\":75,\"Quantity\":1,\"UnitCents\":19999,\"DiscountBP\":0,\"TaxBP\":2100,\"TotalCents\":19999},{\"ProductID\":40,\"Quantity\":2,\"UnitCents\":12999,\"DiscountBP\":0,\"TaxBP\":2100,\"TotalCents\":25998},{\"ProductID\":116,\"Quantity\":2,\"UnitCents\":999,\"DiscountBP\":1500,\"TaxBP\":1000,\"TotalCents\":1699},{\"ProductID\":52,\"Quantity\":1,\"UnitCents\":12999,\"DiscountBP\":0,\"TaxBP\":2100,\"TotalCents\":12999},{\"ProductID\":110,\"Quantity\":1,\"UnitCents\":2499,\"DiscountBP\":0,\"TaxBP\":2100,\"TotalCents\":2499},{\"ProductID\":112,\"Quantity\":3,\"UnitCents\":19999,\"DiscountBP\":0,\"TaxBP\":1000,\"TotalCents\":59997},{\"ProductID\":141,\"Quantity\":1,\"UnitCents\":12999,\"DiscountBP\":0,\"TaxBP\":2100,\"TotalCents\":12999},{\"ProductID\":22,\"Quantity\":1,\"UnitCents\":2999,\"DiscountBP\":1000,\"TaxBP\":2100,\"TotalCents\":2700},{\"ProductID\":106,\"Quantity\":1,\"UnitCents\":49999,\"DiscountBP\":0,\"TaxBP\":2100,\"TotalCents\":49999},{\"ProductID\":153,\"Quantity\":1,\"UnitCents\":2873,\"DiscountBP\":0,\"TaxBP\":2100,\"TotalCents\":2873},{\"ProductID\":112,\"Quantity\":1,\"UnitCents\":19999,\"DiscountBP\":0,\"TaxBP\":1000,\"TotalCents\":19999},{\"ProductID\":158,\"Quantity\":1,\"UnitCents\":10031,\"DiscountBP\":0,\"TaxBP\":2100,\"TotalCents\":10031}]}",
-      "refused": 104,
+      "refused": 80,
       "corruptions": 579
     }
   ],
@@ -503,11 +503,11 @@
         "Upper": 6
       },
       "section": "3e01000800044e616d650b0103534b550b0204436974790b03044e6f74650b04054d697865640b05035261770b060555707065720b07074e756d626572730b",
-      "message": "d00c0873a3ddf4e2c89c091009534b552d30303034322c06804702297a003b0e64e9863c705a38863cd109304f1a4c168ec741a2eef403d29dee43a34998ec4bff16fad4ae1450040001fffe6c078c5c249c1668627b07ff7ffd01d4fd6c",
-      "selfDescribing": "d43e01000800044e616d650b0103534b550b0204436974790b03044e6f74650b04054d697865640b05035261770b060555707065720b07074e756d626572730b0c0873a3ddf4e2c89c091009534b552d30303034322c06804702297a003b0e64e9863c705a38863cd109304f1a4c168ec741a2eef403d29dee43a34998ec4bff16fad4ae1450040001fffe6c078c5c249c1668627b07ff7ffd01d4fd6c",
+      "message": "d00e0873a3ddf4e2c89c091c09534b552d30303034322e06804702297a003d0e64e9863c705a38863cd109304f1a4e168ec741a2eef403d29dee43a34998ec4bff16fad4ae14570001fffe6e078c5c249c1668627d07ff7ffd01d4fd6c",
+      "selfDescribing": "d43e01000800044e616d650b0103534b550b0204436974790b03044e6f74650b04054d697865640b05035261770b060555707065720b07074e756d626572730b0e0873a3ddf4e2c89c091c09534b552d30303034322e06804702297a003d0e64e9863c705a38863cd109304f1a4e168ec741a2eef403d29dee43a34998ec4bff16fad4ae14570001fffe6e078c5c249c1668627d07ff7ffd01d4fd6c",
       "json": "{\"Name\":\"Tin Light\",\"SKU\":\"SKU-00042\",\"City\":\"Arequipa\",\"Note\":\"el niño comió jamón\",\"Mixed\":\"Order #128: 3 items, 45% off\",\"Raw\":\"\\u0000\\u0001\\ufffd\\ufffd\",\"Upper\":\"MEXICO CITY\",\"Numbers\":\"1023 512 7\"}",
-      "refused": 58,
-      "corruptions": 282
+      "refused": 44,
+      "corruptions": 279
     },
     {
       "name": "packed-wide",
@@ -540,11 +540,11 @@
         "Upper": 6
       },
       "section": "3e01000800044e616d650b0103534b550b0204436974790b03044e6f74650b04054d697865640b05035261770b060555707065720b07074e756d626572730b",
-      "message": "d00d4a010000f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd1f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd1f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd1f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd1f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd1f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd11cc82088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a39",
-      "selfDescribing": "d43e01000800044e616d650b0103534b550b0204436974790b03044e6f74650b04054d697865640b05035261770b060555707065720b07074e756d626572730b0d4a010000f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd1f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd1f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd1f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd1f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd1f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd11cc82088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a39",
+      "message": "d00dfe4a01f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd1f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd1f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd1f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd1f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd1f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd11ec82088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a39",
+      "selfDescribing": "d43e01000800044e616d650b0103534b550b0204436974790b03044e6f74650b04054d697865640b05035261770b060555707065720b07074e756d626572730b0dfe4a01f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd1f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd1f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd1f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd1f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd1f3100d29124a87e86cd3c55d9d287b52bb4aa29e87e80532d6c3193d0fd19022a17488ce365ddcd589b227b5ab24ea79885e20633d9cd11ec82088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a392088418a39",
       "json": "{\"Name\":\"the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog \",\"SKU\":\"ABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGHABCDEFGH\",\"City\":\"\",\"Note\":\"\",\"Mixed\":\"\",\"Raw\":\"\",\"Upper\":\"\",\"Numbers\":\"\"}",
-      "refused": 24,
-      "corruptions": 1614
+      "refused": 18,
+      "corruptions": 1611
     },
     {
       "name": "packed-unpackable",
@@ -561,11 +561,11 @@
         "Upper": 6
       },
       "section": "3e01000800044e616d650b0103534b550b0204436974790b03044e6f74650b04054d697865640b05035261770b060555707065720b07074e756d626572730b",
-      "message": "d0000800010203040506071c0873a3ddf4e2c89c09",
-      "selfDescribing": "d43e01000800044e616d650b0103534b550b0204436974790b03044e6f74650b04054d697865640b05035261770b060555707065720b07074e756d626572730b000800010203040506071c0873a3ddf4e2c89c09",
+      "message": "d00b00010203040506071e0873a3ddf4e2c89c09",
+      "selfDescribing": "d43e01000800044e616d650b0103534b550b0204436974790b03044e6f74650b04054d697865640b05035261770b060555707065720b07074e756d626572730b0b00010203040506071e0873a3ddf4e2c89c09",
       "json": "{\"Name\":\"\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\",\"SKU\":\"Tin Light\",\"City\":\"\",\"Note\":\"\",\"Mixed\":\"\",\"Raw\":\"\",\"Upper\":\"\",\"Numbers\":\"\"}",
-      "refused": 15,
-      "corruptions": 63
+      "refused": 10,
+      "corruptions": 60
     },
     {
       "name": "packed-empty",
@@ -582,11 +582,11 @@
         "Upper": 6
       },
       "section": "3e01000800044e616d650b0103534b550b0204436974790b03044e6f74650b04054d697865640b05035261770b060555707065720b07074e756d626572730b",
-      "message": "d0100161",
-      "selfDescribing": "d43e01000800044e616d650b0103534b550b0204436974790b03044e6f74650b04054d697865640b05035261770b060555707065720b07074e756d626572730b100161",
+      "message": "d01461",
+      "selfDescribing": "d43e01000800044e616d650b0103534b550b0204436974790b03044e6f74650b04054d697865640b05035261770b060555707065720b07074e756d626572730b1461",
       "json": "{\"SKU\":\"a\",\"Name\":\"\",\"City\":\"\",\"Note\":\"\",\"Mixed\":\"\",\"Raw\":\"\",\"Upper\":\"\",\"Numbers\":\"\"}",
-      "refused": 9,
-      "corruptions": 12
+      "refused": 5,
+      "corruptions": 9
     },
     {
       "name": "packed-corpus-user",
@@ -602,11 +602,11 @@
         "Name": 2
       },
       "section": "3c010007010249440702044e616d650b0305456d61696c0b0407436f756e7472790b050341676505060641637469766500070943726561746564417404",
-      "message": "d0112c0a8e2f5411d09b48e102883b186ea18a4057440a1740eca067e1e2eb8a5cc0de225db96836400243525824617c5e5f9d6a",
-      "selfDescribing": "d43c010007010249440702044e616d650b0305456d61696c0b0407436f756e7472790b050341676505060641637469766500070943726561746564417404112c0a8e2f5411d09b48e102883b186ea18a4057440a1740eca067e1e2eb8a5cc0de225db96836400243525824617c5e5f9d6a",
+      "message": "d0102e0a8e2f5411d09b48e102883d186ea18a4057440a1740eca067e1e2eb8a5cc0de225db96836454352542460775e5f9d6a",
+      "selfDescribing": "d43c010007010249440702044e616d650b0305456d61696c0b0407436f756e7472790b050341676505060641637469766500070943726561746564417404102e0a8e2f5411d09b48e102883d186ea18a4057440a1740eca067e1e2eb8a5cc0de225db96836454352542460775e5f9d6a",
       "json": "{\"ID\":1,\"Name\":\"Olivia Escobar\",\"Email\":\"olivia.escobar0@corp.example.org\",\"Country\":\"CR\",\"Age\":36,\"Active\":true,\"CreatedAt\":1788698462}",
-      "refused": 32,
-      "corruptions": 156
+      "refused": 20,
+      "corruptions": 153
     },
     {
       "name": "packed-corpus-product",
@@ -622,11 +622,11 @@
         "Tags": 7
       },
       "section": "3e01000701024944070203534b550b03044e616d650b040a507269636543656e747304050553746f636b07060a43617465676f727949440607045461677314",
-      "message": "d0112c0ecdc549446733dcce3ae8a0830e363c0c9113d48a8b820cbd171883444a4fc358136670030a52455455524e41424c45034e455708494d504f52544544",
-      "selfDescribing": "d43e01000701024944070203534b550b03044e616d650b040a507269636543656e747304050553746f636b07060a43617465676f727949440607045461677314112c0ecdc549446733dcce3ae8a0830e363c0c9113d48a8b820cbd171883444a4fc358136670030a52455455524e41424c45034e455708494d504f52544544",
+      "message": "d0102e0ecdc549446733dcce3ae8a0830e363e0c9113d48a8b820cbd17188344454fc3541364067c180a52455455524e41424c45034e455708494d504f52544544",
+      "selfDescribing": "d43e01000701024944070203534b550b03044e616d650b040a507269636543656e747304050553746f636b07060a43617465676f727949440607045461677314102e0ecdc549446733dcce3ae8a0830e363e0c9113d48a8b820cbd17188344454fc3541364067c180a52455455524e41424c45034e455708494d504f52544544",
       "json": "{\"ID\":1,\"SKU\":\"NORTEC-TBX-0000\",\"Name\":\"Reinforced Ladder\",\"PriceCents\":49999,\"Stock\":19,\"CategoryID\":6,\"Tags\":[\"RETURNABLE\",\"NEW\",\"IMPORTED\"]}",
-      "refused": 38,
-      "corruptions": 192
+      "refused": 33,
+      "corruptions": 195
     }
   ]
 }

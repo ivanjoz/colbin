@@ -121,9 +121,9 @@ func readWideField(reader *wire.Reader8, field *planField, record unsafe.Pointer
 
 // unmarshalWide decodes a wide-key message into an already-zeroed record.
 //
-// A key the plan does not declare is *skipped* rather than refused, which is the
-// whole point of the wide width: the descriptor sizes the field, so a reader can
-// step over something a newer peer added. The narrow path cannot, and says so.
+// A key the plan does not declare is *skipped* rather than refused: the
+// descriptor sizes the field, so a reader can step over something a newer peer
+// added. The narrow path does the same from its nibble.
 func unmarshalWide(body, section []byte, plan *typePlan, record unsafe.Pointer) error {
 	// A separate reader per branch, for the reason appendPlan declares a separate
 	// writer: escape analysis is per variable, and sharing one with the composite

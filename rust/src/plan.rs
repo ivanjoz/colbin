@@ -174,8 +174,8 @@ pub struct Plan {
     /// the object that links them. See `codec/pages.go`.
     pub is_page: bool,
     /// Field positions by key, so a walk resolves a key in one load. `-1` means
-    /// the message holds a key this plan does not list, which under eight bits
-    /// is a field to step over and under four is the end of the decode.
+    /// the message holds a key this plan does not list, which at either key
+    /// width is a field to step over.
     by_key: Vec<i16>,
 }
 

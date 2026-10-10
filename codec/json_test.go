@@ -520,17 +520,6 @@ func TestDecodeAnyNestedAndColumnar(t *testing.T) {
 	}
 }
 
-// A narrow key the schema does not list cannot be skipped, and the error has to
-// say so rather than leave a reader wondering which side is wrong.
-func TestJSONRefusesAnUnknownNarrowKey(t *testing.T) {
-	message := mustMarshal(t, &everyShape{Counts: []uint32{7}})
-	schema := mustSchema(t, &charge{})
-	_, err := ToJSON(schema, message)
-	if err == nil || !strings.Contains(err.Error(), "narrow key cannot be skipped") {
-		t.Fatalf("a foreign key gave %v", err)
-	}
-}
-
 // A wide key the schema does not list is stepped over, which is what the wide
 // width is for — the same evolution the Go decoder gets.
 func TestJSONSkipsAnUnknownWideKey(t *testing.T) {
@@ -690,7 +679,7 @@ func TestTableRowCountIsNotTrusted(t *testing.T) {
 //
 // packed5 used to force the wide key, so a narrow string could never be packed
 // and the schema walk's narrow path could read it with Bytes. Once the encoding
-// moved into the blob header's escape codes that stopped being true, and Marshal
+// moved into the narrow field's own header that stopped being true, and Marshal
 // began writing messages ToJSON and DecodeAny refused with "unassigned size
 // escape code" -- while Unmarshal, which had been updated, read them fine. A
 // message that only some of its own readers accept is the failure this package

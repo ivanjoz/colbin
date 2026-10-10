@@ -1,31 +1,39 @@
-//! The four-bit key width, K4: the key shares one byte with the descriptor and
-//! the field's class comes from the schema.
+//! The four-bit key width, K4: the key shares one byte with a nibble that says
+//! how long the field is, and the field's type comes from the schema.
 //!
-//! This is the default and the fast path. What it gives up is the one thing four
-//! descriptor bits cannot carry: a class, and so the ability to step over a
-//! field whose key the reader has never heard of. [`Reader::skip`] refuses;
-//! [`super::Reader8::skip`] works.
-//!
-//! Composites are here too. A narrow descriptor has no room for a class and does
-//! not need one — a narrow reader has the schema — so what it takes from the
-//! wire is the same byte length the wide form uses, in the same four detail
-//! bits:
+//! This is the default and the fast path. Four bits have no room for a class,
+//! so the nibble does the one thing a reader needs before it knows the type —
+//! it sizes the field — and the type decides only what the bytes mean:
 //!
 //! ```text
-//! struct  [key:4][k8:1][—:1][lw:2]     [len: lw] [key run]
-//! list    [key:4][homog:1][—:1][lw:2]  [len: lw] [count] ( [len] [body] )*
-//! map     [key:4][sub=0:1][—:1][lw:2]  [len: lw] [count] ( key value )*
-//! table   [key:4][sub=1:1][k8:1][lw:2] [len: lw] [rows]  ( [key][desc][column] )*
+//! [key:4][nibble:4] [payload]
+//!
+//!   0..3             no payload
+//!   4..11            exactly nibble − 3 bytes, 1..8
+//!   12..15 (11 f1f0) a length, then that many bytes; f1f0 is the type's flag
+//!
+//!   length           one byte ≤ 253 · 0xFE then a u16 · 0xFF then a u32
+//! ```
+//!
+//! That is what makes [`Reader::skip`] work under narrow keys exactly as
+//! [`super::Reader8::skip`] does under wide ones: a type may drop a field, or
+//! gain one, and still read every row already written.
+//!
+//! Composites are the length form with a body, and their flag tells apart the
+//! shapes one Rust type can take:
+//!
+//! ```text
+//! struct  [key:4][1 1 0 k8]  [length] [key run]
+//! list    [key:4][1 1 0 0]   [length] [count] ( [elementLength] [key run] )*
+//! table   [key:4][1 1 0 1]   [length] [rows]  column*
+//! map     [key:4][1 1 0 0]   [length] [count] ( key element, value element )*
 //! ```
 
 use super::{
-    ARRAY_POSITIVE_FLAG, ARRAY_WIDTH_SHIFT, ELEMENT_SIZE_ESCAPE, ESCAPE_2BYTES, ESCAPE_4BYTES,
-    ESCAPE_8BYTES, ESCAPE_PACKED1_LO, ESCAPE_PACKED1_UP, ESCAPE_PACKED4_LO, ESCAPE_PACKED4_UP,
-    INLINE_ARRAY_COUNT, INLINE_BLOB_SIZE, INLINE_COMPOSITE_LENGTH, INLINE_ELEMENT_SIZE,
-    INT_POSITIVE_FLAG, Integer, LENGTH_WIDTH, MAGNITUDE_WIDTH, MORE_ARRAY_LEN_FLAG, MORE_SIZE_FLAG,
-    Mark, SIZE_CODE_ONE, UINT_INLINE_MAX, UINT_WIDTH_BASE, append_array, append_count,
-    append_elements, append_magnitude, array_plan_of, bit_length, le_uint, length_code_for,
-    read_count, size_code_for,
+    ELEMENT_SIZE_ESCAPE, INLINE_ELEMENT_SIZE, INT_POSITIVE_FLAG, Integer, LENGTH_WIDTH,
+    MAGNITUDE_WIDTH, Mark, UINT_INLINE_MAX, UINT_WIDTH_BASE, append_array, append_count,
+    append_elements, append_magnitude, bit_length, le_uint, length_code_for, read_count,
+    size_code_for,
 };
 use crate::Error;
 use crate::column;
@@ -33,12 +41,121 @@ use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+/// The last nibble that carries no payload. For a number it *is* the value —
+/// `nibble + 1`, or −1 at nibble 3 for a signed field — and for a bool `true`.
+const NIBBLE_INLINE_LAST: u8 = 3;
+
+/// What a sized nibble is above its byte count: nibble 4 is one byte and
+/// nibble 11 eight, so a value of up to eight bytes carries no length at all.
+const NIBBLE_SIZED_BIAS: u8 = 3;
+
+/// The length form, `1 1 f1 f0`: a length follows the header, and the low two
+/// bits are a flag whose meaning is the type's. Every nibble from here up is
+/// sized the same way, which is why a flag can never change the field's size.
+const NIBBLE_LENGTH: u8 = 0b1100;
+
+/// The flag bits of the length form.
+const FLAG_MASK: u8 = 0b11;
+
+/// A string's flags: the bytes as they are, or packed5 opening in lower or in
+/// upper case (`INTERNALS.md` §8). `11` is unassigned and refused.
+const STRING_RAW: u8 = 0b00;
+const STRING_PACKED_LOWER: u8 = 0b01;
+const STRING_PACKED_UPPER: u8 = 0b10;
+
+/// A composite's `f0`: the nested run's own key width for a struct, and table
+/// rather than list for a slice of structs. A struct and a map are different
+/// Rust types, so their flags overlap nothing a reader could confuse.
+const COMPOSITE_STRUCT_WIDE: u8 = 0b01;
+const COMPOSITE_TABLE: u8 = 0b01;
+
+/// The longest length one byte holds. 254 and 255 are the escapes, so a length
+/// of either is spelled the long way.
+const LENGTH_INLINE_MAX: usize = 253;
+const LENGTH_ESCAPE_U16: u8 = 0xFE;
+const LENGTH_ESCAPE_U32: u8 = 0xFF;
+
+/// The widest a narrow field can be: its length is at most a u32. A blob
+/// larger than that is a wide field's job.
+const NARROW_FIELD_LIMIT: &str = "colbin: a narrow field holds at most 2^32 − 1 bytes";
+
+/// What a length of `size` occupies in front of its bytes.
+const fn length_bytes(size: usize) -> usize {
+    if size <= LENGTH_INLINE_MAX {
+        1
+    } else if size <= 0xFFFF {
+        3
+    } else {
+        5
+    }
+}
+
+/// Writes a length in the shortest of its three forms.
+#[allow(clippy::cast_possible_truncation)]
+fn append_length(buf: &mut Vec<u8>, size: usize) {
+    if size <= LENGTH_INLINE_MAX {
+        buf.push(size as u8);
+    } else if size <= 0xFFFF {
+        buf.push(LENGTH_ESCAPE_U16);
+        buf.extend_from_slice(&(size as u16).to_le_bytes());
+    } else {
+        let size = u32::try_from(size).expect(NARROW_FIELD_LIMIT);
+        buf.push(LENGTH_ESCAPE_U32);
+        buf.extend_from_slice(&size.to_le_bytes());
+    }
+}
+
+/// The bytes a value of `bits` significant bits occupies, at least one.
+const fn bytes_for_bits(bits: usize) -> usize {
+    if bits == 0 { 1 } else { bits.div_ceil(8) }
+}
+
+/// The element width code for an array that needs `bytes` per element, and the
+/// width it names: 1, 2, 4 or 8.
+const fn array_width_for(bytes: usize) -> (usize, u8) {
+    match bytes {
+        1 => (1, 0),
+        2 => (2, 1),
+        3 | 4 => (4, 2),
+        _ => (8, 3),
+    }
+}
+
+/// Picks the narrowest element width that holds every element of an array.
+///
+/// The form is the element *type's*, not the values': an unsigned type writes
+/// magnitudes and a signed one two's complement, whatever the elements happen
+/// to be. A signed array that is all positive could have been magnitudes a bit
+/// narrower, but then the reader would need a flag to know which, and the
+/// length form's two flag bits are already the width. The OR keeps the loop to
+/// one operation per element: its bit length is the widest element's.
+fn array_plan<T: Integer>(values: &[T]) -> (usize, u8) {
+    let mut seen = 0_u64;
+    if T::SIGNED_TYPE {
+        for value in values {
+            let signed = value.as_i64();
+            // A negative value's significant bits are its complement's, so −1
+            // needs only the sign bit and −128 fits a byte.
+            seen |= (signed ^ (signed >> 63)).cast_unsigned();
+        }
+        return array_width_for(bytes_for_bits(bit_length(seen) + 1));
+    }
+    for value in values {
+        seen |= value.as_u64();
+    }
+    array_width_for(bytes_for_bits(bit_length(seen)))
+}
+
 /// Appends fields with four-bit keys onto a buffer the caller owns.
 ///
 /// # A write cannot fail
 ///
-/// There is no error to check. Sizes escalate rather than cap, so nothing a
-/// caller can hold in memory is too large to describe.
+/// There is no error to check. Every value has a form, and a length escalates
+/// from one byte to three to five as the field grows. The one ceiling is the
+/// u32 length itself — a narrow field holds at most 2³² − 1 bytes — and a
+/// program that hands a narrow writer more than four gigabytes in one field has
+/// chosen the wrong key width, which panics rather than writing a field nothing
+/// could read back.
 ///
 /// # Keys are not checked, on purpose
 ///
@@ -62,163 +179,90 @@ impl<'a> Writer<'a> {
 
     /// Writes an unsigned integer, and nothing at all when it is zero.
     ///
-    /// Zero is tested first even though it is inside the inline range: folding
-    /// it into the inline test saves a compare on a small non-zero value and
-    /// spends one on every omitted field, which is the common case on a record
-    /// the format is built to leave half empty. Go measured 7.6 ns against 6.5
-    /// for that order on a ten-field record; LLVM is indifferent here.
+    /// 1..=4 are the nibble itself, one byte for the whole field; anything
+    /// larger is its little-endian bytes behind a nibble that counts them. Zero
+    /// has no inline code because the writer never writes one except behind a
+    /// pointer, where it is the explicit zero of [`Writer::zero`].
     ///
-    /// `wire/narrow.go` then goes further and folds the two compares into
-    /// `value-1 < uintInlineMax`, and hides the wide half behind
-    /// `//go:noinline`, to stay inside Go's inline budget. Neither is worth
-    /// copying: this compiles to the same code either way, and the plain
-    /// spelling is the one that says what it means. See RATIONALE.md, "The
-    /// inline budget is part of the format's speed".
+    /// Zero is tested first even though it is below the inline range: an
+    /// omitted field is the common case on a record the format is built to
+    /// leave half empty, so it is the one that should cost a single compare.
     #[allow(clippy::cast_possible_truncation)]
     pub fn u64(&mut self, key: u8, value: u64) {
         if value == 0 {
             return;
         }
-        if value <= UINT_INLINE_MAX {
-            self.buf.push(key << 4 | value as u8);
+        if value <= u64::from(NIBBLE_INLINE_LAST) + 1 {
+            self.buf.push(key << 4 | (value as u8 - 1));
             return;
         }
-        if value <= 0xFF {
-            self.buf.push(key << 4 | UINT_WIDTH_BASE);
-            self.buf.push(value as u8);
-            return;
-        }
-        self.uint_wide(key, value);
+        self.sized(key, value);
     }
 
+    /// Writes a value of 1..8 bytes behind the nibble that counts them, which
+    /// is the unsigned form and a signed field's positive one.
     #[allow(clippy::cast_possible_truncation)]
-    fn uint_wide(&mut self, key: u8, value: u64) {
-        let width = bit_length(value).div_ceil(8);
-        self.buf
-            .push(key << 4 | (UINT_WIDTH_BASE + width as u8 - 1));
+    fn sized(&mut self, key: u8, value: u64) {
+        let width = bytes_for_bits(bit_length(value));
+        self.buf.push(key << 4 | (width as u8 + NIBBLE_SIZED_BIAS));
         append_magnitude(self.buf, value, width);
     }
 
-    /// Writes a signed integer as a sign bit and a magnitude.
-    #[allow(clippy::cast_possible_truncation)]
+    /// Writes a signed integer.
+    ///
+    /// A positive value costs what an unsigned one does, except that the inline
+    /// codes stop at 3 to give −1 the fourth: −1 is the one negative common
+    /// enough to deserve a byte. Every other negative is its magnitude in the
+    /// length form, a byte more than the magnitude — the trade that keeps a
+    /// signed field's positives, which are most of them, free of a sign bit.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn i64(&mut self, key: u8, value: i64) {
-        if value > 0 && value <= 0xFF {
-            self.buf.push(key << 4 | INT_POSITIVE_FLAG | 1);
-            self.buf.push(value as u8);
-            return;
+        match value {
+            0 => {}
+            1..=3 => self.buf.push(key << 4 | (value as u8 - 1)),
+            -1 => self.buf.push(key << 4 | NIBBLE_INLINE_LAST),
+            4.. => self.sized(key, value as u64),
+            _ => {
+                // Negating through u64 rather than i64 keeps i64::MIN, whose
+                // positive counterpart does not exist as an i64.
+                let magnitude = (value as u64).wrapping_neg();
+                let width = bytes_for_bits(bit_length(magnitude));
+                self.buf.push(key << 4 | NIBBLE_LENGTH);
+                self.buf.push(width as u8);
+                append_magnitude(self.buf, magnitude, width);
+            }
         }
-        if value == 0 {
-            return;
-        }
-        self.int_wide(key, value);
     }
 
-    #[allow(clippy::cast_sign_loss)]
-    fn int_wide(&mut self, key: u8, value: i64) {
-        let mut header = key << 4 | INT_POSITIVE_FLAG;
-        let mut magnitude = value as u64;
-        if value < 0 {
-            header = key << 4;
-            // Negating through u64 rather than i64 keeps i64::MIN, whose positive
-            // counterpart does not exist as an i64.
-            magnitude = (value as u64).wrapping_neg();
-        }
-        self.magnitude(header, magnitude);
-    }
-
-    /// Writes one byte when true and nothing when false. True is the unsigned
-    /// inline value 1, which is a whole field in one byte.
+    /// Writes one byte when true and nothing when false. True is nibble 0, the
+    /// unsigned value 1, which is a whole field in one byte.
     pub fn bool(&mut self, key: u8, value: bool) {
         if !value {
             return;
         }
-        self.buf.push(key << 4 | 1);
+        self.buf.push(key << 4);
     }
 
-    /// Writes the header and as many bytes as the value actually needs.
-    fn magnitude(&mut self, header: u8, magnitude: u64) {
-        if magnitude == 1 {
-            self.buf.push(header | SIZE_CODE_ONE);
-            return;
-        }
-        let (code, width) = size_code_for(magnitude);
-        self.buf.push(header | code);
-        append_magnitude(self.buf, magnitude, width);
-    }
-
-    /// Writes a field whose type cannot exceed two bytes.
-    ///
-    /// The width-typed entry points exist because a field's Go or Rust type
-    /// already fixes how wide it can be: a `u16` is one byte or two and never
-    /// three.
-    #[allow(clippy::cast_possible_truncation)]
+    /// Writes a `u16` field. The width-typed entry points mirror Go's and the
+    /// wide writer's; under narrow keys a value's size depends only on the
+    /// value, so they all take the one path.
     pub fn u16(&mut self, key: u8, value: u16) {
-        if value == 0 {
-            return;
-        }
-        if u64::from(value) <= UINT_INLINE_MAX {
-            self.buf.push(key << 4 | value as u8);
-            return;
-        }
-        if value <= 0xFF {
-            self.buf.push(key << 4 | UINT_WIDTH_BASE);
-            self.buf.push(value as u8);
-            return;
-        }
-        self.buf.push(key << 4 | (UINT_WIDTH_BASE + 1));
-        self.buf.extend_from_slice(&value.to_le_bytes());
+        self.u64(key, u64::from(value));
     }
 
-    /// Writes a `u8` field, which travels in the `u16` shape exactly as it does
-    /// in Go.
+    /// Writes a `u8` field.
     pub fn u8(&mut self, key: u8, value: u8) {
-        self.u16(key, u16::from(value));
+        self.u64(key, u64::from(value));
     }
 
-    /// Writes a field whose type cannot exceed four bytes.
-    #[allow(clippy::cast_possible_truncation)]
+    /// Writes a `u32` field.
     pub fn u32(&mut self, key: u8, value: u32) {
-        if value == 0 {
-            return;
-        }
-        if u64::from(value) <= UINT_INLINE_MAX {
-            self.buf.push(key << 4 | value as u8);
-            return;
-        }
-        if value <= 0xFF {
-            self.buf.push(key << 4 | UINT_WIDTH_BASE);
-            self.buf.push(value as u8);
-            return;
-        }
-        self.u32_wide(key, value);
-    }
-
-    #[allow(clippy::cast_possible_truncation)]
-    fn u32_wide(&mut self, key: u8, value: u32) {
-        if value <= 0xFFFF {
-            self.buf.push(key << 4 | (UINT_WIDTH_BASE + 1));
-            self.buf.extend_from_slice(&(value as u16).to_le_bytes());
-        } else if value <= 0x00FF_FFFF {
-            self.buf.push(key << 4 | (UINT_WIDTH_BASE + 2));
-            self.buf.extend_from_slice(&value.to_le_bytes()[..3]);
-        } else {
-            self.buf.push(key << 4 | (UINT_WIDTH_BASE + 3));
-            self.buf.extend_from_slice(&value.to_le_bytes());
-        }
+        self.u64(key, u64::from(value));
     }
 
     /// Writes a signed field no wider than four bytes.
-    #[allow(clippy::cast_possible_truncation)]
     pub fn i32(&mut self, key: u8, value: i32) {
-        if value > 0 && value <= 0xFF {
-            self.buf.push(key << 4 | INT_POSITIVE_FLAG | 1);
-            self.buf.push(value as u8);
-            return;
-        }
-        if value == 0 {
-            return;
-        }
-        self.int_wide(key, i64::from(value));
+        self.i64(key, i64::from(value));
     }
 
     /// Writes a `f32` as its reversed bit pattern.
@@ -227,7 +271,7 @@ impl<'a> Writer<'a> {
     /// are its most significant ones; a float's are its *least* significant — the
     /// low mantissa bits — while its exponent and sign are never zero. Reversing
     /// swaps the two ends and the integer path then works unchanged: 1.0 costs
-    /// two bytes rather than eight, and an `f64` holding a value that is exactly
+    /// two bytes rather than five, and an `f64` holding a value that is exactly
     /// an `f32` costs five.
     pub fn f32(&mut self, key: u8, value: f32) {
         self.u64(key, u64::from(value.to_bits().swap_bytes()));
@@ -238,7 +282,7 @@ impl<'a> Writer<'a> {
         self.u64(key, value.to_bits().swap_bytes());
     }
 
-    /// Writes a length-prefixed string, and nothing when it is empty.
+    /// Writes a string, and nothing when it is empty.
     pub fn string(&mut self, key: u8, value: &str) {
         self.bytes(key, value.as_bytes());
     }
@@ -246,11 +290,11 @@ impl<'a> Writer<'a> {
     /// Writes a string in the packed5 encoding when that is smaller than the raw
     /// bytes, and raw when it is not.
     ///
-    /// The narrow header has no `enc` field, so the encoding rides in the blob
-    /// header's escape code. That keeps a packed string's header at two bytes,
-    /// the same as a raw one's, and is what lets packed5 run under narrow keys at
-    /// all: before this it forced a message to wide keys, which cost a byte on
-    /// every field rather than on the strings.
+    /// The nibble has no `enc` field, so the encoding rides in the length
+    /// form's flag, which also carries the one bit the schema cannot know: the
+    /// case mode the unit stream opens in. A packed string therefore always
+    /// pays for a length where a raw one of up to eight bytes does not — which
+    /// is why the choice compares whole fields rather than payloads.
     pub fn packed_string(&mut self, key: u8, value: &str) {
         self.packed_bytes(key, value.as_bytes());
     }
@@ -258,7 +302,6 @@ impl<'a> Writer<'a> {
     /// The same, for a caller holding UTF-8 it has not made a `str` of — which
     /// is every string the JSON encoder writes, since those are slices into the
     /// scanner's text arena.
-    #[allow(clippy::cast_possible_truncation)]
     pub fn packed_bytes(&mut self, key: u8, value: &[u8]) {
         if value.is_empty() {
             return;
@@ -267,159 +310,106 @@ impl<'a> Writer<'a> {
             self.bytes(key, value);
             return;
         };
-        // Past 255 bytes a packed header is five bytes against a raw one's two
-        // or three, so the comparison is of whole fields, not payloads.
-        let packed_header = if stream.len() <= 0xFF { 2 } else { 5 };
-        if packed_header + stream.len() >= blob_header_size(value.len()) + value.len() {
+        // Packed is chosen only when strictly smaller, so turning packing on can
+        // never make a message larger — and a tie keeps the raw form, which is
+        // a sub-slice of the message on the way back in rather than a decode.
+        if length_bytes(stream.len()) + stream.len() >= raw_size(value.len()) {
             self.bytes(key, value);
             return;
         }
-        if stream.len() <= 0xFF {
-            let code = if upper {
-                ESCAPE_PACKED1_UP
-            } else {
-                ESCAPE_PACKED1_LO
-            };
-            self.buf.push(key << 4 | MORE_SIZE_FLAG | code);
-            self.buf.push(stream.len() as u8);
+        let flag = if upper {
+            STRING_PACKED_UPPER
         } else {
-            let code = if upper {
-                ESCAPE_PACKED4_UP
-            } else {
-                ESCAPE_PACKED4_LO
-            };
-            self.buf.push(key << 4 | MORE_SIZE_FLAG | code);
-            self.buf
-                .extend_from_slice(&(stream.len() as u32).to_le_bytes());
-        }
+            STRING_PACKED_LOWER
+        };
+        self.buf.push(key << 4 | NIBBLE_LENGTH | flag);
+        append_length(self.buf, stream.len());
         self.buf.extend_from_slice(&stream);
     }
 
-    /// Writes a length-prefixed blob, and nothing when it is empty.
+    /// Writes a blob, and nothing when it is empty. One of up to eight bytes is
+    /// sized by its nibble and carries no length.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn bytes(&mut self, key: u8, value: &[u8]) {
-        if value.is_empty() {
-            return;
+        match value.len() {
+            0 => return,
+            size @ 1..=8 => self.buf.push(key << 4 | (size as u8 + NIBBLE_SIZED_BIAS)),
+            size => {
+                self.buf.push(key << 4 | NIBBLE_LENGTH | STRING_RAW);
+                append_length(self.buf, size);
+            }
         }
-        self.blob_header(key, value.len());
         self.buf.extend_from_slice(value);
-    }
-
-    /// Writes the header a string, blob or string array carries: two bytes
-    /// holding an eleven-bit size, or one byte and a wider size when that will
-    /// not hold it.
-    #[allow(clippy::cast_possible_truncation)]
-    fn blob_header(&mut self, key: u8, size: usize) {
-        if size <= INLINE_BLOB_SIZE {
-            self.buf.push(key << 4 | ((size >> 8) as u8 & 0b111));
-            self.buf.push(size as u8);
-            return;
-        }
-        self.escaped_size(key, size as u64);
-    }
-
-    /// Writes the one-byte header whose three size bits name the width of the
-    /// size that follows it.
-    #[allow(clippy::cast_possible_truncation)]
-    fn escaped_size(&mut self, key: u8, size: u64) {
-        if size <= 0xFFFF {
-            self.buf.push(key << 4 | MORE_SIZE_FLAG | ESCAPE_2BYTES);
-            self.buf.extend_from_slice(&(size as u16).to_le_bytes());
-        } else if size <= 0xFFFF_FFFF {
-            self.buf.push(key << 4 | MORE_SIZE_FLAG | ESCAPE_4BYTES);
-            self.buf.extend_from_slice(&(size as u32).to_le_bytes());
-        } else {
-            self.buf.push(key << 4 | MORE_SIZE_FLAG | ESCAPE_8BYTES);
-            self.buf.extend_from_slice(&size.to_le_bytes());
-        }
     }
 
     /// Writes an array of integers at one width, chosen from the widest element,
     /// and nothing when the array is empty.
+    ///
+    /// The flag bits are the width and the length is the bytes, so the count is
+    /// `length >> flag` and never stored.
     pub fn ints<T: Integer>(&mut self, key: u8, values: &[T]) {
         if values.is_empty() {
             return;
         }
-        let (all_positive, width, width_code) = array_plan_of(values);
-        let mut header = key << 4 | width_code << ARRAY_WIDTH_SHIFT;
-        if all_positive {
-            header |= ARRAY_POSITIVE_FLAG;
-        }
-        self.array_header(header, values.len());
+        let (width, code) = array_plan(values);
+        self.buf.push(key << 4 | NIBBLE_LENGTH | code);
+        append_length(self.buf, values.len() * width);
         append_elements(self.buf, values, width);
     }
 
-    /// Writes two bytes holding an eight-bit count, or one byte and a four-byte
-    /// count when that will not hold it.
-    #[allow(clippy::cast_possible_truncation)]
-    fn array_header(&mut self, header: u8, count: usize) {
-        if count <= INLINE_ARRAY_COUNT {
-            self.buf.push(header);
-            self.buf.push(count as u8);
-            return;
-        }
-        self.buf.push(header | MORE_ARRAY_LEN_FLAG);
-        self.buf.extend_from_slice(&(count as u32).to_le_bytes());
-    }
-
-    /// Writes a count and then each element behind its own length.
+    /// Writes each element behind its own size, and nothing when the array is
+    /// empty.
     ///
-    /// The element length is one byte with an escape rather than a fixed two for
-    /// the same reason the header sizes escalate: it removes the ceiling, and it
-    /// makes the common element — anything under 255 bytes — cost one byte.
+    /// There is no count: the reader recovers it by walking the sizes it has to
+    /// walk anyway. The element size is one byte with an escape rather than a
+    /// fixed two for the reason every length here escalates: it removes the
+    /// ceiling, and the common element — anything under 255 bytes — costs one
+    /// byte. Every size is known before a byte is written, so the field's
+    /// length is too, and unlike a composite it needs no backpatch.
     #[allow(clippy::cast_possible_truncation)]
     pub fn strings<S: AsRef<[u8]>>(&mut self, key: u8, values: &[S]) {
         if values.is_empty() {
             return;
         }
-        self.blob_header(key, values.len());
+        let length = values
+            .iter()
+            .map(|value| element_size_bytes(value.as_ref().len()) + value.as_ref().len())
+            .sum();
+        self.buf.push(key << 4 | NIBBLE_LENGTH);
+        append_length(self.buf, length);
         for value in values {
             let value = value.as_ref();
             if value.len() <= INLINE_ELEMENT_SIZE {
                 self.buf.push(value.len() as u8);
             } else {
+                let size = u32::try_from(value.len()).expect(NARROW_FIELD_LIMIT);
                 self.buf.push(ELEMENT_SIZE_ESCAPE);
-                self.buf
-                    .extend_from_slice(&(value.len() as u32).to_le_bytes());
+                self.buf.extend_from_slice(&size.to_le_bytes());
             }
             self.buf.extend_from_slice(value);
         }
     }
 
-    // Zero and EmptyString write a field the omit-zero rule would otherwise drop.
-    //
-    // They exist for optional fields. An absent key means `None`, so a `Some`
-    // holding a zero value has to put something on the wire or the two would be
-    // indistinguishable — which is the one place this format needs to say "zero"
-    // out loud rather than by omission.
-
-    /// Writes an explicit zero in the unsigned form, which is what
-    /// [`Reader::u64`], [`Reader::bool`], [`Reader::f32`] and [`Reader::f64`]
-    /// all read. It is a single byte: the unsigned nibble carries 0..=7
-    /// outright.
+    /// Writes a field the omit-zero rule would otherwise drop: the length form
+    /// with nothing in it, `[key | 1100] 00`.
+    ///
+    /// It exists for optional fields. An absent key means `None`, so a `Some`
+    /// holding a zero value has to put something on the wire or the two would be
+    /// indistinguishable — which is the one place this format needs to say
+    /// "zero" out loud rather than by omission. Every type reads this one form
+    /// as its zero, so there is one writer for all of them rather than one per
+    /// table of codes.
     pub fn zero(&mut self, key: u8) {
-        self.buf.push(key << 4);
-    }
-
-    /// Writes an explicit zero in the signed form, for a field [`Reader::i64`]
-    /// will read. The two nibbles are different tables, so a zero has to be
-    /// written in the one its reader will use.
-    pub fn zero_signed(&mut self, key: u8) {
-        self.buf.push(key << 4 | INT_POSITIVE_FLAG | 1);
-        self.buf.push(0);
-    }
-
-    /// Writes a blob of no bytes.
-    pub fn empty_string(&mut self, key: u8) {
-        self.buf.push(key << 4);
+        self.buf.push(key << 4 | NIBBLE_LENGTH);
         self.buf.push(0);
     }
 
     // --- composites ----------------------------------------------------------
 
-    /// Writes a key, a detail nibble and a one-byte length placeholder, exactly
-    /// as the wide form does minus the class.
-    fn open_narrow_composite(&mut self, key: u8, detail: u8) -> Mark {
-        self.buf.push(key << 4 | detail);
+    /// Writes the length form's header and a one-byte length placeholder, which
+    /// [`Writer::close`] patches once the body is written.
+    fn open_composite(&mut self, key: u8, flag: u8) -> Mark {
+        self.buf.push(key << 4 | NIBBLE_LENGTH | flag);
         self.buf.push(0);
         Mark {
             at: self.buf.len() - 1,
@@ -428,36 +418,35 @@ impl<'a> Writer<'a> {
 
     /// Begins a nested key run under `key`, at four key bits inside.
     pub fn open_struct(&mut self, key: u8) -> Mark {
-        self.open_narrow_composite(key, 0)
+        self.open_composite(key, 0)
     }
 
     /// Begins a nested run whose own keys are eight bits, which is how a narrow
     /// struct holds a type that needs more than sixteen ids. The width is a
     /// property of the scope, so either may hold the other.
     pub fn open_struct_wide(&mut self, key: u8) -> Mark {
-        self.open_narrow_composite(key, super::wide::STRUCT_WIDE_KEYS)
+        self.open_composite(key, COMPOSITE_STRUCT_WIDE)
     }
 
     /// Begins a list of `count` elements under `key`. Each element is opened
     /// with [`Writer::open_element`], because a narrow element carries a length
     /// and no descriptor — its shape is the schema's to know.
     pub fn open_list(&mut self, key: u8, count: usize) -> Mark {
-        let mark = self.open_narrow_composite(key, 0);
+        let mark = self.open_composite(key, 0);
         append_count(self.buf, count);
         mark
     }
 
     /// Begins a map of `count` entries under `key`.
     pub fn open_map(&mut self, key: u8, count: usize) -> Mark {
-        let mark = self.open_narrow_composite(key, 0);
+        let mark = self.open_composite(key, 0);
         append_count(self.buf, count);
         mark
     }
 
-    /// Begins a table of `rows` rows under `key`, its columns keyed at four
-    /// bits.
+    /// Begins a table of `rows` rows under `key`.
     pub fn open_table(&mut self, key: u8, rows: usize) -> Mark {
-        let mark = self.open_narrow_composite(key, super::wide::TABLE_FLAG);
+        let mark = self.open_composite(key, COMPOSITE_TABLE);
         append_count(self.buf, rows);
         mark
     }
@@ -476,39 +465,41 @@ impl<'a> Writer<'a> {
     ///
     /// Sizing the value first would cost a pass over every nested one; this way
     /// the common composite is one reserved byte and one store, and a body past
-    /// 255 bytes makes room for four by shifting what follows — a memmove on a
-    /// buffer already in cache, and only for composites large enough not to
-    /// care.
+    /// 253 bytes makes room for the escape and its u16 or u32 by shifting the
+    /// body up — a memmove on a buffer already in cache, and only for composites
+    /// large enough not to care. The header in front is never touched: the
+    /// length says its own width, so nothing else has to.
     #[allow(clippy::cast_possible_truncation)]
     pub fn close(&mut self, mark: Mark) {
         let body = self.buf.len() - (mark.at + 1);
-        if body < INLINE_COMPOSITE_LENGTH {
+        if body <= LENGTH_INLINE_MAX {
             self.buf[mark.at] = body as u8;
             return;
         }
-        widen_length(self.buf, mark, body);
+        if body <= 0xFFFF {
+            make_room(self.buf, mark, 2);
+            self.buf[mark.at] = LENGTH_ESCAPE_U16;
+            self.buf[mark.at + 1..mark.at + 3].copy_from_slice(&(body as u16).to_le_bytes());
+            return;
+        }
+        let body = u32::try_from(body).expect(NARROW_FIELD_LIMIT);
+        make_room(self.buf, mark, 4);
+        self.buf[mark.at] = LENGTH_ESCAPE_U32;
+        self.buf[mark.at + 1..mark.at + 5].copy_from_slice(&body.to_le_bytes());
     }
 
     /// Patches a narrow list element's length.
     ///
-    /// It is not [`Writer::close`], and the difference is the whole reason it
-    /// exists. `close` widens by setting the `lw` bits of the descriptor
-    /// *before* the placeholder — and a list element has no descriptor before
-    /// it, which is exactly what makes a narrow list of small structs cheaper
-    /// than a wide one. Calling `close` on an element therefore OR-ed 2 into
-    /// whatever byte happened to precede it, which is the element count for the
-    /// first element and the tail of the previous element's body for every one
-    /// after it, and then wrote a bare four-byte length where [`Reader::element`]
-    /// expects the 0xFF escape.
+    /// It is not [`Writer::close`]: an element's length is the list element
+    /// form, one byte up to 254 or `0xFF` and a u32, which [`Reader::element`]
+    /// reads — not a field's length, whose one-byte form stops at 253. The two
+    /// agree below 254 and nowhere above it, so a list whose element body
+    /// reached 254 bytes would be written in one spelling and read in the
+    /// other. That happened once already, when `close` widened by OR-ing into
+    /// the byte before the placeholder, which for an element is the previous
+    /// element's tail.
     ///
-    /// The result was a message the encoder produced and the decoder refused,
-    /// for any narrow list whose element body reached 255 bytes — a `Vec<T>`
-    /// under the table threshold holding a string of a couple of hundred
-    /// characters, which is an ordinary record rather than a corner.
-    ///
-    /// Mirrors `Writer.CloseElement` in wire/narrow_composite.go, which is the
-    /// specification; the Rust port had `close` here and disagreed with Go about
-    /// both the bytes and their length.
+    /// Mirrors `Writer.CloseElement` in wire/narrow_composite.go.
     #[allow(clippy::cast_possible_truncation)]
     pub fn close_element(&mut self, mark: Mark) {
         let body = self.buf.len() - (mark.at + 1);
@@ -516,24 +507,26 @@ impl<'a> Writer<'a> {
             self.buf[mark.at] = body as u8;
             return;
         }
-        // The escape `element` reads: 0xFF and then four bytes, so the body
-        // shifts up by the four the placeholder does not already hold.
-        self.buf.extend_from_slice(&[0, 0, 0, 0]);
-        let end = self.buf.len() - 4;
-        self.buf.copy_within(mark.at + 1..end, mark.at + 5);
+        let body = u32::try_from(body).expect(NARROW_FIELD_LIMIT);
+        make_room(self.buf, mark, 4);
         self.buf[mark.at] = ELEMENT_SIZE_ESCAPE;
-        self.buf[mark.at + 1..mark.at + 5].copy_from_slice(&(body as u32).to_le_bytes());
+        self.buf[mark.at + 1..mark.at + 5].copy_from_slice(&body.to_le_bytes());
     }
 
     // Element writers, the key-less values a narrow map's entries are made of. A
     // narrow list's elements are whole key runs and go through open_element.
+    //
+    // They keep a code table of their own rather than the field nibble: an
+    // element sits inside a composite whose length already steps over it, so it
+    // does not need to size itself, and the denser table is what it can spend
+    // that freedom on.
 
-    /// Writes an unsigned map key or value.
+    /// Writes an unsigned map key or value: code 0..=7 is the value itself and
+    /// 8..=15 is a magnitude of `code − 7` bytes.
     ///
-    /// The unsigned nibble carries 0..=7 outright, so a map value of zero is one
-    /// byte and needs no special case — where the signed form's code 0 means
-    /// "the value is one", and a map value is not a field, so the omit-zero rule
-    /// that keeps a field away from that code does not cover it.
+    /// A map value of zero is one byte and needs no special case, because the
+    /// omit-zero rule that keeps a field away from a zero code does not cover
+    /// an element.
     #[allow(clippy::cast_possible_truncation)]
     pub fn element_uint(&mut self, value: u64) {
         if value <= UINT_INLINE_MAX {
@@ -546,7 +539,7 @@ impl<'a> Writer<'a> {
     }
 
     /// Writes the signed `[positive:1][size:3]` form. A positive value does not
-    /// go through [`Writer::element_uint`]: the two nibbles are different tables,
+    /// go through [`Writer::element_uint`]: the two codes are different tables,
     /// and [`Reader::element_int`] is what will read this back.
     #[allow(clippy::cast_sign_loss)]
     pub fn element_int(&mut self, value: i64) {
@@ -580,56 +573,44 @@ impl<'a> Writer<'a> {
 
     /// Writes an integer column under `key` for a narrow-keyed table, and
     /// nothing at all when every value is zero: an absent column key means a
-    /// column of zeros.
+    /// column of zeros. A column is the length form with the column codec as
+    /// its body, so it skips like any other field.
     pub fn column<T: column::Signed + PartialEq>(&mut self, key: u8, values: &[T]) {
         if values.is_empty() || values.iter().all(|value| value.as_i64() == 0) {
             return;
         }
-        let mark = self.open_narrow_composite(key, 0);
+        let mark = self.open_composite(key, 0);
         column::append_array(self.buf, values);
         self.close(mark);
     }
-
-    /// Writes a string column, which is a list of blobs under the column's key.
-    /// Strings have no residual to transform, so a column of them is the same
-    /// shape a list of them is.
-    pub fn string_column<S: AsRef<[u8]>>(&mut self, key: u8, values: &[S]) {
-        if values.iter().all(|value| value.as_ref().is_empty()) {
-            return;
-        }
-        self.strings(key, values);
-    }
 }
 
-/// What `Writer::blob_header` spends on a raw blob of `size` bytes.
-fn blob_header_size(size: usize) -> usize {
-    let size = size as u64;
-    if size <= INLINE_BLOB_SIZE as u64 {
-        2
-    } else if size <= 0xFFFF {
-        3
-    } else if size <= 0xFFFF_FFFF {
-        5
+/// What a raw blob of `size` bytes costs after its header byte: no length up to
+/// eight bytes, a length past that.
+const fn raw_size(size: usize) -> usize {
+    if size <= 8 {
+        size
     } else {
-        9
+        length_bytes(size) + size
     }
 }
 
-/// Turns a one-byte length placeholder into four, shifting the body up to make
-/// room. Shared by both key widths, which spell the placeholder the same way.
-#[allow(clippy::cast_possible_truncation)]
-pub(crate) fn widen_length(buf: &mut Vec<u8>, mark: Mark, body: usize) {
-    buf.extend_from_slice(&[0, 0, 0]);
-    let end = buf.len() - 3;
-    buf.copy_within(mark.at + 1..end, mark.at + 4);
-    buf[mark.at..mark.at + 4].copy_from_slice(&(body as u32).to_le_bytes());
-    // lw code 2 is a four-byte length, in the descriptor's low two bits.
-    buf[mark.at - 1] |= 2;
+/// What a string-array element's size occupies.
+const fn element_size_bytes(size: usize) -> usize {
+    if size <= INLINE_ELEMENT_SIZE { 1 } else { 5 }
+}
+
+/// Grows the one-byte placeholder at `mark` by `extra` bytes, shifting the body
+/// up behind it.
+fn make_room(buf: &mut Vec<u8>, mark: Mark, extra: usize) {
+    let end = buf.len();
+    buf.resize(end + extra, 0);
+    buf.copy_within(mark.at + 1..end, mark.at + 1 + extra);
 }
 
 /// Walks a message field by field. The caller switches on [`Reader::key`] and
 /// calls the read for the type that key holds, which it knows from the record
-/// definition.
+/// definition — or [`Reader::skip`] for a key it does not know.
 ///
 /// Errors are sticky: the first failure parks the cursor at the end of the
 /// buffer, so a decode loop ends rather than spinning, every later read answers
@@ -706,50 +687,119 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// The header byte at the cursor, or `None` at the end of the message.
-    fn header(&mut self) -> Option<u8> {
-        match self.buf.get(self.at) {
-            Some(byte) => Some(*byte),
-            None => {
-                self.fail(Error::Truncated);
-                None
-            }
+    /// Reads the field at the cursor as its nibble and its payload, advancing
+    /// past the whole of it. Every read starts here, which is what keeps the
+    /// size of a field the nibble's business alone: a read can only disagree
+    /// with [`Reader::skip`] about what the bytes mean, never about where the
+    /// next field starts.
+    fn field(&mut self) -> Option<(u8, &'a [u8])> {
+        let Some(&header) = self.buf.get(self.at) else {
+            self.fail(Error::Truncated);
+            return None;
+        };
+        let nibble = header & 0b1111;
+        let (size, start) = if nibble <= NIBBLE_INLINE_LAST {
+            (0, self.at + 1)
+        } else if nibble < NIBBLE_LENGTH {
+            (usize::from(nibble - NIBBLE_SIZED_BIAS), self.at + 1)
+        } else {
+            self.length(self.at + 1)?
+        };
+        if size > self.buf.len() - start {
+            self.fail(Error::Truncated);
+            return None;
         }
+        self.at = start + size;
+        Some((nibble, &self.buf[start..start + size]))
+    }
+
+    /// Reads the length that begins at `at` and returns it with the offset just
+    /// past it. Each of its three forms is a branch and a fixed-width load, so
+    /// there is no continuation run for a peer to make unbounded.
+    fn length(&mut self, at: usize) -> Option<(usize, usize)> {
+        let Some(&first) = self.buf.get(at) else {
+            self.fail(Error::Truncated);
+            return None;
+        };
+        let (value, start) = match first {
+            LENGTH_ESCAPE_U16 => {
+                let Some(bytes) = self.buf.get(at + 1..at + 3) else {
+                    self.fail(Error::Truncated);
+                    return None;
+                };
+                (u64::from(u16::from_le_bytes([bytes[0], bytes[1]])), at + 3)
+            }
+            LENGTH_ESCAPE_U32 => {
+                let Some(bytes) = self.buf.get(at + 1..at + 5) else {
+                    self.fail(Error::Truncated);
+                    return None;
+                };
+                (le_uint(bytes, 4), at + 5)
+            }
+            size => (u64::from(size), at + 1),
+        };
+        let Ok(size) = usize::try_from(value) else {
+            self.fail(Error::SizeTooLarge);
+            return None;
+        };
+        Some((size, start))
+    }
+
+    /// Steps over the field at the cursor without knowing what it is, and
+    /// reports whether it could.
+    ///
+    /// The nibble sizes every field, so this is one branch and, for the length
+    /// form, one length read — the same capability [`super::Reader8::skip`]
+    /// gives a wide run, and what lets a type drop a field or gain one without
+    /// stranding the rows already written. It does not look inside: a skipped
+    /// composite is its length and nothing more, so a hostile message cannot
+    /// recurse through it.
+    pub fn skip(&mut self) -> bool {
+        self.field().is_some()
     }
 
     /// Reads an unsigned integer field.
     pub fn u64(&mut self) -> u64 {
-        let Some(header) = self.header() else {
+        let Some((nibble, payload)) = self.field() else {
             return 0;
         };
-        let code = u64::from(header & 0b1111);
-        if code <= UINT_INLINE_MAX {
-            self.at += 1;
-            return code;
+        match nibble {
+            0..=NIBBLE_INLINE_LAST => u64::from(nibble) + 1,
+            NIBBLE_LENGTH if payload.is_empty() => 0,
+            _ if nibble < NIBBLE_LENGTH => le_uint(payload, payload.len()),
+            // A length form with a payload is a negative number or a string,
+            // and neither is something an unsigned field can hold.
+            _ => {
+                self.fail(Error::BadDescriptor);
+                0
+            }
         }
-        #[allow(clippy::cast_possible_truncation)]
-        let width = code as usize - usize::from(UINT_WIDTH_BASE) + 1;
-        let rest = &self.buf[self.at + 1..];
-        if rest.len() < width {
-            self.fail(Error::Truncated);
-            return 0;
-        }
-        self.at += 1 + width;
-        le_uint(rest, width)
     }
 
     /// Reads a signed integer field.
     ///
-    /// The magnitude goes through [`Reader::signed_magnitude`] and not through
-    /// [`Reader::u64`]: a signed nibble is `[positive:1][size:3]` and an
-    /// unsigned one is a sixteen-code table, so the same four bits mean
-    /// different things and only the schema says which.
+    /// Nibbles 0..=2 are 1..=3 and nibble 3 is −1; a sized nibble is a positive
+    /// magnitude and the length form a negative one. A magnitude past what an
+    /// `i64` holds is refused rather than wrapped into a different number.
     pub fn i64(&mut self) -> i64 {
-        let Some(header) = self.header() else {
+        let Some((nibble, payload)) = self.field() else {
             return 0;
         };
-        let positive = header & INT_POSITIVE_FLAG != 0;
-        let magnitude = self.signed_magnitude();
+        let (positive, magnitude) = match nibble {
+            NIBBLE_INLINE_LAST => return -1,
+            0..NIBBLE_INLINE_LAST => return i64::from(nibble) + 1,
+            NIBBLE_LENGTH if payload.is_empty() => return 0,
+            NIBBLE_LENGTH if payload.len() <= 8 => (false, le_uint(payload, payload.len())),
+            NIBBLE_LENGTH => {
+                self.fail(Error::FieldTooWide);
+                return 0;
+            }
+            _ if nibble < NIBBLE_LENGTH => (true, le_uint(payload, payload.len())),
+            _ => {
+                self.fail(Error::BadDescriptor);
+                return 0;
+            }
+        };
         match super::signed(positive, magnitude) {
             Some(value) => value,
             None => {
@@ -759,34 +809,14 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// Reads the `[size:3]` form: code 0 means the magnitude is one, codes
-    /// 1..=6 are that many bytes, and code 7 is eight.
-    fn signed_magnitude(&mut self) -> u64 {
-        let Some(header) = self.header() else {
-            return 0;
-        };
-        let width = MAGNITUDE_WIDTH[usize::from(header & 0b111)];
-        if width == 0 {
-            self.at += 1;
-            return 1;
-        }
-        let rest = &self.buf[self.at + 1..];
-        if rest.len() < width {
-            self.fail(Error::Truncated);
-            return 0;
-        }
-        self.at += 1 + width;
-        le_uint(rest, width)
-    }
-
     /// Reads a field written by [`Writer::bool`]. An absent field never reaches
     /// here: a false bool is not written, so the key is simply missing.
     pub fn bool(&mut self) -> bool {
         self.u64() == 1
     }
 
-    /// Reads a field written by [`Writer::u16`], or by any writer that kept it
-    /// under 65 536.
+    /// Reads a `u16` field, refusing anything wider — a schema disagreement
+    /// rather than a value to truncate into something plausible.
     #[allow(clippy::cast_possible_truncation)]
     pub fn u16(&mut self) -> u16 {
         let value = self.u64();
@@ -797,8 +827,7 @@ impl<'a> Reader<'a> {
         value as u16
     }
 
-    /// Reads a `u8` field, refusing anything wider — a schema disagreement
-    /// rather than a value to truncate into something plausible.
+    /// Reads a `u8` field, refusing anything wider.
     #[allow(clippy::cast_possible_truncation)]
     pub fn u8(&mut self) -> u8 {
         let value = self.u64();
@@ -809,7 +838,7 @@ impl<'a> Reader<'a> {
         value as u8
     }
 
-    /// Reads a field written by [`Writer::u32`].
+    /// Reads a `u32` field, refusing anything wider.
     #[allow(clippy::cast_possible_truncation)]
     pub fn u32(&mut self) -> u32 {
         let value = self.u64();
@@ -847,10 +876,11 @@ impl<'a> Reader<'a> {
         })
     }
 
-    /// Reads a field written by [`Writer::f32`].
-    #[allow(clippy::cast_possible_truncation)]
+    /// Reads a field written by [`Writer::f32`]. Its reversed bits are a `u32`,
+    /// so a field wider than four bytes is refused rather than truncated into a
+    /// different float.
     pub fn f32(&mut self) -> f32 {
-        f32::from_bits((self.u64() as u32).swap_bytes())
+        f32::from_bits(self.u32().swap_bytes())
     }
 
     /// Reads a field written by [`Writer::f64`].
@@ -859,16 +889,19 @@ impl<'a> Reader<'a> {
     }
 
     /// Returns the field's bytes as a sub-slice of the message, without copying.
+    ///
+    /// A packed string is not bytes — its payload is a unit stream — and is
+    /// refused here rather than handed over as though it were the text;
+    /// [`Reader::packed_string`] reads it.
     pub fn bytes(&mut self) -> &'a [u8] {
-        let Some((size, start)) = self.blob_size() else {
-            return &[];
-        };
-        if size > self.buf.len() - start {
-            self.fail(Error::Truncated);
-            return &[];
+        match self.string_span() {
+            Some((payload, None)) => payload,
+            Some((_, Some(_))) => {
+                self.fail(Error::BadEscape);
+                &[]
+            }
+            None => &[],
         }
-        self.at = start + size;
-        &self.buf[start..start + size]
     }
 
     /// Copies the field into a `String`, failing rather than replacing bytes
@@ -884,66 +917,35 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// Steps over a string field of either encoding without expanding it, which
-    /// is what a walk that wants the *span* rather than the characters needs.
+    /// The payload of a string field of either encoding, and whether it is
+    /// packed in upper case. Advances past the field.
     ///
-    /// Reading a string as though it were always raw is the bug the AssemblyScript
-    /// port found in Go's own schema walk: `bytes()` works until the string is
-    /// packed, then refuses a message the writer produced.
-    pub fn skip_string(&mut self) {
-        let _ = self.string_span();
-    }
-
-    /// The payload of a string field of either encoding, and whether it is packed
-    /// in upper case. Advances past the field. `None` on a truncated header.
+    /// A string is never inline — it has at least one byte, or it is the empty
+    /// length form of an explicit zero — so nibbles 0..=3 are refused, as is the
+    /// unassigned flag `11`.
     fn string_span(&mut self) -> Option<(&'a [u8], Option<bool>)> {
-        let header = self.header()?;
-        let (size, start, upper) = if header & MORE_SIZE_FLAG == 0 {
-            let (size, start) = self.blob_size()?;
-            (size, start, None)
-        } else {
-            match header & 0b111 {
-                code @ (ESCAPE_PACKED1_LO | ESCAPE_PACKED1_UP) => {
-                    let Some(&low) = self.buf.get(self.at + 1) else {
-                        self.fail(Error::Truncated);
-                        return None;
-                    };
-                    (
-                        usize::from(low),
-                        self.at + 2,
-                        Some(code == ESCAPE_PACKED1_UP),
-                    )
-                }
-                code @ (ESCAPE_PACKED4_LO | ESCAPE_PACKED4_UP) => {
-                    let rest = &self.buf[self.at + 1..];
-                    if rest.len() < 4 {
-                        self.fail(Error::Truncated);
-                        return None;
-                    }
-                    let size = le_uint(rest, 4) as usize;
-                    if size <= 0xFF {
-                        self.fail(Error::BadEscape); // one size has one encoding
-                        return None;
-                    }
-                    (size, self.at + 5, Some(code == ESCAPE_PACKED4_UP))
-                }
-                _ => {
-                    let (size, start) = self.blob_size()?;
-                    (size, start, None)
-                }
-            }
-        };
-        if size > self.buf.len() - start {
-            self.fail(Error::Truncated);
+        let (nibble, payload) = self.field()?;
+        if nibble <= NIBBLE_INLINE_LAST {
+            self.fail(Error::BadDescriptor);
             return None;
         }
-        self.at = start + size;
-        Some((&self.buf[start..start + size], upper))
+        if nibble < NIBBLE_LENGTH {
+            return Some((payload, None));
+        }
+        match nibble & FLAG_MASK {
+            STRING_RAW => Some((payload, None)),
+            STRING_PACKED_LOWER => Some((payload, Some(false))),
+            STRING_PACKED_UPPER => Some((payload, Some(true))),
+            _ => {
+                self.fail(Error::BadEscape);
+                None
+            }
+        }
     }
 
     /// Reads a string written by [`Writer::packed_string`] or by
-    /// [`Writer::string`]. The header's escape code says which, so a reader needs
-    /// no configuration and cannot be wrong about it.
+    /// [`Writer::string`]. The header's flag says which, so a reader needs no
+    /// configuration and cannot be wrong about it.
     pub fn packed_string(&mut self) -> String {
         let Some((payload, upper)) = self.string_span() else {
             return String::new();
@@ -973,56 +975,37 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// Reads a blob or string-array header and returns the size it declares with
-    /// the offset just past it.
-    fn blob_size(&mut self) -> Option<(usize, usize)> {
-        let header = self.header()?;
-        if header & MORE_SIZE_FLAG == 0 {
-            let Some(low) = self.buf.get(self.at + 1) else {
-                self.fail(Error::Truncated);
-                return None;
-            };
-            return Some((
-                usize::from(header & 0b111) << 8 | usize::from(*low),
-                self.at + 2,
-            ));
-        }
-        self.escaped_size(header & 0b111)
-    }
-
-    /// Reads the wide size that follows a header whose `more` flag is set. Its
-    /// width is named by the header rather than discovered byte by byte, so
-    /// there is no continuation run for a peer to make unbounded — the only
-    /// thing refused here is a size this platform cannot address.
-    fn escaped_size(&mut self, escape: u8) -> Option<(usize, usize)> {
-        let width = match escape {
-            ESCAPE_2BYTES => 2,
-            ESCAPE_4BYTES => 4,
-            ESCAPE_8BYTES => 8,
-            _ => {
-                self.fail(Error::BadEscape);
-                return None;
-            }
-        };
-        let rest = &self.buf[self.at + 1..];
-        if rest.len() < width {
-            self.fail(Error::Truncated);
-            return None;
-        }
-        let value = le_uint(rest, width);
-        let Ok(size) = usize::try_from(value) else {
-            self.fail(Error::SizeTooLarge);
-            return None;
-        };
-        Some((size, self.at + 1 + width))
-    }
-
-    /// Appends the array's elements to `dst`, which may be empty.
+    /// Appends an integer array field's elements to `dst`, which may be empty.
+    /// The element type says the form: two's complement for a signed one,
+    /// magnitudes for an unsigned one.
     pub fn ints_into<T: Integer>(&mut self, dst: &mut Vec<T>) {
-        let Some((elements, positive, width)) = self.array_elements() else {
+        self.ints_into_as(dst, T::SIGNED_TYPE, size_of::<T>());
+    }
+
+    /// [`Reader::ints_into`] for a caller whose element type is not `T`: a walk
+    /// that has only a schema op reads every array into `i64`, and the op is
+    /// what says whether the elements are signed and how wide they may be.
+    ///
+    /// An element wider than `max_width` bytes is refused rather than truncated,
+    /// and so is a length that is not a whole number of elements.
+    pub fn ints_into_as<T: Integer>(&mut self, dst: &mut Vec<T>, signed: bool, max_width: usize) {
+        let Some((nibble, elements)) = self.field() else {
             return;
         };
-        append_array(dst, elements, width, positive);
+        if nibble < NIBBLE_LENGTH {
+            self.fail(Error::BadDescriptor);
+            return;
+        }
+        let width = 1_usize << (nibble & FLAG_MASK);
+        if width > max_width {
+            self.fail(Error::FieldTooWide);
+            return;
+        }
+        if elements.len() % width != 0 {
+            self.fail(Error::Truncated);
+            return;
+        }
+        append_array(dst, elements, width, !signed);
     }
 
     /// Reads an integer array field.
@@ -1032,81 +1015,55 @@ impl<'a> Reader<'a> {
         dst
     }
 
-    /// Reads an array field's header and returns its payload as a sub-slice of
-    /// the message, with the element width and sign the header declares. It
-    /// advances the cursor: the caller only has to turn bytes into elements.
-    fn array_elements(&mut self) -> Option<(&'a [u8], bool, usize)> {
-        let header = self.header()?;
-        let (count, start) = self.array_count(header)?;
-        let width = 1_usize << ((header >> ARRAY_WIDTH_SHIFT) & 0b11);
-        if count > (self.buf.len() - start) / width {
-            self.fail(Error::Truncated);
-            return None;
-        }
-        self.at = start + count * width;
-        Some((
-            &self.buf[start..start + count * width],
-            header & ARRAY_POSITIVE_FLAG != 0,
-            width,
-        ))
-    }
-
-    /// Reads an integer array's header and returns its element count with the
-    /// offset just past it.
-    fn array_count(&mut self, header: u8) -> Option<(usize, usize)> {
-        if header & MORE_ARRAY_LEN_FLAG == 0 {
-            let Some(count) = self.buf.get(self.at + 1) else {
-                self.fail(Error::Truncated);
-                return None;
-            };
-            return Some((usize::from(*count), self.at + 2));
-        }
-        let Some(bytes) = self.buf.get(self.at + 1..self.at + 5) else {
-            self.fail(Error::Truncated);
-            return None;
-        };
-        let bytes: [u8; 4] = bytes.try_into().expect("four bytes");
-        Some((u32::from_le_bytes(bytes) as usize, self.at + 5))
-    }
-
-    /// Appends each element of a string array to `dst` as a sub-slice of the
-    /// message, without copying.
+    /// Returns each element of a string array as a sub-slice of the message,
+    /// without copying.
+    ///
+    /// The array carries no count; the elements are whatever its length holds,
+    /// walked size by size. An element running past the length is refused
+    /// rather than read from the field after it.
     pub fn strings_bytes(&mut self) -> Vec<&'a [u8]> {
         let mut dst = Vec::new();
-        let Some((count, mut at)) = self.blob_size() else {
+        let Some((nibble, payload)) = self.field() else {
             return dst;
         };
-        for _ in 0..count {
-            let Some((size, next)) = self.element_size(at) else {
+        if nibble != NIBBLE_LENGTH {
+            self.fail(Error::BadDescriptor);
+            return dst;
+        }
+        let mut at = 0;
+        while at < payload.len() {
+            let Some((size, next)) = self.element_size(payload, at) else {
                 return dst;
             };
-            if size > self.buf.len() - next {
+            if size > payload.len() - next {
                 self.fail(Error::Truncated);
                 return dst;
             }
-            dst.push(&self.buf[next..next + size]);
+            dst.push(&payload[next..next + size]);
             at = next + size;
         }
-        self.at = at;
         dst
     }
 
-    /// Reads one string-array element length: one byte, or four more behind the
-    /// escape.
-    fn element_size(&mut self, at: usize) -> Option<(usize, usize)> {
-        let Some(size) = self.buf.get(at) else {
+    /// Reads one string-array element size inside `payload`: one byte, or four
+    /// more behind the escape.
+    fn element_size(&mut self, payload: &[u8], at: usize) -> Option<(usize, usize)> {
+        let Some(&size) = payload.get(at) else {
             self.fail(Error::Truncated);
             return None;
         };
-        if *size != ELEMENT_SIZE_ESCAPE {
-            return Some((usize::from(*size), at + 1));
+        if size != ELEMENT_SIZE_ESCAPE {
+            return Some((usize::from(size), at + 1));
         }
-        let Some(bytes) = self.buf.get(at + 1..at + 5) else {
+        let Some(bytes) = payload.get(at + 1..at + 5) else {
             self.fail(Error::Truncated);
             return None;
         };
-        let bytes: [u8; 4] = bytes.try_into().expect("four bytes");
-        Some((u32::from_le_bytes(bytes) as usize, at + 5))
+        let Ok(size) = usize::try_from(le_uint(bytes, 4)) else {
+            self.fail(Error::SizeTooLarge);
+            return None;
+        };
+        Some((size, at + 5))
     }
 
     /// Copies each element of a string array into a `String`.
@@ -1129,41 +1086,19 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// Refused rather than guessed: the header says how wide a field is only
-    /// once the reader knows which of the four layouts it is reading, and that
-    /// comes from the key. An unknown key is a record definition the two sides
-    /// no longer share.
-    pub fn skip(&mut self) {
-        let key = self.key();
-        self.fail(Error::UnknownKey(key));
-    }
-
     // --- composites ----------------------------------------------------------
 
-    /// Reads a narrow composite's length and returns its body, advancing past
-    /// the whole field.
-    pub(crate) fn composite_body(&mut self) -> Option<&'a [u8]> {
-        if self.at + 2 > self.buf.len() {
-            self.fail(Error::Truncated);
+    /// Reads a composite, the length form with flags `accept` allows, and
+    /// returns its flags and body, advancing past the whole field. Anything
+    /// else — a value form, or a flag the shape does not assign, such as `f1` —
+    /// is refused rather than read as a body it is not.
+    fn composite(&mut self, accept: impl Fn(u8) -> bool) -> Option<(u8, &'a [u8])> {
+        let (nibble, body) = self.field()?;
+        if nibble & !FLAG_MASK != NIBBLE_LENGTH || !accept(nibble & FLAG_MASK) {
+            self.fail(Error::BadDescriptor);
             return None;
         }
-        let width = LENGTH_WIDTH[usize::from(self.buf[self.at] & 0b11)];
-        let rest = &self.buf[self.at + 1..];
-        if rest.len() < width {
-            self.fail(Error::Truncated);
-            return None;
-        }
-        let Ok(length) = usize::try_from(le_uint(rest, width)) else {
-            self.fail(Error::SizeTooLarge);
-            return None;
-        };
-        let start = self.at + 1 + width;
-        if length > self.buf.len() - start {
-            self.fail(Error::Truncated);
-            return None;
-        }
-        self.at = start + length;
-        Some(&self.buf[start..start + length])
+        Some((nibble & FLAG_MASK, body))
     }
 
     /// Returns a nested run's bytes and the key width it uses, advancing past
@@ -1171,13 +1106,8 @@ impl<'a> Reader<'a> {
     /// [`super::Reader8::new`] accordingly — the per-scope key width, spent
     /// where it is decided.
     pub fn struct_body(&mut self) -> Option<(&'a [u8], bool)> {
-        let Some(header) = self.buf.get(self.at) else {
-            self.fail(Error::Truncated);
-            return None;
-        };
-        let wide_keys = header & super::wide::STRUCT_WIDE_KEYS != 0;
-        let body = self.composite_body()?;
-        Some((body, wide_keys))
+        let (flag, body) = self.composite(|flag| flag <= COMPOSITE_STRUCT_WIDE)?;
+        Some((body, flag == COMPOSITE_STRUCT_WIDE))
     }
 
     /// Reports whether the field at the cursor is a table rather than a list. A
@@ -1185,13 +1115,13 @@ impl<'a> Reader<'a> {
     pub fn is_table(&self) -> bool {
         self.buf
             .get(self.at)
-            .is_some_and(|header| header & super::wide::TABLE_FLAG != 0)
+            .is_some_and(|header| header & 0b1111 == NIBBLE_LENGTH | COMPOSITE_TABLE)
     }
 
-    /// Returns the element count of a list, map or table and a reader over what
+    /// Returns the element count of a list or a map and a reader over what
     /// follows it.
     pub fn counted(&mut self) -> Option<(usize, Reader<'a>)> {
-        let body = self.composite_body()?;
+        let (_, body) = self.composite(|flag| flag == 0)?;
         let Some((count, at)) = read_count(body) else {
             self.fail(Error::Truncated);
             return None;
@@ -1203,7 +1133,7 @@ impl<'a> Reader<'a> {
     /// reads at the row type's key width: four bits when that type's are, and
     /// eight when the rows are wide, whatever this run's width is.
     pub fn table(&mut self) -> Option<(usize, &'a [u8])> {
-        let body = self.composite_body()?;
+        let (_, body) = self.composite(|flag| flag == COMPOSITE_TABLE)?;
         let Some((rows, at)) = read_count(body) else {
             self.fail(Error::Truncated);
             return None;
@@ -1224,8 +1154,11 @@ impl<'a> Reader<'a> {
                 self.fail(Error::Truncated);
                 return None;
             };
-            let bytes: [u8; 4] = bytes.try_into().expect("four bytes");
-            size = u32::from_le_bytes(bytes) as usize;
+            let Ok(wide) = usize::try_from(le_uint(bytes, 4)) else {
+                self.fail(Error::SizeTooLarge);
+                return None;
+            };
+            size = wide;
             start = self.at + 5;
         }
         if size > self.buf.len() - start {
@@ -1236,16 +1169,28 @@ impl<'a> Reader<'a> {
         Some(&self.buf[start..start + size])
     }
 
+    /// The code byte at the cursor of a key-less element, or `None` at the end.
+    fn element_code(&mut self) -> Option<u8> {
+        match self.buf.get(self.at) {
+            Some(byte) => Some(*byte),
+            None => {
+                self.fail(Error::Truncated);
+                None
+            }
+        }
+    }
+
     /// Reads an unsigned map key or value.
     pub fn element_uint(&mut self) -> u64 {
-        let Some(header) = self.header() else {
+        let Some(code) = self.element_code() else {
             return 0;
         };
-        let code = u64::from(header & 0b1111);
+        let code = u64::from(code & 0b1111);
         if code <= UINT_INLINE_MAX {
             self.at += 1;
             return code;
         }
+        #[allow(clippy::cast_possible_truncation)]
         let width = code as usize - usize::from(UINT_WIDTH_BASE) + 1;
         let rest = &self.buf[self.at + 1..];
         if rest.len() < width {
@@ -1256,47 +1201,36 @@ impl<'a> Reader<'a> {
         le_uint(rest, width)
     }
 
-    /// Reads a signed map key or value.
+    /// Reads a signed map key or value: `[positive:1][size:3]`, where size code
+    /// 0 means the magnitude is one, 1..=6 are that many bytes and 7 is eight.
+    /// It is its own table rather than [`Reader::element_uint`]'s, so the same
+    /// four bits mean different things and only the schema says which.
     #[allow(clippy::cast_possible_wrap)]
     pub fn element_int(&mut self) -> i64 {
-        let Some(header) = self.header() else {
+        let Some(code) = self.element_code() else {
             return 0;
         };
-        let positive = header & INT_POSITIVE_FLAG != 0;
-        let magnitude = self.element_magnitude();
-        if positive {
-            return magnitude as i64;
-        }
-        (magnitude as i64).wrapping_neg()
-    }
-
-    /// [`Reader::signed_magnitude`] for a key-less element, which
-    /// [`Reader::element_int`] needs for the same reason [`Reader::i64`] needs
-    /// it: the signed and unsigned nibbles are different tables over the same
-    /// four bits.
-    fn element_magnitude(&mut self) -> u64 {
-        let Some(header) = self.header() else {
-            return 0;
-        };
-        let width = MAGNITUDE_WIDTH[usize::from(header & 0b111)];
+        let positive = code & INT_POSITIVE_FLAG != 0;
+        let width = MAGNITUDE_WIDTH[usize::from(code & 0b111)];
         let rest = &self.buf[self.at + 1..];
         if rest.len() < width {
             self.fail(Error::Truncated);
             return 0;
         }
         self.at += 1 + width;
-        if width == 0 {
-            return 1;
+        let magnitude = if width == 0 { 1 } else { le_uint(rest, width) };
+        if positive {
+            return magnitude as i64;
         }
-        le_uint(rest, width)
+        (magnitude as i64).wrapping_neg()
     }
 
     /// Reads a string map key or value.
     pub fn element_string(&mut self) -> String {
-        let Some(header) = self.header() else {
+        let Some(code) = self.element_code() else {
             return String::new();
         };
-        let width = LENGTH_WIDTH[usize::from(header & 0b11)];
+        let width = LENGTH_WIDTH[usize::from(code & 0b11)];
         let rest = &self.buf[self.at + 1..];
         if rest.len() < width {
             self.fail(Error::Truncated);
@@ -1330,7 +1264,7 @@ impl<'a> Reader<'a> {
     /// Reads a column written by [`Writer::column`] into `dst`. The row count
     /// comes from the table, which said it once for every column.
     pub fn column<T: column::Signed>(&mut self, rows: usize, dst: &mut Vec<T>) {
-        let Some(body) = self.composite_body() else {
+        let Some((_, body)) = self.composite(|flag| flag == 0) else {
             return;
         };
         dst.clear();

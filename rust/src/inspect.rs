@@ -42,7 +42,7 @@ use alloc::vec::Vec;
 use crate::Error;
 use crate::json::JsonSink;
 use crate::plan::{
-    self, OP_ANY, OP_ANYS, OP_BOOL, OP_BYTES, OP_FLOAT32, OP_FLOAT64, OP_INT8, OP_INT8S, OP_INT16,
+    OP_ANY, OP_ANYS, OP_BOOL, OP_BYTES, OP_FLOAT32, OP_FLOAT64, OP_INT8, OP_INT8S, OP_INT16,
     OP_INT16S, OP_INT32, OP_INT32S, OP_INT64, OP_INT64S, OP_MAP, OP_POINTER, OP_STRING, OP_STRINGS,
     OP_STRUCT, OP_STRUCTS, OP_UINT8, OP_UINT16, OP_UINT16S, OP_UINT32, OP_UINT32S, OP_UINT64,
     OP_UINT64S, Plan, PlanField,
@@ -246,7 +246,16 @@ impl SpanWalker {
         while reader.more() {
             let start = reader.cursor();
             let key = reader.key();
-            let index = plan.field_of(key).ok_or(Error::UnknownKey(key))?;
+            let Some(index) = plan.field_of(key) else {
+                // A narrow field sizes itself, so a key the schema does not list
+                // still gets its real span and the tiling stays exact.
+                if !reader.skip() {
+                    reader.err()?;
+                    break;
+                }
+                out.push(unknown_node(key, offset + start, offset + reader.cursor()));
+                continue;
+            };
             let field = &plan.fields[index];
             let mut node = Node {
                 name: plan.names.get(index).cloned().unwrap_or_default(),
@@ -289,36 +298,14 @@ impl SpanWalker {
                     self.narrow_list(reader, schema, field, node, offset)?;
                 }
             }
-            OP_MAP => {
-                // A span walk does not descend into a map: there is no per-entry
-                // field id, and the tiling is exact at the map's own span.
-                let _ = reader.composite_body().ok_or(Error::Truncated)?;
+            // A value, a map and anything else with no children: the nibble
+            // says how long the field is, so its span needs no schema. A map
+            // has no per-entry field id, and the tiling is exact at its span.
+            _ => {
+                if !reader.skip() {
+                    return reader.err();
+                }
             }
-            op => self.narrow_scalar(reader, if op == OP_POINTER { field.elem_op } else { op })?,
-        }
-        reader.err()
-    }
-
-    fn narrow_scalar(&mut self, reader: &mut Reader<'_>, op: u8) -> Result<(), Error> {
-        match op {
-            OP_BOOL | OP_UINT8..=OP_UINT64 | OP_FLOAT32 | OP_FLOAT64 => {
-                let _ = reader.u64();
-            }
-            OP_INT8..=OP_INT64 => {
-                let _ = reader.i64();
-            }
-            OP_STRING => reader.skip_string(),
-            OP_BYTES => {
-                let _ = reader.bytes();
-            }
-            OP_STRINGS => {
-                let _ = reader.strings_bytes();
-            }
-            op if plan::array_element_op(op) != plan::OP_COUNT => {
-                let mut dump: Vec<i64> = Vec::new();
-                reader.ints_into(&mut dump);
-            }
-            op => return Err(Error::UnwalkableOp(op)),
         }
         reader.err()
     }
@@ -406,12 +393,18 @@ impl SpanWalker {
         while columns.more() {
             let start = columns.cursor();
             let key = columns.key();
-            let index = sub.field_of(key).ok_or(Error::UnknownKey(key))?;
+            let Some(index) = sub.field_of(key) else {
+                if !columns.skip() {
+                    break;
+                }
+                let end = body_at + columns.cursor();
+                node.children.push(unknown_node(key, body_at + start, end));
+                continue;
+            };
             let column = &sub.fields[index];
-            if column.op == OP_STRING {
-                let _ = columns.strings_bytes();
-            } else {
-                let _ = columns.composite_body().ok_or(Error::Truncated)?;
+            if !columns.skip() {
+                columns.err()?;
+                break;
             }
             columns.err()?;
             node.children.push(Node {
@@ -447,15 +440,7 @@ impl SpanWalker {
                     reader.err()?;
                     break;
                 }
-                out.push(Node {
-                    name: format!("field {key}"),
-                    key: i32::from(key),
-                    type_name: String::from("unknown"),
-                    optional: false,
-                    start: offset + start,
-                    end: offset + reader.cursor(),
-                    children: Vec::new(),
-                });
+                out.push(unknown_node(key, offset + start, offset + reader.cursor()));
                 continue;
             };
             let field = &plan.fields[index];
@@ -603,6 +588,8 @@ impl SpanWalker {
                 if !columns.skip() {
                     break;
                 }
+                let end = body_at + columns.cursor();
+                node.children.push(unknown_node(key, body_at + start, end));
                 continue;
             };
             let column = &sub.fields[index];
@@ -622,6 +609,20 @@ impl SpanWalker {
             });
         }
         columns.err()
+    }
+}
+
+/// A field the schema does not list, stepped over at either key width. It keeps
+/// its span, so the hex view still accounts for every byte of the body.
+fn unknown_node(key: u8, start: usize, end: usize) -> Node {
+    Node {
+        name: format!("field {key}"),
+        key: i32::from(key),
+        type_name: String::from("unknown"),
+        optional: false,
+        start,
+        end,
+        children: Vec::new(),
     }
 }
 

@@ -396,7 +396,9 @@ pub fn read_structs<T: Colbin>(r: &mut Reader<'_>) -> Vec<T> {
     let Some((count, mut elements)) = r.counted() else {
         return Vec::new();
     };
-    let mut out = Vec::with_capacity(count);
+    // The count is the peer's claim. Every element takes at least a byte, so
+    // the bytes actually there bound what is worth reserving for it.
+    let mut out = Vec::with_capacity(count.min(elements.buf_len()));
     for _ in 0..count {
         let Some(body) = elements.element() else {
             r.fail_with(elements.err());
@@ -423,7 +425,7 @@ pub fn read_structs8<T: Colbin>(r: &mut Reader8<'_>) -> Vec<T> {
     let Some((count, mut elements)) = r.list() else {
         return Vec::new();
     };
-    let mut out = Vec::with_capacity(count);
+    let mut out = Vec::with_capacity(count.min(elements.buf_len()));
     for _ in 0..count {
         let Some((body, wide_keys)) = elements.element_struct_body() else {
             r.fail_with(elements.err());
@@ -466,10 +468,12 @@ fn read_table<T: Colbin>(r: &mut Reader<'_>) -> Vec<T> {
     while columns.more() {
         let key = columns.key();
         let Some(index) = column_index::<T>(key) else {
-            // A narrow key cannot be skipped, so an unknown column ends the table
-            // rather than being stepped over.
-            r.fail(Error::UnknownKey(key));
-            return out;
+            // A column this type no longer declares is stepped over, as it is
+            // under wide keys: the nibble sizes it without its type.
+            if !columns.skip() {
+                break;
+            }
+            continue;
         };
         match T::COLUMNS[index].kind {
             ColumnKind::Str => {
@@ -487,8 +491,7 @@ fn read_table<T: Colbin>(r: &mut Reader<'_>) -> Vec<T> {
     out
 }
 
-/// [`read_table`] for a wide-keyed parent, where an unknown column is stepped
-/// over rather than refused.
+/// [`read_table`] for a wide-keyed parent.
 fn read_table8<T: Colbin>(r: &mut Reader8<'_>) -> Vec<T> {
     let Some((rows, mut columns)) = r.table() else {
         return Vec::new();

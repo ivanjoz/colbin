@@ -55,7 +55,7 @@ func fingerprint(t *testing.T, built *Corpus) uint64 {
 // moves this number, which is the point: it should not move by accident, and
 // when it moves on purpose the diff says which.
 func TestFingerprint(t *testing.T) {
-	const want uint64 = 0xce36b77ee845b34d
+	const want uint64 = 0x5dc1c6c1d7a1e821
 	if got := fingerprint(t, Generate(Seed, Small)); got != want {
 		t.Fatalf("fingerprint %#016x, want %#016x", got, want)
 	}

@@ -330,18 +330,6 @@ func TestCachesRefusalsToo(t *testing.T) {
 	}
 }
 
-func TestRefusesAKeyTheTypeDoesNotDeclare(t *testing.T) {
-	message, err := Marshal(&everyShape{Counts: []uint32{7}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	back := charge{}
-	err = Unmarshal(message, &back)
-	if err == nil || !strings.Contains(err.Error(), "does not declare") {
-		t.Fatalf("a foreign key gave %v", err)
-	}
-}
-
 func TestFieldIDsReportsTheTagIDs(t *testing.T) {
 	ids, err := FieldIDs(charge{})
 	if err != nil {

@@ -24,8 +24,9 @@
 //
 // A field id is four bits or eight, chosen per key run rather than per message.
 // Four is the default and the fast path. Eight costs a byte per present field
-// and buys 255 ids, and the ability to skip a field the reader has never heard
-// of. A type numbered past 255 is split into pages of 255, each linking the next
+// and buys 255 ids, and a descriptor that says what a field is as well as how
+// long: a reader at either width steps over a field it has never heard of, and
+// only a wide one can say what it was. A type numbered past 255 is split into pages of 255, each linking the next
 // under key 255 (codec/pages.go).
 //
 // A type goes wide when it has a field id above sixteen, a field without a

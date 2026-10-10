@@ -47,11 +47,52 @@ func FuzzReader(f *testing.F) {
 	writer.Strings(1, []string{"x", "y", "z"})
 	writer.Close(table)
 	writer.F64(10, 1.5)
+	writer.String(11, "a long enough string to need its length form")
+	writer.Zero(12)
+	writer.Int(13, -1)
+	writer.Uint64s(14, []uint64{1 << 63, 5})
 	f.Add(writer.Buffer)
-	f.Add([]byte{0x18, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF})
+	f.Add([]byte{0x1C, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF})
+	f.Add([]byte{0x1C, 0xFE, 0x03, 0x00, 'a', 'b', 'c'})
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		readNarrow(t, NewReader(data), 0)
+		// And the same bytes stepped over, which is the path an unknown field
+		// takes: every step advances or fails, and a read that succeeds lands
+		// where the skip does.
+		r := NewReader(data)
+		for steps := 0; r.More(); steps++ {
+			if steps > len(data) {
+				t.Fatal("a skip neither advanced nor failed")
+			}
+			before := r.at
+			if !r.Skip() {
+				if r.Err() == nil {
+					t.Fatal("a skip failed without an error")
+				}
+				break
+			}
+			typed := Reader{buffer: data, at: before}
+			if typed.Uint(); typed.Err() == nil && typed.at != r.at {
+				t.Fatalf("Uint read to %d where Skip stepped to %d", typed.at, r.at)
+			}
+			typed = Reader{buffer: data, at: before}
+			if _ = typed.String(); typed.Err() == nil && typed.at != r.at {
+				t.Fatalf("String read to %d where Skip stepped to %d", typed.at, r.at)
+			}
+			typed = Reader{buffer: data, at: before}
+			if typed.Int(); typed.Err() == nil && typed.at != r.at {
+				t.Fatalf("Int read to %d where Skip stepped to %d", typed.at, r.at)
+			}
+			typed = Reader{buffer: data, at: before}
+			if typed.Strings(nil); typed.Err() == nil && typed.at != r.at {
+				t.Fatalf("Strings read to %d where Skip stepped to %d", typed.at, r.at)
+			}
+			typed = Reader{buffer: data, at: before}
+			if typed.Int16s(nil); typed.Err() == nil && typed.at != r.at {
+				t.Fatalf("Int16s read to %d where Skip stepped to %d", typed.at, r.at)
+			}
+		}
 	})
 }
 
@@ -134,11 +175,11 @@ func readNarrow(t *testing.T, r Reader, depth int) {
 				}
 			}
 		default:
-			// A narrow field cannot be skipped, and saying so has to end the
-			// loop like any other failure.
-			r.Skip()
-			if r.Err() == nil {
-				t.Fatal("a narrow skip succeeded")
+			// A skip has to advance or fail, like every read: it is the path
+			// an unknown field takes.
+			before := r.at
+			if r.Skip() == (r.Err() != nil) || (r.Err() == nil && r.at == before) {
+				t.Fatal("a narrow skip neither advanced nor failed, or failed without an error")
 			}
 		}
 	}

@@ -1,39 +1,51 @@
 package wire
 
 // The four-bit key width, K4. A field's key shares one byte with a four-bit
-// descriptor whose meaning depends on the field's type, which the reader knows
-// from the schema. Keys are 0..15. Every multi-byte quantity is little-endian.
+// nibble, and four bits have no room for a type — so the nibble does the one
+// thing a reader needs before it knows the type: it says how long the field is.
+// Keys are 0..15. Every multi-byte quantity is little-endian.
 //
-//	unsigned int   [key:4][code:4]                             [magnitude]
+//	[key:4][nibble:4] [payload]
 //
-//	    code 0..7   the value itself, no payload
-//	    code 8..15  a magnitude of code-7 bytes
+//	    nibble 0..3    no payload
+//	    nibble 4..11   exactly nibble−3 bytes, one to eight
+//	    nibble 12..15  [1 1 f1 f0] [length] [length bytes]
 //
-//	signed int     [key:4][positive:1][n:3]                    [magnitude: n bytes]
+//	    length         one byte up to 253 · 0xFE then a u16 · 0xFF then a u32
 //
-//	    n          0 → no bytes, the magnitude is 1 · 1..6 → that many bytes
-//	               · 7 → eight bytes
-//	    positive   1 = the bytes are a magnitude; 0 = negative, bytes are |value|
+// The type decides only what the bytes mean, and the flag bits f1 f0 only what
+// a length-form payload means — never how long it is. So a reader steps over a
+// key it does not know exactly as a wide one does (Skip), and a type can drop or
+// gain a field at any id and still read what was written before.
+//
+//	unsigned       0..3 the value 1..4 · 4..11 the value, in the fewest bytes
+//	               · 1100 with length 0 an explicit zero
+//
+//	signed         0..2 the value 1..3 · 3 is −1 · 4..11 a positive value
+//	               · 1100 the magnitude of a negative one, 1..8 bytes
+//	               (length 0 an explicit zero)
 //
 //	float          the unsigned shape, carrying the IEEE-754 bit pattern with its
 //	               bytes reversed, so a float's low zero mantissa bytes land
-//	               where the magnitude trim removes them: 1.0 costs two bytes
+//	               where the trim removes them: 1.0 costs three bytes
 //
-//	string/bytes   [key:4][more:1][size hi:3] [size lo:8]      [bytes: size]
-//	               [key:4][1][escape:3]       [size: 2|4|8]    [bytes: size]
+//	string/bytes   4..11 one to eight raw bytes, with no length at all
+//	               · 11 f1 f0: 00 raw, 01 / 10 packed5 opening in lower / upper
+//	               case (packed.go), 11 refused
 //
-//	    2047 bytes fit the two header bytes. Past that the three size bits name
-//	    the width of the size that follows. Escapes 3..6 mark a packed5 string
-//	    (packed.go); 7 is unassigned.
+//	integer array  11 f1 f0, f1f0 the element width: 0→1B 1→2B 2→4B 3→8B, and
+//	               count = length >> f1f0. An unsigned type's elements are
+//	               magnitudes, a signed type's two's complement
 //
-//	integer array  [key:4][positive:1][width:2][more:1] [count:8]  [count × width]
-//	               ... [count: 4 bytes] instead, when more = 1
-//
-//	    width code 0→1B  1→2B  2→4B  3→8B, taken from the widest element
-//	    positive   1 = magnitudes; 0 = two's complement at that width
-//
-//	string array   [key:4][more:1][count hi:3] [count lo:8]   then per element
+//	string array   1100, then per element
 //	               [size: 1 byte, 0xFF → 4 bytes follow] [bytes: size]
+//	               and no count: the reader counts the sizes it walks anyway
+//
+//	composite      11 0 f0 [length] [body] (narrow_composite.go)
+//
+// A key-less element — a map's key or value — is not a field and does not use
+// this nibble: it sits inside a composite whose length already steps over it,
+// and has a code table of its own (narrow_composite.go).
 
 import (
 	"encoding/binary"
@@ -45,14 +57,64 @@ import (
 // MaxFields is what four key bits buy: keys 0..15.
 const MaxFields = 16
 
-// Integer size codes. Code 0 carries no bytes at all and means the magnitude is
-// one, which is what makes a true bool a single byte. Codes 1..6 are the byte
-// count outright; code 7 is eight bytes, so a seven-byte magnitude rounds up to
-// eight and every other width is exact.
+// The nibble.
 const (
-	sizeCodeOne    = 0
-	sizeCode8Bytes = 7
+	// nibbleSized is the first nibble with a payload, which is nibble−sizedBias
+	// bytes long, up to maxSized at nibble 11.
+	nibbleSized = 4
+	sizedBias   = 3
+	maxSized    = 8
+	// nibbleLength is the length form, 0b11xx. Its low two bits are flags whose
+	// meaning is the type's: they never change the size.
+	nibbleLength uint8 = 0b1100
+	flagBits     uint8 = 0b11
+
+	// An unsigned field's nibbles 0..3 are the values 1..4. A signed field's
+	// are 1, 2 and 3, and then −1 — the one negative common enough to deserve a
+	// byte of its own, which every other negative pays for by riding the length
+	// form.
+	inlineValues   = 4
+	signedInline   = 3
+	signedMinusOne = 3
+
+	// A length: one byte up to 253, and two escapes above it. The escapes name
+	// the width of the length that follows rather than continuing it, so a
+	// length is a branch and a load, never a loop whose trip count is data.
+	inlineLength = 0xFD
+	length16     = 0xFE
+	length32     = 0xFF
+
+	// maxInt is what a size is read into, and therefore the ceiling a declared
+	// size is checked against before it is used.
+	maxInt = int(^uint(0) >> 1)
 )
+
+// The flags of a string's length form. A narrow field has no descriptor to put
+// an encoding in, so a packed string names itself here, together with the one
+// bit packed5 needs and the schema cannot know: the case its stream opens in.
+const (
+	flagRaw         uint8 = 0b00
+	flagPackedLower uint8 = 0b01
+	flagPackedUpper uint8 = 0b10
+)
+
+// The narrow element code table (§5.2 of INTERNALS.md), which is not the field
+// nibble: an unsigned element's code 0..7 is the value itself and 8..15 is a
+// magnitude of code−7 bytes, and a signed one's is [positive:1][size:3], the
+// wide INT detail.
+const (
+	elementInlineMax = 7
+	elementWidthBase = 8
+	// intPositiveFlag is bit 3 of a signed element code and of a wide INT
+	// detail, directly above the three size-code bits.
+	intPositiveFlag = 0b1000
+)
+
+// sizeCode8Bytes is the last integer size code, for the signed element above and
+// the wide INT class. Code 0 carries no bytes at all and means the magnitude is
+// one. Codes 1..6 are the byte count outright; code 7 is eight bytes, so a
+// seven-byte magnitude rounds up to eight and every other width is exact.
+const sizeCode8Bytes = 7
 
 // magnitudeWidth maps a size code to its byte count.
 var magnitudeWidth = [8]int{0, 1, 2, 3, 4, 5, 6, 8}
@@ -80,71 +142,10 @@ const (
 )
 
 const (
-	// moreSizeFlag says the size or count in this header did not fit its three
-	// inline bits and that a wider one follows. It is bit 3 in a blob header and
-	// bit 0 in an array header, because an array spends bits 2..1 on its element
-	// width. A blob header byte is [key:4][more:1][size hi:3]; an array header
-	// byte is [key:4][positive:1][width:2][more:1].
-	moreSizeFlag     = 0b1000
-	moreArrayLenFlag = 0b0001
-	arrayWidthShift  = 1
-	// intPositiveFlag is bit 3 of a *signed* integer header, directly above the
-	// three size-code bits. arrayPositiveFlag is bit 3 of an array header. They
-	// are deliberately separate constants: one value used for both would land on
-	// a size-code bit.
-	intPositiveFlag   = 0b1000
-	arrayPositiveFlag = 0b1000
-
-	// An unsigned narrow field spends no sign bit, so all sixteen nibble codes
-	// carry information rather than eight.
-	//
-	// A K4 reader has the schema and therefore already knows whether the field it
-	// is looking at is signed. A `positive` bit on a uint64 is a bit that is
-	// always set — one of four, on the field width that most of this wire uses.
-	// Reclaiming it buys two things: the values 0..7 cost a single byte with no
-	// payload at all, and the eight width codes become exact, so a seven-byte
-	// magnitude no longer rounds up to eight the way the signed form still does.
-	//
-	//	nibble 0..7   the value itself, no payload
-	//	nibble 8..15  a magnitude of (nibble - 7) bytes, little-endian
-	//
-	// Signed fields keep [positive:1][size:3] unchanged. The two forms share the
-	// nibble and mean different things in it, which is safe for exactly the reason
-	// K4 exists at all: nothing reads a narrow field without knowing its type.
-	uintInlineMax = 7
-	uintWidthBase = 8
-
-	// Escape codes, which occupy a blob header's three size bits once more is
-	// set and they no longer carry size.
-	escape2Bytes = 0
-	escape4Bytes = 1
-	escape8Bytes = 2
-
-	// The packed5 escapes. A narrow blob header has no enc field — under K4 the
-	// schema says what a field is, not the wire — so a packed string names
-	// itself here instead, and carries the one bit the schema cannot know: the
-	// case mode its unit stream opens in.
-	//
-	// Spending four codes on it buys a two-byte header, the same as a raw blob's,
-	// where a separate flag byte would have cost three. Code 7 is still free.
-	escapePacked1Lo = 3 // 1-byte size, stream opens lowercase
-	escapePacked1Up = 4 // 1-byte size, stream opens uppercase
-	escapePacked4Lo = 5 // 4-byte size, stream opens lowercase
-	escapePacked4Up = 6 // 4-byte size, stream opens uppercase
-
-	// What each header carries before an escape is needed.
-	inlineBlobSize       = 1<<11 - 1
-	inlineArrayCount     = 1<<8 - 1
-	inlineStringArrayLen = 1<<11 - 1
-
-	// inlineElementSize is the largest element length a string array writes in
-	// one byte; 0xFF escapes to four bytes.
+	// inlineElementSize is the largest element length — of a string array, a
+	// list element, a count — written in one byte; 0xFF escapes to four.
 	inlineElementSize = 0xFE
 	elementSizeEscape = 0xFF
-
-	// maxInt is what a size is read into, and therefore the ceiling a declared
-	// size is checked against before it is used.
-	maxInt = int(^uint(0) >> 1)
 )
 
 var (
@@ -159,22 +160,27 @@ var (
 	// ErrTruncated is a field, or a count of fields, that runs past the bytes
 	// that hold it.
 	ErrTruncated = errors.New("wire: the message ends inside a field")
-	// ErrBadEscape is a size escape code this version does not assign, or one
-	// the read at hand does not take — a packed string read as bytes.
-	ErrBadEscape = errors.New("wire: unassigned size escape code")
-	// ErrCannotSkip is Reader.Skip: a four-bit descriptor does not say what
-	// shape a field is, so a field the reader does not know cannot be sized.
-	ErrCannotSkip = errors.New("wire: a narrow field cannot be skipped without knowing its type")
+	// ErrBadEscape is a narrow field in a form its type does not take: a nibble
+	// with no payload where a string was expected, a length form whose flags
+	// this version does not assign, a packed string read as bytes. The field is
+	// still sized — Skip steps over it — but it cannot be read as asked.
+	ErrBadEscape = errors.New("wire: a narrow field is in a form its type does not take")
+
+	// errFieldTooLarge is a writer's one refusal, and a panic rather than an
+	// error: a narrow length is at most four bytes, and a payload past that is a
+	// wide field's job.
+	errFieldTooLarge = errors.New("wire: a narrow field holds at most 2^32-1 bytes")
 )
 
 // Writer appends fields to a buffer the caller owns. Build one per message over
 // a reused buffer; it holds no state but the buffer.
 //
-// # A write cannot fail
+// # A write does not fail
 //
 // There is no error to check and no Err method. Sizes escalate rather than cap,
-// so nothing a caller can hold in memory is too large to describe, and a key is
-// not data (below).
+// up to the four-byte length a narrow field can declare — four gigabytes, past
+// which the writer panics rather than write a field nothing can read — and a key
+// is not data (below).
 //
 // # Keys are not checked, on purpose
 //
@@ -215,62 +221,115 @@ func appendMagnitude(buffer []byte, magnitude uint64, width int) []byte {
 	return buffer[:len(buffer)-(8-width)]
 }
 
+// appendSized writes a header whose nibble sizes a magnitude of the fewest bytes
+// that hold it, and the magnitude. The nibble is the width plus sizedBias, so
+// the byte count is exact at every width from one to eight.
+func appendSized(buffer []byte, key uint8, value uint64) []byte {
+	width := (bits.Len64(value) + 7) / 8
+	return appendMagnitude(append(buffer, key<<4|uint8(width+sizedBias)), value, width)
+}
+
+// appendLength writes a length in the shortest of its three forms.
+//
+// A length past four bytes is a programming error rather than data: the value
+// is already in memory, and a narrow field cannot say how long it is.
+func appendLength(buffer []byte, length int) []byte {
+	switch {
+	case length <= inlineLength:
+		return append(buffer, uint8(length))
+	case length <= 0xFFFF:
+		return append(buffer, length16, uint8(length), uint8(length>>8))
+	case uint64(length) <= math.MaxUint32:
+		return binary.LittleEndian.AppendUint32(append(buffer, length32), uint32(length))
+	}
+	panic(errFieldTooLarge)
+}
+
+// lengthBytes is what appendLength spends on a length.
+func lengthBytes(length int) int {
+	switch {
+	case length <= inlineLength:
+		return 1
+	case length <= 0xFFFF:
+		return 3
+	}
+	return 5
+}
+
 // Uint writes an unsigned integer, and writes nothing at all when it is zero.
 //
 // The field that fits its own nibble is inline and everything else is a call,
-// deliberately: a value under eight is what a flag, a small count or a bool
+// deliberately: a value of one to four is what a flag, a small count or a bool
 // holds, and keeping that path inside the inliner is worth more than the branch
 // it costs the rest.
 func (w *Writer) Uint(key uint8, value uint64) {
 	// One compare covers both the inline range and the omit-zero rule, because
-	// zero wraps: `0-1` is not below eight, so a zero field falls through to
-	// uintWide and is dropped there. Two compares here — the obvious spelling —
-	// cost 83 against the inliner's budget of 80, and a Uint that does not
-	// inline puts *every* field of the record through a call rather than only
-	// the wide ones. Sending a ten-field record's writes out of line that way
-	// measured 18.9 ns against 7.0 on the wide key's equivalent.
-	if value-1 < uintInlineMax {
+	// zero wraps: decremented, it is not below four, so a zero field falls
+	// through to uintWide and is dropped there. The decrement is spelled in
+	// place, rather than as `value-1` in the compare and again in the append,
+	// because the inliner charges for each: that spelling costs 82 against a
+	// budget of 80, and a Uint that does not inline puts *every* field of the
+	// record through a call rather than only the wide ones. Sending a ten-field
+	// record's writes out of line that way measured 18.9 ns against 7.0 on the
+	// wide key's equivalent.
+	if value--; value < inlineValues {
 		w.Buffer = append(w.Buffer, key<<4|uint8(value))
-		return
+	} else {
+		w.uintWide(key, value)
 	}
-	w.uintWide(key, value)
 }
 
 // uintWide is not inlined on purpose: it is the cold half of Uint, and letting
-// it fold back in is what would push Uint itself out of the budget.
+// it fold back in is what would push Uint itself out of the budget. It takes the
+// value Uint decremented, which saves Uint the node that would undo it.
 //
 //go:noinline
-func (w *Writer) uintWide(key uint8, value uint64) {
-	if value == 0 {
-		return
+func (w *Writer) uintWide(key uint8, less uint64) {
+	if value := less + 1; value != 0 {
+		w.Buffer = appendSized(w.Buffer, key, value)
 	}
-	width := (bits.Len64(value) + 7) / 8
-	w.Buffer = appendMagnitude(
-		append(w.Buffer, key<<4|uintWidthBase+uint8(width)-1), value, width)
 }
 
-// Int writes a signed integer as a sign bit and a magnitude.
+// Int writes a signed integer: a positive value as an unsigned one would be
+// written, past the three that fit the nibble, and a negative one as its
+// magnitude in the length form — except −1, which has a nibble of its own.
+//
+// It does not fit the inliner whichever way it is spelled — the signed range
+// test costs a conversion the unsigned one does not — so it is one call that
+// keeps every value up to 255 inside it, rather than an inline nibble case in
+// front of a second call. The one-byte magnitude is tested first: it is the
+// commonest value a signed field holds that is not zero, and putting it ahead
+// of the nibble case measured a third of a nanosecond a field.
 func (w *Writer) Int(key uint8, value int64) {
-	if value > 0 && value <= 0xFF {
-		w.Buffer = append(w.Buffer, key<<4|intPositiveFlag|1, uint8(value))
+	if value > signedInline && value <= 0xFF {
+		w.Buffer = append(w.Buffer, key<<4|nibbleSized, uint8(value))
 		return
 	}
-	if value == 0 {
+	if uint64(value)-1 < signedInline {
+		w.Buffer = append(w.Buffer, key<<4|uint8(value-1))
 		return
 	}
-	w.intWide(key, value)
+	// A zero is the commonest value a field holds, and it is dropped here
+	// rather than one call further in.
+	if value != 0 {
+		w.intWide(key, value)
+	}
 }
 
 func (w *Writer) intWide(key uint8, value int64) {
-	header := key<<4 | intPositiveFlag
-	magnitude := uint64(value)
-	if value < 0 {
-		header = key << 4
+	switch {
+	case value > 0:
+		w.Buffer = appendSized(w.Buffer, key, uint64(value))
+	case value == -1:
+		w.Buffer = append(w.Buffer, key<<4|signedMinusOne)
+	case value < 0:
 		// Negating through uint64 rather than int64 keeps math.MinInt64, whose
 		// positive counterpart does not exist as an int64.
-		magnitude = -uint64(value)
+		magnitude := -uint64(value)
+		width := (bits.Len64(magnitude) + 7) / 8
+		w.Buffer = appendMagnitude(
+			append(w.Buffer, key<<4|nibbleLength, uint8(width)), magnitude, width)
 	}
-	w.magnitude(header, magnitude)
 }
 
 // Bool writes one byte when true and nothing when false.
@@ -278,21 +337,11 @@ func (w *Writer) Bool(key uint8, value bool) {
 	if !value {
 		return
 	}
-	// True is the unsigned inline value 1, which is a whole field in one byte.
-	w.Buffer = append(w.Buffer, key<<4|1)
+	// True is the unsigned value 1, nibble 0, which is a whole field in one byte.
+	w.Buffer = append(w.Buffer, key<<4)
 }
 
-// magnitude writes the header and as many bytes as the value actually needs.
-func (w *Writer) magnitude(header uint8, magnitude uint64) {
-	if magnitude == 1 {
-		w.Buffer = append(w.Buffer, header|sizeCodeOne)
-		return
-	}
-	code, width := sizeCodeFor(magnitude)
-	w.Buffer = appendMagnitude(append(w.Buffer, header|code), magnitude, width)
-}
-
-// Bytes writes a length-prefixed blob, and nothing when it is empty.
+// Bytes writes a blob, and nothing when it is empty.
 func (w *Writer) Bytes(key uint8, value []byte) {
 	if len(value) == 0 {
 		return
@@ -310,31 +359,19 @@ func (w *Writer) String(key uint8, value string) {
 	w.Buffer = append(w.Buffer, value...)
 }
 
-// blobHeader writes the header a string, blob or string array carries: two bytes
-// holding an eleven-bit size, or one byte and a wider size when that will not
-// hold it.
+// blobHeader writes a raw string's header: the nibble alone for one to eight
+// bytes — a code, a short name, a currency — and the length form past that.
+//
+// It is kept out of line so that String and Bytes stay inside the inliner's
+// budget themselves: an append and a call is what fits.
+//
+//go:noinline
 func (w *Writer) blobHeader(key uint8, size int) {
-	if size <= inlineBlobSize {
-		w.Buffer = append(w.Buffer, key<<4|uint8(size>>8)&0b111, uint8(size))
+	if size <= maxSized {
+		w.Buffer = append(w.Buffer, key<<4|uint8(size+sizedBias))
 		return
 	}
-	w.escapedSize(key, uint64(size))
-}
-
-// escapedSize writes the one-byte header whose three size bits name the width of
-// the size that follows it.
-func (w *Writer) escapedSize(key uint8, size uint64) {
-	switch {
-	case size <= 0xFFFF:
-		w.Buffer = append(w.Buffer, key<<4|moreSizeFlag|escape2Bytes,
-			uint8(size), uint8(size>>8))
-	case size <= 0xFFFF_FFFF:
-		w.Buffer = binary.LittleEndian.AppendUint32(
-			append(w.Buffer, key<<4|moreSizeFlag|escape4Bytes), uint32(size))
-	default:
-		w.Buffer = binary.LittleEndian.AppendUint64(
-			append(w.Buffer, key<<4|moreSizeFlag|escape8Bytes), size)
-	}
+	w.Buffer = appendLength(append(w.Buffer, key<<4|nibbleLength|flagRaw), size)
 }
 
 // Array writers, one concrete method per element type.
@@ -345,161 +382,137 @@ func (w *Writer) escapedSize(key uint8, size uint64) {
 // message. Keeping the pointer out of every generic signature is what keeps a
 // plan-driven encode at zero allocations; the generic work below touches slices
 // and values only.
+//
+// Each is marked not to inline. Small enough to, they would fold into every
+// switch over a field's op — codec's flat walk among them — and seven copies of
+// an array's framing in the middle of the scalar arms cost the scalars their
+// registers: the flat encode measured 8% slower with them inlined.
 
-// Ints writes an array of signed integers at one width, chosen from the widest
-// element, and nothing when the array is empty.
+// Ints writes an array of signed integers at one width, the narrowest that holds
+// every element in two's complement, and nothing when the array is empty.
+//
+//go:noinline
 func (w *Writer) Ints(key uint8, values []int64) {
 	if len(values) == 0 {
 		return
 	}
-	header, width := arrayPlan(key, values)
-	w.arrayHeader(header, len(values))
-	w.Buffer = appendElements(w.Buffer, values, width)
+	w.Buffer = appendArrayField(w.Buffer, key, values)
 }
 
 // Int8s, Int16s, Int32s, Uint16s, Uint32s and Uint64s are Ints for the slice a
 // caller actually holds, without the []int64 it would otherwise have to build.
+// An unsigned type's elements are magnitudes rather than two's complement, so a
+// []uint16 of values past 255 is two bytes each where a []int16 of them would
+// still be.
+//
+//go:noinline
 func (w *Writer) Int8s(key uint8, values []int8) {
 	if len(values) == 0 {
 		return
 	}
-	header, width := arrayPlan(key, values)
-	w.arrayHeader(header, len(values))
-	w.Buffer = appendElements(w.Buffer, values, width)
+	w.Buffer = appendArrayField(w.Buffer, key, values)
 }
 
+//go:noinline
 func (w *Writer) Int16s(key uint8, values []int16) {
 	if len(values) == 0 {
 		return
 	}
-	header, width := arrayPlan(key, values)
-	w.arrayHeader(header, len(values))
-	w.Buffer = appendElements(w.Buffer, values, width)
+	w.Buffer = appendArrayField(w.Buffer, key, values)
 }
 
+//go:noinline
 func (w *Writer) Int32s(key uint8, values []int32) {
 	if len(values) == 0 {
 		return
 	}
-	header, width := arrayPlan(key, values)
-	w.arrayHeader(header, len(values))
-	w.Buffer = appendElements(w.Buffer, values, width)
+	w.Buffer = appendArrayField(w.Buffer, key, values)
 }
 
+//go:noinline
 func (w *Writer) Uint16s(key uint8, values []uint16) {
 	if len(values) == 0 {
 		return
 	}
-	header, width := arrayPlan(key, values)
-	w.arrayHeader(header, len(values))
-	w.Buffer = appendElements(w.Buffer, values, width)
+	w.Buffer = appendArrayField(w.Buffer, key, values)
 }
 
+//go:noinline
 func (w *Writer) Uint32s(key uint8, values []uint32) {
 	if len(values) == 0 {
 		return
 	}
-	header, width := arrayPlan(key, values)
-	w.arrayHeader(header, len(values))
-	w.Buffer = appendElements(w.Buffer, values, width)
+	w.Buffer = appendArrayField(w.Buffer, key, values)
 }
 
+//go:noinline
 func (w *Writer) Uint64s(key uint8, values []uint64) {
 	if len(values) == 0 {
 		return
 	}
-	header, width := arrayPlan(key, values)
-	w.arrayHeader(header, len(values))
-	w.Buffer = appendElements(w.Buffer, values, width)
+	w.Buffer = appendArrayField(w.Buffer, key, values)
 }
 
-// arrayPlan is the one pass that decides both the sign flag and the width: a
-// negative anywhere turns the whole array into two's complement, which needs the
-// width that holds the most negative element as well as the largest positive
-// one. It is generic over the element type and takes no pointer.
+// appendArrayField writes an integer array in the length form: the flags are
+// the element width, and the length is in bytes, so the count is never written
+// and a reader that does not know the key steps over the field like any other.
+func appendArrayField[T Integer](buffer []byte, key uint8, values []T) []byte {
+	width, code := narrowArrayWidth(values)
+	buffer = appendLength(append(buffer, key<<4|nibbleLength|code), len(values)*width)
+	return appendElements(buffer, values, width)
+}
+
+// narrowArrayWidth is the one pass that picks the width, and the element type
+// alone decides what the width has to hold: a signed type's elements go as two's
+// complement and an unsigned type's as magnitudes, whatever the values are.
+// There is no flag on the wire saying which, because the reader has the type.
 //
-// It returns the pieces rather than a header byte, because the two key widths
-// spend them in different places: K4 ORs them into the byte it shares with the
-// key, K8 into a descriptor of its own.
-func arrayPlanOf[T Integer](values []T) (allPositive bool, width int, widthCode uint8) {
-	signed := isSigned[T]()
-	allPositive = true
-	var widest uint64
-	for _, value := range values {
-		// An unsigned type never has a negative element, however its top bit
-		// reads as an int64: the test below is what keeps a uint64 past 2^63
-		// from being mistaken for a negative number.
-		if asSigned := int64(value); signed && asSigned < 0 {
-			allPositive = false
-			if magnitude := -uint64(asSigned); magnitude > widest {
-				widest = magnitude
-			}
-			continue
+// It ORs rather than compares. Every width boundary is a power of two less one,
+// so the OR of the values crosses a boundary exactly when the largest does, and
+// the loop has no branch in it. A signed value is folded first — a negative one
+// to its complement, −1 to 0 and −128 to 127 — which leaves the bits a two's
+// complement element needs, less the sign bit the shift puts back.
+func narrowArrayWidth[T Integer](values []T) (width int, code uint8) {
+	var used uint64
+	if isSigned[T]() {
+		for _, value := range values {
+			signed := int64(value)
+			used |= uint64(signed ^ signed>>63)
 		}
-		if magnitude := uint64(value); magnitude > widest {
-			widest = magnitude
+		used <<= 1
+	} else {
+		for _, value := range values {
+			used |= uint64(value)
 		}
-	}
-	width, widthCode = arrayWidth(widest, allPositive)
-	return allPositive, width, widthCode
-}
-
-// arrayPlan is arrayPlanOf with the pieces folded into a narrow header byte.
-func arrayPlan[T Integer](key uint8, values []T) (header uint8, width int) {
-	allPositive, width, widthCode := arrayPlanOf(values)
-	header = key<<4 | widthCode<<arrayWidthShift
-	if allPositive {
-		header |= arrayPositiveFlag
-	}
-	return header, width
-}
-
-// arrayWidth picks the narrowest element width that holds every element. A
-// two's complement array needs one more bit than its magnitude, which is what
-// the shift below tests.
-func arrayWidth(widest uint64, allPositive bool) (width int, code uint8) {
-	if !allPositive {
-		// A magnitude that already fills the top bit cannot gain one: shifting
-		// it would wrap to zero and pick a one-byte width for math.MinInt64.
-		if widest > 1<<62 {
-			return 8, widthCode8Bytes
-		}
-		widest <<= 1
 	}
 	switch {
-	case widest <= 0xFF:
+	case used <= 0xFF:
 		return 1, widthCode1Byte
-	case widest <= 0xFFFF:
+	case used <= 0xFFFF:
 		return 2, widthCode2Bytes
-	case widest <= 0xFFFF_FFFF:
+	case used <= 0xFFFF_FFFF:
 		return 4, widthCode4Bytes
-	default:
-		return 8, widthCode8Bytes
 	}
+	return 8, widthCode8Bytes
 }
 
-// arrayHeader writes two bytes holding an eight-bit count, or one byte and a
-// four-byte count when that will not hold it.
-func (w *Writer) arrayHeader(header uint8, count int) {
-	if count <= inlineArrayCount {
-		w.Buffer = append(w.Buffer, header, uint8(count))
-		return
-	}
-	w.Buffer = binary.LittleEndian.AppendUint32(
-		append(w.Buffer, header|moreArrayLenFlag), uint32(count))
-}
-
-// Strings writes a count and then each element behind its own length.
+// Strings writes each element behind its own size, inside one length that lets
+// the whole field be skipped. There is no count: a reader walks the sizes to
+// read the elements anyway, and counting them as it goes costs nothing.
 //
-// The element length is one byte with an escape rather than a fixed two for the
-// same reason the header sizes escalate: it removes the ceiling, and it makes
-// the common element — anything under 255 bytes, which is every code line and
-// most error texts — cost one byte instead of two.
+// The element size is one byte with an escape rather than a fixed two for the
+// same reason a length escalates: it removes the ceiling, and it makes the
+// common element — anything under 255 bytes, which is every code line and most
+// error texts — cost one byte instead of two.
 func (w *Writer) Strings(key uint8, values []string) {
 	if len(values) == 0 {
 		return
 	}
-	w.blobHeader(key, len(values))
+	payload := 0
+	for _, value := range values {
+		payload += elementSizeBytes(len(value)) + len(value)
+	}
+	w.Buffer = appendLength(append(w.Buffer, key<<4|nibbleLength), payload)
 	for _, value := range values {
 		if len(value) <= inlineElementSize {
 			w.Buffer = append(w.Buffer, uint8(len(value)))
@@ -511,9 +524,18 @@ func (w *Writer) Strings(key uint8, values []string) {
 	}
 }
 
+// elementSizeBytes is what an element size costs: one byte, or the escape and
+// four.
+func elementSizeBytes(size int) int {
+	if size <= inlineElementSize {
+		return 1
+	}
+	return 5
+}
+
 // Reader walks a message field by field. The caller switches on Key and calls
 // the read for the type that key holds, which it knows from the record
-// definition.
+// definition, and Skip for a key it does not know.
 type Reader struct {
 	buffer []byte
 	at     int
@@ -558,16 +580,86 @@ func (r *Reader) header() (uint8, bool) {
 	return r.buffer[r.at], true
 }
 
-// Uint reads an unsigned integer field, ignoring the sign bit.
+// field reads the header at the cursor and sizes the field from its nibble
+// alone, returning the nibble and where the payload is, and advancing past the
+// whole field. It is the one place a narrow field is sized — Skip is this and
+// nothing more, and every read that is not on an inline fast path comes through
+// here — so a read and a skip cannot disagree about where the next field starts.
+func (r *Reader) field() (nibble uint8, start, size int, ok bool) {
+	header, ok := r.header()
+	if !ok {
+		return 0, 0, 0, false
+	}
+	nibble = header & 0b1111
+	start = r.at + 1
+	switch {
+	case nibble < nibbleSized:
+	case nibble < nibbleLength:
+		size = int(nibble) - sizedBias
+	default:
+		var err error
+		if size, start, err = readLength(r.buffer, start); err != nil {
+			r.fail(err)
+			return 0, 0, 0, false
+		}
+	}
+	if size > len(r.buffer)-start {
+		r.fail(ErrTruncated)
+		return 0, 0, 0, false
+	}
+	r.at = start + size
+	return nibble, start, size, true
+}
+
+// readLength reads a length whose first byte is at `at`, returning it with the
+// offset just past it. Any of the three forms is accepted for any length: the
+// writer's choosing the shortest is a property of the writer, not a rule a
+// reader has to police.
+func readLength(buffer []byte, at int) (length, start int, err error) {
+	if at >= len(buffer) {
+		return 0, 0, ErrTruncated
+	}
+	switch first := buffer[at]; first {
+	case length16:
+		if len(buffer)-at < 3 {
+			return 0, 0, ErrTruncated
+		}
+		return int(binary.LittleEndian.Uint16(buffer[at+1:])), at + 3, nil
+	case length32:
+		if len(buffer)-at < 5 {
+			return 0, 0, ErrTruncated
+		}
+		value := binary.LittleEndian.Uint32(buffer[at+1:])
+		if uint64(value) > uint64(maxInt) {
+			return 0, 0, ErrSizeTooLarge
+		}
+		return int(value), at + 5, nil
+	default:
+		return int(first), at + 1, nil
+	}
+}
+
+// Skip steps over the field at the cursor without knowing what it is, and
+// reports false — with Err set — when the field runs past the message. The
+// nibble sizes every field whatever its type, so this is one branch and, for the
+// length form, one length read: the same capability Reader8.Skip has, at a byte
+// less per field.
+func (r *Reader) Skip() bool {
+	_, _, _, ok := r.field()
+	return ok
+}
+
+// Uint reads an unsigned integer field.
 //
-// Split for the same reason the writer is: the one-byte field is the common one,
-// and its path is small enough to inline into the caller's switch.
+// Split for the same reason the writer is: the one- and two-byte fields are the
+// common ones, and their path is spelled out here with everything else one call
+// away.
 func (r *Reader) Uint() uint64 {
 	if field := r.buffer[r.at:]; len(field) >= 1 {
-		if code := field[0] & 0b1111; code <= uintInlineMax {
+		if nibble := field[0] & 0b1111; nibble < inlineValues {
 			r.at++
-			return uint64(code)
-		} else if code == uintWidthBase && len(field) >= 2 {
+			return uint64(nibble) + 1
+		} else if nibble == nibbleSized && len(field) >= 2 {
 			r.at += 2
 			return uint64(field[1])
 		}
@@ -576,23 +668,25 @@ func (r *Reader) Uint() uint64 {
 }
 
 func (r *Reader) uintWide() uint64 {
-	header, ok := r.header()
-	if !ok {
+	nibble, start, size, ok := r.field()
+	switch {
+	case !ok:
 		return 0
+	case nibble < nibbleSized:
+		return uint64(nibble) + 1
+	case nibble < nibbleLength:
+		return leUint(r.buffer[start:], size)
 	}
-	code := header & 0b1111
-	if code <= uintInlineMax {
-		r.at++
-		return uint64(code)
+	r.explicitZero(nibble, size)
+	return 0
+}
+
+// explicitZero checks that a length-form field on an integer is the one form
+// an integer takes there, `1100` with nothing in it.
+func (r *Reader) explicitZero(nibble uint8, size int) {
+	if nibble != nibbleLength || size != 0 {
+		r.fail(ErrBadEscape)
 	}
-	width := int(code) - uintWidthBase + 1
-	rest := r.buffer[r.at+1:]
-	if len(rest) < width {
-		r.fail(ErrTruncated)
-		return 0
-	}
-	r.at += 1 + width
-	return leUint(rest, width)
 }
 
 // leUint reads a magnitude's width bytes as a little-endian integer. The whole
@@ -612,55 +706,54 @@ func leUint(buffer []byte, width int) uint64 {
 
 // Int reads a signed integer field.
 //
-// The magnitude goes through signedMagnitude and not through Uint: a signed
-// nibble is [positive:1][size:3] and an unsigned one is a sixteen-code table, so
-// the same four bits mean different things and only the schema says which.
+// It is not Uint with a sign applied: the two tables part at nibble 3, which is
+// the value 4 to an unsigned field and −1 to a signed one, and the length form
+// carries a negative magnitude here and only an explicit zero there.
 func (r *Reader) Int() int64 {
-	header, ok := r.header()
-	if !ok {
-		return 0
+	if field := r.buffer[r.at:]; len(field) >= 1 {
+		if nibble := field[0] & 0b1111; nibble < signedInline {
+			r.at++
+			return int64(nibble) + 1
+		} else if nibble == nibbleSized && len(field) >= 2 {
+			r.at += 2
+			return int64(field[1])
+		}
 	}
-	positive := header&intPositiveFlag != 0
-	magnitude := r.signedMagnitude()
-	return r.signed(positive, magnitude)
+	return r.intWide()
 }
 
-// signed applies a sign to a magnitude, refusing one no int64 holds: past 2^63-1
-// when positive, past 2^63 when negative.
-func (r *Reader) signed(positive bool, magnitude uint64) int64 {
-	if positive {
+func (r *Reader) intWide() int64 {
+	nibble, start, size, ok := r.field()
+	switch {
+	case !ok:
+		return 0
+	case nibble < signedMinusOne:
+		return int64(nibble) + 1
+	case nibble == signedMinusOne:
+		return -1
+	case nibble < nibbleLength:
+		magnitude := leUint(r.buffer[start:], size)
 		if magnitude > math.MaxInt64 {
 			r.fail(ErrFieldTooWide)
 			return 0
 		}
 		return int64(magnitude)
+	case nibble != nibbleLength:
+		r.fail(ErrBadEscape)
+		return 0
 	}
+	// The length form: a negative value's magnitude, or nothing at all for an
+	// explicit zero.
+	if size > 8 {
+		r.fail(ErrFieldTooWide)
+		return 0
+	}
+	magnitude := leUint(r.buffer[start:], size)
 	if magnitude > 1<<63 {
 		r.fail(ErrFieldTooWide)
 		return 0
 	}
 	return -int64(magnitude)
-}
-
-// signedMagnitude reads the [size:3] form: code 0 means the magnitude is one,
-// codes 1..6 are that many bytes, and code 7 is eight.
-func (r *Reader) signedMagnitude() uint64 {
-	header, ok := r.header()
-	if !ok {
-		return 0
-	}
-	width := magnitudeWidth[header&0b111]
-	if width == 0 {
-		r.at++
-		return 1
-	}
-	rest := r.buffer[r.at+1:]
-	if len(rest) < width {
-		r.fail(ErrTruncated)
-		return 0
-	}
-	r.at += 1 + width
-	return leUint(rest, width)
 }
 
 // Bool reads a field written by Bool. Absent fields never reach here: a false
@@ -671,268 +764,161 @@ func (r *Reader) Bool() bool { return r.Uint() == 1 }
 // copying. It stays valid only as long as the message buffer does. A packed5
 // string is not bytes and is refused with ErrBadEscape; String reads it.
 func (r *Reader) Bytes() []byte {
-	size, start, ok := r.blobSize()
+	nibble, start, size, ok := r.field()
 	if !ok {
 		return nil
 	}
-	if size > len(r.buffer)-start {
-		r.fail(ErrTruncated)
+	if nibble < nibbleSized || nibble > nibbleLength|flagRaw {
+		r.fail(ErrBadEscape)
 		return nil
 	}
-	r.at = start + size
 	return r.buffer[start : start+size]
 }
 
-// String reads a string written by String or by PackedString. The header's
-// escape code says which, so a reader needs no configuration and cannot be
-// wrong about it.
+// String reads a string written by String or by PackedString. The flags say
+// which, so a reader needs no configuration and cannot be wrong about it.
 //
-// The common field is a raw string with an inline size, so that path is spelled
-// out here, small enough for the inliner, and everything else is one call away.
+// The common field is a raw string of up to eight bytes, or one with a one-byte
+// length, so those two paths are spelled out here and everything else is one
+// call away.
 func (r *Reader) String() string {
 	at := r.at
-	if at+2 <= len(r.buffer) && r.buffer[at]&moreSizeFlag == 0 {
-		size := int(r.buffer[at]&0b111)<<8 | int(r.buffer[at+1])
-		if size <= len(r.buffer)-at-2 {
-			r.at = at + 2 + size
-			return string(r.buffer[at+2 : at+2+size])
+	if at+2 <= len(r.buffer) {
+		nibble, next := r.buffer[at]&0b1111, r.buffer[at+1]
+		if nibble == nibbleLength|flagRaw && next <= inlineLength {
+			if size := int(next); size <= len(r.buffer)-at-2 {
+				r.at = at + 2 + size
+				return string(r.buffer[at+2 : at+2+size])
+			}
+		} else if size := int(nibble) - sizedBias; size > 0 && size <= maxSized && size <= len(r.buffer)-at-1 {
+			r.at = at + 1 + size
+			return string(r.buffer[at+1 : at+1+size])
 		}
 	}
 	return r.stringWide()
 }
 
-// blobSize reads a blob or string-array header and returns the size it declares
-// with the offset just past it.
-func (r *Reader) blobSize() (size, start int, ok bool) {
-	header, ok := r.header()
-	if !ok {
-		return 0, 0, false
-	}
-	if header&moreSizeFlag == 0 {
-		if r.at+2 > len(r.buffer) {
-			r.fail(ErrTruncated)
-			return 0, 0, false
-		}
-		return int(header&0b111)<<8 | int(r.buffer[r.at+1]), r.at + 2, true
-	}
-	return r.escapedSize(header & 0b111)
-}
-
-// escapedSize reads the wide size that follows a header whose more flag is set.
-// Its width is named by the header rather than discovered byte by byte, so there
-// is no continuation run for a peer to make unbounded — the only thing refused
-// here is a size this platform cannot address.
-func (r *Reader) escapedSize(escape uint8) (size, start int, ok bool) {
-	var width int
-	switch escape {
-	case escape2Bytes:
-		width = 2
-	case escape4Bytes:
-		width = 4
-	case escape8Bytes:
-		width = 8
-	default:
-		r.fail(ErrBadEscape)
-		return 0, 0, false
-	}
-	rest := r.buffer[r.at+1:]
-	if len(rest) < width {
-		r.fail(ErrTruncated)
-		return 0, 0, false
-	}
-	value := leUint(rest, width)
-	if value > uint64(maxInt) {
-		r.fail(ErrSizeTooLarge)
-		return 0, 0, false
-	}
-	return int(value), r.at + 1 + width, true
-}
-
 // Array readers, the mirror of the writers: one concrete method per element
 // type, for the reason given there — a *Reader in a generic signature costs the
-// caller an allocation.
+// caller an allocation. The type decides how the elements read back, as it
+// decided how they were written: sign-extended for a signed type, zero-extended
+// for an unsigned one.
 
 // Ints appends the array's elements to dst, which may be nil.
 func (r *Reader) Ints(dst []int64) []int64 {
-	elements, positive, width, ok := r.arrayElements()
-	if !ok {
-		return dst
+	if elements, width, ok := r.arrayElements(); ok {
+		return appendTwosComplement(dst, elements, width)
 	}
-	return appendArray(dst, elements, width, positive)
+	return dst
 }
 
 func (r *Reader) Int8s(dst []int8) []int8 {
-	elements, positive, width, ok := r.arrayElements()
-	if !ok {
-		return dst
+	if elements, width, ok := r.arrayElements(); ok {
+		return appendTwosComplement(dst, elements, width)
 	}
-	return appendArray(dst, elements, width, positive)
+	return dst
 }
 
 func (r *Reader) Int16s(dst []int16) []int16 {
-	elements, positive, width, ok := r.arrayElements()
-	if !ok {
-		return dst
+	if elements, width, ok := r.arrayElements(); ok {
+		return appendTwosComplement(dst, elements, width)
 	}
-	return appendArray(dst, elements, width, positive)
+	return dst
 }
 
 func (r *Reader) Int32s(dst []int32) []int32 {
-	elements, positive, width, ok := r.arrayElements()
-	if !ok {
-		return dst
+	if elements, width, ok := r.arrayElements(); ok {
+		return appendTwosComplement(dst, elements, width)
 	}
-	return appendArray(dst, elements, width, positive)
+	return dst
 }
 
 func (r *Reader) Uint16s(dst []uint16) []uint16 {
-	elements, positive, width, ok := r.arrayElements()
-	if !ok {
-		return dst
+	if elements, width, ok := r.arrayElements(); ok {
+		return appendMagnitudes(dst, elements, width)
 	}
-	return appendArray(dst, elements, width, positive)
+	return dst
 }
 
 func (r *Reader) Uint32s(dst []uint32) []uint32 {
-	elements, positive, width, ok := r.arrayElements()
-	if !ok {
-		return dst
+	if elements, width, ok := r.arrayElements(); ok {
+		return appendMagnitudes(dst, elements, width)
 	}
-	return appendArray(dst, elements, width, positive)
+	return dst
 }
 
 func (r *Reader) Uint64s(dst []uint64) []uint64 {
-	elements, positive, width, ok := r.arrayElements()
-	if !ok {
-		return dst
+	if elements, width, ok := r.arrayElements(); ok {
+		return appendMagnitudes(dst, elements, width)
 	}
-	return appendArray(dst, elements, width, positive)
+	return dst
 }
 
-// arrayElements reads an array field's header and returns its payload as a
-// sub-slice of the message, with the element width and sign the header declares.
-// It advances the cursor: the caller only has to turn bytes into elements.
-func (r *Reader) arrayElements() (elements []byte, positive bool, width int, ok bool) {
-	header, ok := r.header()
+// arrayElements reads an array field and returns its payload as a sub-slice of
+// the message, with the element width its flags declare. It advances the
+// cursor: the caller only has to turn bytes into elements. A length that is not
+// a whole number of elements is refused rather than read short.
+func (r *Reader) arrayElements() (elements []byte, width int, ok bool) {
+	nibble, start, size, ok := r.field()
 	if !ok {
-		return nil, false, 0, false
+		return nil, 0, false
 	}
-	count, start, ok := r.arrayCount(header)
-	if !ok {
-		return nil, false, 0, false
+	if nibble < nibbleLength {
+		r.fail(ErrBadEscape)
+		return nil, 0, false
 	}
-	width = 1 << ((header >> arrayWidthShift) & 0b11)
-	if count < 0 || count > (len(r.buffer)-start)/width {
+	width = 1 << (nibble & flagBits)
+	if size&(width-1) != 0 {
 		r.fail(ErrTruncated)
-		return nil, false, 0, false
+		return nil, 0, false
 	}
-	r.at = start + count*width
-	return r.buffer[start : start+count*width], header&arrayPositiveFlag != 0, width, true
+	return r.buffer[start : start+size], width, true
 }
 
-// arrayCount reads an integer array's header and returns its element count with
-// the offset just past it.
-func (r *Reader) arrayCount(header uint8) (count, start int, ok bool) {
-	if header&moreArrayLenFlag == 0 {
-		if r.at+2 > len(r.buffer) {
-			r.fail(ErrTruncated)
-			return 0, 0, false
-		}
-		return int(r.buffer[r.at+1]), r.at + 2, true
+// stringElements reads a string array's framing and returns a reader over
+// exactly its elements. An element is [size][bytes], the shape a list element
+// has, so Element reads it — and reading inside the field's own bytes is what
+// keeps a bad element size from running into the field that follows.
+func (r *Reader) stringElements() (Reader, bool) {
+	nibble, start, size, ok := r.field()
+	if !ok {
+		return Reader{}, false
 	}
-	rest := r.buffer[r.at+1:]
-	if len(rest) < 4 {
-		r.fail(ErrTruncated)
-		return 0, 0, false
+	if nibble != nibbleLength {
+		r.fail(ErrBadEscape)
+		return Reader{}, false
 	}
-	return int(binary.LittleEndian.Uint32(rest)), r.at + 5, true
+	return Reader{buffer: r.buffer[start : start+size]}, true
 }
 
 // StringsBytes appends each element to dst as a sub-slice of the message,
 // without copying. The slices stay valid only as long as the message buffer
 // does.
 func (r *Reader) StringsBytes(dst [][]byte) [][]byte {
-	count, at, ok := r.stringsHeader()
-	if !ok {
-		return dst
-	}
-	for range count {
-		size, next, ok := r.elementSize(at)
+	elements, ok := r.stringElements()
+	for ok && elements.More() {
+		element, ok := elements.Element()
 		if !ok {
+			r.fail(elements.err)
 			return dst
 		}
-		if size > len(r.buffer)-next {
-			r.fail(ErrTruncated)
-			return dst
-		}
-		dst = append(dst, r.buffer[next:next+size])
-		at = next + size
+		dst = append(dst, element)
 	}
-	r.at = at
 	return dst
-}
-
-// stringsHeader reads a string array's count, refusing one larger than the
-// bytes left: every element spends at least its length byte.
-func (r *Reader) stringsHeader() (count, at int, ok bool) {
-	count, at, ok = r.blobSize()
-	if ok && count > len(r.buffer)-at {
-		r.fail(ErrTruncated)
-		return 0, 0, false
-	}
-	return count, at, ok
-}
-
-// elementSize reads one string-array element length: one byte, or four more
-// behind the escape.
-func (r *Reader) elementSize(at int) (size, start int, ok bool) {
-	if at >= len(r.buffer) {
-		r.fail(ErrTruncated)
-		return 0, 0, false
-	}
-	if size := r.buffer[at]; size != elementSizeEscape {
-		return int(size), at + 1, true
-	}
-	if at+5 > len(r.buffer) {
-		r.fail(ErrTruncated)
-		return 0, 0, false
-	}
-	value := binary.LittleEndian.Uint32(r.buffer[at+1:])
-	if uint64(value) > uint64(maxInt) {
-		r.fail(ErrSizeTooLarge)
-		return 0, 0, false
-	}
-	return int(value), at + 5, true
 }
 
 // Strings copies each element into a Go string.
 func (r *Reader) Strings(dst []string) []string {
-	count, at, ok := r.stringsHeader()
-	if !ok {
-		return dst
-	}
-	for range count {
-		size, next, ok := r.elementSize(at)
+	elements, ok := r.stringElements()
+	for ok && elements.More() {
+		element, ok := elements.Element()
 		if !ok {
+			r.fail(elements.err)
 			return dst
 		}
-		if size > len(r.buffer)-next {
-			r.fail(ErrTruncated)
-			return dst
-		}
-		dst = append(dst, string(r.buffer[next:next+size]))
-		at = next + size
+		dst = append(dst, string(element))
 	}
-	r.at = at
 	return dst
-}
-
-// Skip is refused rather than guessed: the header says how wide a field is only
-// once the reader knows which of the four layouts it is reading, and that comes
-// from the key. An unknown key is a record definition the two sides no longer
-// share.
-func (r *Reader) Skip() {
-	r.fail(ErrCannotSkip)
 }
 
 // Width-typed writers.
@@ -947,15 +933,15 @@ func (w *Writer) U16(key uint8, value uint16) {
 	if value == 0 {
 		return
 	}
-	if value <= uintInlineMax {
-		w.Buffer = append(w.Buffer, key<<4|uint8(value))
+	if value <= inlineValues {
+		w.Buffer = append(w.Buffer, key<<4|uint8(value-1))
 		return
 	}
 	if value <= 0xFF {
-		w.Buffer = append(w.Buffer, key<<4|uintWidthBase, uint8(value))
+		w.Buffer = append(w.Buffer, key<<4|nibbleSized, uint8(value))
 		return
 	}
-	w.Buffer = append(w.Buffer, key<<4|uintWidthBase+1, uint8(value), uint8(value>>8))
+	w.Buffer = append(w.Buffer, key<<4|nibbleSized+1, uint8(value), uint8(value>>8))
 }
 
 // U32 writes a field whose type cannot exceed four bytes.
@@ -963,42 +949,49 @@ func (w *Writer) U16(key uint8, value uint16) {
 // It is shaped like Uint and for the same reason: one compare, one append and
 // one call is all the inliner's budget holds.
 func (w *Writer) U32(key uint8, value uint32) {
-	if value-1 < uintInlineMax {
+	if value--; value < inlineValues {
 		w.Buffer = append(w.Buffer, key<<4|uint8(value))
-		return
+	} else {
+		w.u32Wide(key, value)
 	}
-	w.u32Wide(key, value)
 }
 
+// u32Wide takes the value U32 decremented, as uintWide takes Uint's.
+//
 //go:noinline
-func (w *Writer) u32Wide(key uint8, value uint32) {
-	switch {
+func (w *Writer) u32Wide(key uint8, less uint32) {
+	switch value := less + 1; {
 	case value == 0:
 	case value <= 0xFF:
-		w.Buffer = append(w.Buffer, key<<4|uintWidthBase, uint8(value))
+		w.Buffer = append(w.Buffer, key<<4|nibbleSized, uint8(value))
 	case value <= 0xFFFF:
-		w.Buffer = append(w.Buffer, key<<4|uintWidthBase+1,
+		w.Buffer = append(w.Buffer, key<<4|nibbleSized+1,
 			uint8(value), uint8(value>>8))
 	case value <= 0xFF_FFFF:
-		w.Buffer = append(w.Buffer, key<<4|uintWidthBase+2,
+		w.Buffer = append(w.Buffer, key<<4|nibbleSized+2,
 			uint8(value), uint8(value>>8), uint8(value>>16))
 	default:
-		w.Buffer = append(w.Buffer, key<<4|uintWidthBase+3,
+		w.Buffer = append(w.Buffer, key<<4|nibbleSized+3,
 			uint8(value), uint8(value>>8), uint8(value>>16), uint8(value>>24))
 	}
 }
 
-// I32 writes a signed field no wider than four bytes. Negatives go the long way
-// round: they are rare on this wire and not worth the inline budget.
+// I32 writes a signed field no wider than four bytes, as Int does. It is Int
+// spelled again at 32 bits rather than Int behind a widening, which inlined and
+// still measured slower: the same one call, with the comparisons at the width
+// the field already has.
 func (w *Writer) I32(key uint8, value int32) {
-	if value > 0 && value <= 0xFF {
-		w.Buffer = append(w.Buffer, key<<4|intPositiveFlag|1, uint8(value))
+	if value > signedInline && value <= 0xFF {
+		w.Buffer = append(w.Buffer, key<<4|nibbleSized, uint8(value))
 		return
 	}
-	if value == 0 {
+	if uint32(value)-1 < signedInline {
+		w.Buffer = append(w.Buffer, key<<4|uint8(value-1))
 		return
 	}
-	w.intWide(key, int64(value))
+	if value != 0 {
+		w.intWide(key, int64(value))
+	}
 }
 
 // Width-typed readers, the mirror of the writers above.
@@ -1013,22 +1006,22 @@ func (w *Writer) I32(key uint8, value int32) {
 func (r *Reader) U16() uint16 {
 	field := r.buffer[r.at:]
 	if len(field) >= 3 {
-		switch code := field[0] & 0b1111; {
-		case code <= uintInlineMax:
+		switch nibble := field[0] & 0b1111; {
+		case nibble < inlineValues:
 			r.at++
-			return uint16(code)
-		case code == uintWidthBase:
+			return uint16(nibble) + 1
+		case nibble == nibbleSized:
 			r.at += 2
 			return uint16(field[1])
-		case code == uintWidthBase+1:
+		case nibble == nibbleSized+1:
 			r.at += 3
 			return uint16(field[1]) | uint16(field[2])<<8
 		}
 	} else if len(field) >= 1 {
-		if code := field[0] & 0b1111; code <= uintInlineMax {
+		if nibble := field[0] & 0b1111; nibble < inlineValues {
 			r.at++
-			return uint16(code)
-		} else if code == uintWidthBase && len(field) == 2 {
+			return uint16(nibble) + 1
+		} else if nibble == nibbleSized && len(field) == 2 {
 			r.at += 2
 			return uint16(field[1])
 		}
@@ -1048,10 +1041,10 @@ func (r *Reader) u16Wide() uint16 {
 // U32 reads a field written by U32, or by any writer that kept it under 2^32.
 func (r *Reader) U32() uint32 {
 	if field := r.buffer[r.at:]; len(field) >= 1 {
-		if code := field[0] & 0b1111; code <= uintInlineMax {
+		if nibble := field[0] & 0b1111; nibble < inlineValues {
 			r.at++
-			return uint32(code)
-		} else if code == uintWidthBase && len(field) >= 2 {
+			return uint32(nibble) + 1
+		} else if nibble == nibbleSized && len(field) >= 2 {
 			r.at += 2
 			return uint32(field[1])
 		}
@@ -1108,18 +1101,18 @@ func (r *Reader) I32() int32 {
 	return int32(value)
 }
 
-// Floats ride in the integer field shape, carrying the IEEE-754 bit pattern with
-// its bytes reversed.
+// Floats ride in the unsigned field shape, carrying the IEEE-754 bit pattern
+// with its bytes reversed.
 //
 // The reversal is what makes the trim work at all. An integer's zero bytes are
 // its most significant ones, so writing it little-endian and dropping the top
-// puts the zeros where the size code can elide them. A float's zero bytes are
-// its *least* significant — the low mantissa bits — while its exponent and sign
-// are never zero, so trimming a float the same way as an integer saves nothing.
-// Reversing the bytes swaps the two ends and the integer path then works
-// unchanged: 1.0 costs two bytes rather than eight, and a float64 holding a
+// puts the zeros where the nibble's byte count can elide them. A float's zero
+// bytes are its *least* significant — the low mantissa bits — while its exponent
+// and sign are never zero, so trimming a float the same way as an integer saves
+// nothing. Reversing the bytes swaps the two ends and the integer path then works
+// unchanged: 1.0 costs three bytes rather than nine, and a float64 holding a
 // value that is exactly a float32 has twenty-nine zero low bits — three whole
-// bytes and five over, and only whole bytes trim — so it costs five.
+// bytes and five over, and only whole bytes trim — so it costs six.
 //
 // Positive zero is not written at all, like every other zero value.
 
@@ -1181,15 +1174,21 @@ func appendElements[T Integer](buffer []byte, values []T, width int) []byte {
 }
 
 // isSigned reports whether T is a signed integer type, which the zero value
-// answers without reflection: -1 converted to T stays negative only if it can.
+// answers without reflection: its complement is −1 for a signed type and the
+// type's largest value for an unsigned one.
+//
+// It used to convert −1 to T and back through int64, which a uint64 — and a
+// uint, on a 64-bit platform — survives unchanged, so it answered true for the
+// two widest unsigned types. The wide VEC still writes what that rule wrote; see
+// vecSigned.
 func isSigned[T Integer]() bool {
-	var minusOne T
-	minusOne--
-	return int64(minusOne) < 0
+	var zero T
+	return ^zero < zero
 }
 
-// appendArray turns an array field's bytes into elements. Generic over the
-// element type and touching no pointer, so it is safe to reach from anywhere.
+// appendArray turns an array field's bytes into elements, by the sign flag a
+// wide VEC carries. Generic over the element type and touching no pointer, so it
+// is safe to reach from anywhere.
 func appendArray[T Integer](dst []T, elements []byte, width int, positive bool) []T {
 	if positive {
 		return appendMagnitudes(dst, elements, width)
@@ -1243,29 +1242,17 @@ func appendTwosComplement[T Integer](dst []T, elements []byte, width int) []T {
 	return dst
 }
 
-// Zero and EmptyString write a field that the omit-zero rule would otherwise
-// drop.
+// Zero writes a field that the omit-zero rule would otherwise drop.
 //
-// They exist for pointers. An absent key means a nil pointer, so a non-nil
+// It exists for pointers. An absent key means a nil pointer, so a non-nil
 // pointer *to* a zero value has to put something on the wire or the two would be
 // indistinguishable — which is the one place this format needs to say "zero" out
 // loud rather than by omission.
-
-// Zero writes an explicit zero in the unsigned form, which is what Uint, Bool,
-// F32 and F64 all read. It is a single byte: the unsigned nibble carries 0..7
-// outright.
+//
+// It is one writer for every type: the length form with nothing in it, which an
+// integer, a float and a bool read as zero, a string as empty and an array as
+// having no elements. The nibble sizes the field rather than typing it, so
+// nothing about a zero depends on what it is a zero of.
 func (w *Writer) Zero(key uint8) {
-	w.Buffer = append(w.Buffer, key<<4)
-}
-
-// ZeroSigned writes an explicit zero in the signed form, for a field Int will
-// read. The two nibbles are different tables, so a zero has to be written in the
-// one its reader will use.
-func (w *Writer) ZeroSigned(key uint8) {
-	w.Buffer = append(w.Buffer, key<<4|intPositiveFlag|1, 0)
-}
-
-// EmptyString writes a blob of no bytes.
-func (w *Writer) EmptyString(key uint8) {
-	w.Buffer = append(w.Buffer, key<<4, 0)
+	w.Buffer = append(w.Buffer, key<<4|nibbleLength, 0)
 }

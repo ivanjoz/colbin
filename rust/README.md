@@ -70,9 +70,9 @@ Four-bit keys are the default and the fast path. A type goes wide when it has to
 - any key derived from a name, which lands anywhere in 0..=255.
 
 That is the same rule `codec/wide.go` applies, so the two sides agree without
-being told. `#[cb(wide)]` on the struct asks for it anyway, which is what a wire
-that has to evolve wants: a wide reader **steps over a field it has never heard
-of**, and a narrow one cannot.
+being told. `#[cb(wide)]` on the struct asks for it anyway. Either width **steps
+over a field it has never heard of**: a narrow field's four descriptor bits say
+how long it is, whatever its type, so a type can gain or lose a field at any id.
 
 ```rust
 #[derive(Colbin)]
@@ -124,7 +124,7 @@ while r.more() {
     match r.key() {
         0 => company_id = r.u32(),
         1 => name = r.string(),
-        _ => r.skip(),   // refuses: a narrow key cannot be stepped over
+        _ => r.skip(),   // a field this reader does not know: step over it
     }
 }
 r.err()?;
@@ -135,7 +135,7 @@ Three framings of a key run are available, as separate types rather than a flag
 
 | | type | key | skip | fields |
 |---|---|---|---|---|
-| narrow | `Writer` / `Reader` | 4 bits, shares the descriptor byte | no | 16 |
+| narrow | `Writer` / `Reader` | 4 bits, shares the descriptor byte | **yes** | 16 |
 | wide | `Writer8` / `Reader8` | 8 bits, own byte | **yes** | 256 |
 | bitmap | `BitmapWriter` / `BitmapReader` | a presence bitmap, no key at all | yes | 64 |
 

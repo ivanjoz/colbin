@@ -141,9 +141,9 @@ test('a table claiming an impossible row count is refused, not allocated', () =>
 
   const rows = 0x7fffffff
   const body = Uint8Array.from([
-    0x00,
+    0x04, // key 0, one byte of value: ID 10
     0x0a,
-    0x18 | 0x00,
+    0x1d, // key 1, the length form with f0 set: a table
     0x05,
     0xff,
     rows & 0xff,

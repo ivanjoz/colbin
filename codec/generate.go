@@ -129,8 +129,7 @@ func generateOne(out *bytes.Buffer, structType reflect.Type) error {
 	for index, field := range plan.fields {
 		fmt.Fprintf(out, "\t\tcase %d:\n\t\t\t%s\n", field.key, reads[index])
 	}
-	// An unknown narrow key fails, because a narrow field cannot be sized; an
-	// unknown wide one is stepped over.
+	// An unknown key is stepped over at either width.
 	fmt.Fprintf(out, "\t\tdefault:\n\t\t\tr.Skip()\n\t\t}\n\t}\n")
 	fmt.Fprintf(out, "\treturn r.Err()\n}\n\n")
 	return nil
