@@ -174,12 +174,19 @@ impl<'a, 'd> Builder<'a, 'd> {
                 let values = self.gather_strings(node);
                 w.strings(field.key, &values);
             }
-            OP_INT64S | OP_UINT64S => {
+            OP_INT64S => {
                 let values = self.gather_ints(node);
-                // Always through the signed shape, for both ops: a `[]uint64`
-                // past 2^63 reads as negative through an i64 and must still
-                // travel as two's complement, which is lossless and is what Go
-                // does.
+                w.ints(field.key, &values);
+            }
+            OP_UINT64S => {
+                // A narrow array's form is its element type's, so a `[]uint64`
+                // travels as magnitudes — and the gathered `i64`s go back to the
+                // `u64`s they came from, past 2^63 included, before it does.
+                let values: Vec<u64> = self
+                    .gather_ints(node)
+                    .into_iter()
+                    .map(i64::cast_unsigned)
+                    .collect();
                 w.ints(field.key, &values);
             }
             op => self.narrow_scalar(w, field.key, op, node, false),
@@ -194,6 +201,8 @@ impl<'a, 'd> Builder<'a, 'd> {
         node: u32,
         explicit_zero: bool,
     ) {
+        // Every type spells its explicit zero the same way under narrow keys —
+        // the length form with nothing in it — so one `zero` serves them all.
         match op {
             OP_BOOL => {
                 let value = self.doc.uint_of(node) != 0;
@@ -214,15 +223,13 @@ impl<'a, 'd> Builder<'a, 'd> {
             OP_INT64 => {
                 let value = self.as_int(node);
                 if value == 0 && explicit_zero {
-                    w.zero_signed(key);
+                    w.zero(key);
                 } else {
                     w.i64(key, value);
                 }
             }
             OP_FLOAT64 | OP_FLOAT32 => {
                 let value = self.as_float(node);
-                // A float rides the unsigned shape, so its explicit zero is the
-                // unsigned one: reading it back goes through `u64` either way.
                 if value == 0.0 && explicit_zero {
                     w.zero(key);
                 } else {
@@ -232,7 +239,7 @@ impl<'a, 'd> Builder<'a, 'd> {
             OP_STRING => {
                 let bytes = self.text_of(node);
                 if bytes.is_empty() && explicit_zero {
-                    w.empty_string(key);
+                    w.zero(key);
                 } else if self.pack_strings {
                     w.packed_bytes(key, bytes);
                 } else {
@@ -284,8 +291,11 @@ impl<'a, 'd> Builder<'a, 'd> {
                 break;
             }
             if field.op == OP_STRING {
+                // Written even when every row is empty, where a wide table omits
+                // it: that is the narrow table's rule in Go's encoder, and two
+                // encoders must agree on the bytes, not only on what they mean.
                 let values = self.gather_string_column(plan, index, node, rows);
-                w.string_column(field.key, &values);
+                w.strings(field.key, &values);
                 continue;
             }
             let values = self.gather_column(plan, index, node, rows);

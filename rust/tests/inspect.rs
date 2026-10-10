@@ -299,3 +299,73 @@ fn every_truncation_is_a_diagnostic_or_a_tiling_tree() {
         }
     }
 }
+
+/// What this crate's encoder writes *now* tiles, raw and packed. The corpus
+/// supplies only the documents; the messages are encoded here, so this holds
+/// whatever the committed bytes say.
+#[cfg(feature = "encode")]
+#[test]
+fn what_the_encoder_writes_now_tiles() {
+    let corpus = {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../js/vectors/web_encoded.json"
+        );
+        let text = std::fs::read_to_string(path).expect("web_encoded.json");
+        serde_json::from_str::<serde_json::Value>(&text).expect("JSON")
+    };
+    for case in corpus["cases"].as_array().expect("cases") {
+        let name = case["name"].as_str().expect("name");
+        let input = case["input"].as_str().expect("input");
+        for flags in [0, colbin::build::PACK_STRINGS] {
+            let mut diag = colbin::diag::Diag::new();
+            let encoded = colbin::build::encode(
+                input.as_bytes(),
+                flags | colbin::build::SELF_DESCRIBING | colbin::build::VERIFY,
+                &mut diag,
+            )
+            .unwrap_or_else(|| panic!("{name}: {}", diag.message));
+            check_tiling(&report(None, &encoded.message), name);
+        }
+    }
+}
+
+/// A narrow key the schema does not list is no longer the end of the walk: it
+/// sizes itself, so it gets a node with its real span and the tiling holds.
+#[test]
+fn an_unknown_narrow_key_keeps_its_span() {
+    use colbin::plan::{OP_UINT32, Plan, PlanField};
+    use colbin::wire::Writer;
+
+    let mut root = Plan::default();
+    root.fields = vec![PlanField {
+        key: 0,
+        op: OP_UINT32,
+        ..PlanField::default()
+    }];
+    root.names = vec!["a".into()];
+    root.finish();
+    let schema = section::Schema {
+        plans: vec![root],
+        size: 0,
+    };
+
+    let mut message = vec![colbin::ROOT_STRUCT_NARROW];
+    {
+        let mut w = Writer::new(&mut message);
+        w.u32(0, 7);
+        w.strings(3, &["gone", "too"]);
+        let mark = w.open_struct(4);
+        Writer::new(w.buf).u64(0, 1);
+        w.close(mark);
+    }
+    let json = inspect::inspect(&message, Some(&schema)).expect("inspect");
+    let tree: serde_json::Value = serde_json::from_slice(&json).expect("JSON");
+    check_tiling(&tree, "unknown narrow keys");
+    let fields = tree["fields"].as_array().unwrap();
+    assert_eq!(fields.len(), 3);
+    assert_eq!(fields[1]["type"], "unknown");
+    assert_eq!(fields[1]["bytes"], 11, "header, length, two sized elements");
+    assert_eq!(fields[2]["type"], "unknown");
+    assert_eq!(fields[2]["bytes"], 3);
+}

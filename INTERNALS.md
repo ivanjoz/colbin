@@ -95,59 +95,78 @@ A narrow field is one byte of header and a payload:
 ```
 
 Keys are 0..15, so a narrow run holds at most sixteen fields (`wire.MaxFields`).
-The nibble has no room for a type, so its meaning depends on the field's type,
-which a narrow reader always knows from the schema or the Go type. That is also
-why a narrow reader **cannot skip a key it does not know**: nothing on the wire
-says which layout the nibble is in (`wire.ErrCannotSkip`).
 
-### 3.1 Values
+### 3.1 The nibble sizes the field
 
-| value | nibble | payload |
-|---|---|---|
-| unsigned integer, bool | code 0..7 is the value itself; 8..15 means `code − 7` bytes follow | the magnitude, 1..8 bytes |
-| signed integer | `[pos:1][n:3]`: `n = 0` means the magnitude is 1, 1..6 that many bytes, 7 eight bytes; `pos = 0` makes it negative | the magnitude |
-| float | the unsigned form over the byte-reversed IEEE bits (§5.1) | |
-| string, blob ≤ 2047 bytes | `[0][size high:3]`, and the next byte is the size's low eight bits | the bytes |
-| string, blob, escaped | `[1][esc:3]`: 0 a u16 size, 1 u32, 2 u64; 3 / 4 packed5 lower / upper case with a u8 size; 5 / 6 the same with a u32 size; 7 refused | the size, then the bytes |
-| integer array | `[pos:1][w:2][more:1]`: `w` is 1, 2, 4 or 8 bytes; `more = 0` means a one-byte count, 1 a u32 count | the count, then `count × w` bytes |
-| string array | the count, in the blob header's form | per element a length byte (`0xFF` escapes to a u32) and the bytes |
+Four bits have no room for a type, so the nibble does the one thing a reader needs
+before it knows the type: it says **how long the field is**.
 
-The writer omits a field holding its zero value, so an absent key means zero.
-Integers ride in the form their Go type implies: a `uint32` field always uses the
-unsigned form, an `int32` the signed one. A signed `+1` therefore costs two bytes
-and `−1` one, and an unsigned 0..7 costs only its header byte.
+| nibble | payload |
+|---|---|
+| `0..3` | none |
+| `4..11` | exactly `nibble − 3` bytes, 1..8 |
+| `12..15`, `1 1 f1 f0` | a length, then that many bytes |
 
-An integer array is unsigned unless an element is negative, in which case the
-whole array is two's complement at the width that holds twice its largest
-magnitude. A `[]uint64` holding a value ≥ 2⁶³ travels as eight-byte two's
-complement for the same reason.
+A length is one byte up to 253, `0xFE` and a u16, or `0xFF` and a u32. Writers use
+the shortest form; readers accept any. The flag bits `f1 f0` mean something
+different per type and never change the size.
+
+The type decides only what the bytes **mean**, so a narrow reader **steps over a
+key it does not know** exactly as a wide one does (`Reader.Skip`: one branch and,
+for the length form, one length read). A type can drop a field, or gain one, at
+any id and still read what was written before. The cost of that is one bit of the
+old nibble, measured in `RATIONALE.md`.
+
+### 3.2 Values
+
+| type | `0..3` | `4..11` | `1 1 f1 f0` |
+|---|---|---|---|
+| unsigned, bool, float | the value `nibble + 1`, 1..4 | the value, little-endian | `1100` with length 0: an explicit zero |
+| signed | 1, 2, 3; nibble 3 is −1 | a positive value | `1100`: the magnitude of a negative value, 1..8 bytes; length 0 is an explicit zero |
+| string, blob | refused | 1..8 raw bytes | `f1 f0`: `00` raw, `01` packed5 opening in lower case, `10` packed5 opening in upper case (§8), `11` refused |
+| integer array | refused | refused | `f1 f0` is the element width: 0 → 1 byte, 1 → 2, 2 → 4, 3 → 8. The length is a multiple of it and the count is `length >> f1f0` |
+| string array | refused | refused | `1100`: the elements, each `[size][bytes]`, size one byte up to 254 or `0xFF` and a u32. There is no count: it is the number of elements the length holds |
+
+Values use the fewest bytes that hold them, and a string of 1..8 bytes carries no
+length at all. The writer omits a field holding its zero value, so an absent key
+means zero; bool `true` is nibble 0. A float rides as its byte-reversed IEEE bits in
+the unsigned form (§5.1).
+
+A signed field's positive values are unsigned magnitudes, so they cost what an
+unsigned field's do; a negative value other than −1 rides the length form and
+costs one byte more than its magnitude would. A value wider than the field's type
+is refused (`ErrFieldTooWide`), never truncated.
+
+An integer array of an unsigned type holds magnitudes; one of a signed type holds
+two's complement at the narrowest width that holds every element, sign-extended on
+read. A reader working from a schema section takes the signedness from the op, so
+a `[]uint64` is magnitudes like every other unsigned array.
 
 **Explicit zeros.** A non-nil pointer to a zero value has to be told apart from
-nil (§6.6), so it is the one place a zero is written:
-
-| writer | bytes |
-|---|---|
-| `Zero` (unsigned, float, bool) | `[key \| 0]` |
-| `ZeroSigned` | `[key \| 1001] 00` |
-| `EmptyString` | `[key \| 0] 00` |
+nil (§6.6), so it is the one place a zero is written, and every type writes it the
+same way: `[key | 1100] 00`, the length form with nothing in it (`Zero`).
 
 A float is zero only when its bits are, so a pointer to `-0.0` writes the value
 normally.
 
-### 3.2 Composites
+### 3.3 Composites
 
-A narrow composite is a header byte, a byte length and a body:
+A narrow composite is the length form with a body:
 
 ```
-[key:4 | flag:1 · —:1 · lw:2] [length: 1, 2, 4 or 8 bytes] [body]
+[key:4 | 1 1 0 f0] [length] [body]
 ```
 
-| composite | flag bit | body |
+| composite | `f0` | body |
 |---|---|---|
 | struct | k8: the nested run's own key width | a key run of exactly `length` bytes |
-| list | — (no writer sets it) | `[count]` then `count × ( [elementLength] [key run] )` |
-| map | 0 | `[count]` then `count × ( key element, value element )` |
+| list | 0 | `[count]` then `count × ( [elementLength] [key run] )` |
 | table | 1 | `[rows]` then the column run (§6.3) |
+| map | 0 | `[count]` then `count × ( key element, value element )` |
+
+A list and a table are both a `[]Struct`, which is why one bit tells them apart; a
+struct and a map are other Go types, so their flags overlap nothing. `f1 = 1` is
+refused.
 
 A count is one byte up to 254, or `0xFF` and a u32. A list element carries a
 length and **no descriptor**: its shape is the schema's to know, which is a byte
@@ -155,13 +174,13 @@ saved per element and the reason a narrow list of small structs is smaller than 
 wide one. Its length is one byte up to 254, or `0xFF` and a u32.
 
 **Backpatching.** A composite's length is not known until its body is written, so
-the writer reserves one byte, writes the body and patches it (`Close`). A body
-shorter than 255 bytes fits the reserved byte. A longer one makes room for a u32 —
-three more bytes, the body moved up — and ORs `lw = 2` into the header. Writers
-produce `lw` 0 or 2 only; readers accept all four. A list element has no header to
-widen, so `CloseElement` writes the `0xFF` escape instead. Sizing a value before
-writing it would cost a pass over every nested value; a backpatch costs a
-`memmove` only for bodies past 254 bytes.
+the writer reserves one byte, writes the body and patches it (`Close`). A body of
+up to 253 bytes fits the reserved byte; a longer one moves up by two (`0xFE` and a
+u16) or four (`0xFF` and a u32). A list element has no header and keeps its own
+escape (`CloseElement`). Sizing a value before writing it would cost a pass over
+every nested value; a backpatch costs a `memmove` only for bodies past 253 bytes.
+
+A narrow field holds at most 2³² − 1 bytes. A larger blob is a wide field's job.
 
 ---
 
@@ -185,7 +204,7 @@ the wide width exists, and why a type that has to evolve past its readers uses i
 
 | class | bytes | detail | payload |
 |---|---|---|---|
-| 0 INT | 0x80–0x8F | `[pos:1][n:3]`, `n` as in §3.1 | the magnitude |
+| 0 INT | 0x80–0x8F | `[pos:1][n:3]`: `n = 0` means the magnitude is 1, 1..6 that many bytes, 7 eight bytes; `pos = 0` makes it negative | the magnitude |
 | 1 BLOB | 0x90–0x9F | `[enc:2][lw:2]`; enc 0 raw, 1 packed5 lower, 2 dictionary (reserved, refused), 3 packed5 upper | the size (`lw`), then the bytes |
 | 2 VEC | 0xA0–0xAF | `[w:2][pos:1][lw:1]`; `lw` 0 a one-byte, 1 a four-byte byte length | the elements; the count is `length >> w` and never stored |
 | 3 COL | 0xB0–0xBF | `[—:2][lw:2]` | the length, then a column (§7) |
@@ -219,10 +238,12 @@ LIST: `[key][0xC8 | lw][length][count]` then `[elementLength][bytes]` per elemen
 ### 4.2 Composites, and why a key run can change width
 
 Structs, lists and maps open with a key, a descriptor and a one-byte length
-placeholder, and close with the backpatch of §3.2.
+placeholder, and close with a backpatch: a body shorter than 255 bytes fits the
+placeholder, and a longer one makes room for a u32 and ORs `lw = 2` into the
+descriptor.
 
 **Key width is a property of a key run, not of a message.** A STRUCT descriptor's
-`k8` bit says the width of the run inside it, at both widths (§3.2), so a wide
+`k8` bit says the width of the run inside it, at both widths (§3.3), so a wide
 record can hold a narrow struct and the other way round. The root byte is the
 same descriptor, which is how the root states its own width.
 
@@ -266,10 +287,12 @@ List elements and map entries have no key.
   `ElementUint` is inline or INT (never varint), `ElementInt` is a negative INT or
   `ElementUint`, `ElementString` a raw BLOB (never packed). A struct element is a
   STRUCT descriptor with its own `k8` bit and a length.
-- **Narrow:** one byte of code for an unsigned value (the nibble of §3.1, high
-  nibble zero), `[pos][n:3]` and a magnitude for a signed one, `[lw]`, a size and
-  the bytes for a string, and `[length][key run]` for a struct, whose width the
-  schema says.
+- **Narrow:** a code byte and a payload, in a code table of their own rather than
+  the field nibble of §3.1 — an element sits inside a composite whose length already
+  steps over it, so it does not need to size itself. An unsigned value's code is
+  0..7 for the value itself or 8..15 for `code − 7` bytes of magnitude; a signed
+  one's is `[pos][n:3]` as the wide INT detail (§4.1); a string's is `lw` and a size,
+  then the bytes; a struct is `[length][key run]`, at the width the schema says.
 
 ---
 
@@ -300,15 +323,15 @@ list's carry a length only.
 
 ```
 wide:    [key] [0xE8 | lw] [length] [rows] column*
-narrow:  [key | 1 0 lw]    [length] [rows] column*
+narrow:  [key | 1101]      [length] [rows] column*
 ```
 
 A table is one keyed column per field instead of one key per field per row.
 
 | column | wide | narrow |
 |---|---|---|
-| integer, bool, float | COL: `[key][0xB0 \| lw][length]` and the column codec (§7) | `[key \| 00 lw][length]` and the column codec |
-| string | a homogeneous LIST of strings | a narrow string array |
+| integer, bool, float | COL: `[key][0xB0 \| lw][length]` and the column codec (§7) | `[key \| 1100][length]` and the column codec |
+| string | a homogeneous LIST of strings | a narrow string array (§3.2), one element per row |
 
 **Column keys use the wider of the parent's width and the row type's**: under a
 wide parent always eight bits; under a narrow parent eight bits if the row type is
@@ -328,7 +351,7 @@ cannot do that — a row needs every column's value — so it holds all of them 
 
 ```
 wide:    [key] [0xE0 | lw] [length] [count] ( key element, value element )*
-narrow:  [key | 0 0 lw]    [length] [count] ( key element, value element )*
+narrow:  [key | 1100]      [length] [count] ( key element, value element )*
 ```
 
 Entries are pairs of key-less elements (§5.2), **sorted by key**, so the same map
@@ -395,7 +418,7 @@ non-nil one.
 
 | field | non-nil |
 |---|---|
-| `*scalar`, `*string` | the pointee, written **explicitly when it is zero** (§3.1), so a pointer to zero does not read back nil |
+| `*scalar`, `*string` | the pointee, written **explicitly when it is zero** (§3.2, §4.1), so a pointer to zero does not read back nil |
 | `*Struct` | the struct body. A body is written whether or not it is empty, so absent is nil and an empty body is a pointer to a zero struct — no explicit zero needed |
 | `*[]T`, `*map[K]V` | the slice or map, exactly the bytes of the plain field |
 
@@ -645,7 +668,7 @@ the function grows past the inlining budget. The same reason keeps a separate
 reader or writer variable per branch — escape analysis is per variable.
 
 A decode **zeroes the record first**, so an omitted key leaves the field zero.
-An unknown narrow key is an error; an unknown wide key is skipped. Fields are
+An unknown key is skipped at both widths (§3.1, §4.3). Fields are
 written in declaration order.
 
 ### 11.5 The flat path
@@ -1001,11 +1024,8 @@ What the code does not do yet, or does inconsistently:
   where a scalar field would be refused.
 - **A narrow table writes a string column of only empty strings**, where a wide
   one omits it.
-- **The JSON walk's narrow unknown-key error prints the key, not the id.**
 - **The derive does not do `Option<Struct>`, maps of structs or pages**, and the
   JSON encoder writes no maps, blobs or pointers to structs (`rust/ENCODER.md`).
 - **The module's decode diagnostics use code 2**, which the encoder's diagnostics
   use for a number error.
 - **`bun.lock` still records the `js` workspace at 0.1.0.**
-- **`wire/README.md` describes an earlier narrow-only design**; this file is the
-  current description.

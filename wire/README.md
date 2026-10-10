@@ -24,7 +24,7 @@ for r.More() {
     case 2:
         name = r.String()
     default:
-        r.Skip() // refuses: a narrow key cannot be stepped over
+        r.Skip() // a field this reader does not know: step over it
     }
 }
 err := r.Err()
@@ -39,7 +39,7 @@ already knows the Go type. `codec` is the reflection façade over it, and
 
 | | file | key | skip | fields |
 |---|---|---|---|---|
-| `Writer` / `Reader` | `narrow.go` | 4 bits, shares the descriptor byte | no | 16 |
+| `Writer` / `Reader` | `narrow.go` | 4 bits, shares the descriptor byte | **yes** | 16 |
 | `Writer8` / `Reader8` | `wide.go` | 8 bits, own byte | **yes** | 256 |
 | `BitmapWriter` / `BitmapReader` | `bitmap.go` | a presence bitmap, no key at all | yes | 64 |
 
@@ -81,52 +81,62 @@ is little-endian, which is one native load on every machine this runs on. A fiel
 whose value is zero, empty or false is omitted, which is where most of the saving
 comes from.
 
+The nibble beside the key says how long the field is, whatever its type; the type
+says only what the bytes mean. That is what lets `Skip` step over a key it does
+not know.
+
 ```text
-integer        [key:4][positive:1][n:3]                       [magnitude: n bytes]
+size           [key:4][nibble:4]
+                   nibble 0..3    no payload
+                   nibble 4..11   nibble−3 bytes
+                   nibble 12..15  [1 1 f1 f0] [length] [bytes: length]
+                   length         one byte ≤ 253 · 0xFE then a u16 · 0xFF then a u32
 
-    n          0 → no bytes, the value is 1 (which is what makes a true bool
-               one byte) · 1..6 → that many bytes · 7 → eight bytes
-    positive   1 = the bytes are a magnitude; 0 = negative, bytes are |value|
-    an integer needs no continuation flag: n already reaches 8 bytes
+unsigned       0..3 the value 1..4 · 4..11 the value · 1100 with length 0 a zero
 
-float          the integer shape, carrying the IEEE-754 bit pattern with its
+signed         0..2 the value 1..3, 3 is −1 · 4..11 a positive value
+               · 1100 the magnitude of a negative one (length 0: a zero)
+
+float          the unsigned shape, carrying the IEEE-754 bit pattern with its
                bytes reversed
 
     A float's zero bytes are its low mantissa bytes, where an integer's are its
-    high ones, so reversing puts them where n can elide them. 1.0 costs two bytes
-    rather than eight, and a float64 holding an exact float32 costs five.
+    high ones, so reversing puts them where the byte count can elide them. 1.0
+    costs two bytes rather than eight, and a float64 holding an exact float32
+    costs five.
 
-string/bytes   [key:4][more:1][size hi:3] [size lo:8]         [bytes: size]
-               [key:4][1][escape:3]       [size: 2|4|8]       [bytes: size]
+string/bytes   4..11 one to eight raw bytes, and no length at all
+               · 11 f1 f0: 00 raw, 01 / 10 packed5 opening lower / upper case
 
-    2047 bytes fit the two header bytes. Past that the three size bits carry
-    nothing, so they name the width of the size that follows instead: a 5 KB
-    string pays one extra byte, not four.
+integer array  11 f1 f0, f1f0 the element width: 0→1B 1→2B 2→4B 3→8B
+               count = length >> f1f0 · an unsigned type's elements are
+               magnitudes, a signed type's two's complement
 
-integer array  [key:4][positive:1][width:2][more:1] [count:8] [count × width]
-               ... [count: 4 bytes] instead, when more = 1
-
-    width code 0→1B  1→2B  2→4B  3→8B, taken from the widest element
-    positive   1 = magnitudes; 0 = two's complement at that width
-
-string array   [key:4][more:1][count:11]   then per element
+string array   1100, then per element
                [size: 1 byte, 0xFF → 4 bytes follow] [bytes: size]
 
-    under 255 bytes — which is most short strings — an element length costs one
-    byte rather than two
+    no count: the reader counts the sizes it walks anyway
+
+composite      11 0 f0 [length] [body] · f0: a struct's k8, or 1 for a table
 ```
+
+A signed field's positive values cost what an unsigned field's do; a negative
+other than −1 costs a byte more, which is the price of the length form being
+where it is. `INTERNALS.md` §3 is the specification and `RATIONALE.md` has the
+measurements that chose this layout over four others.
 
 ### Nothing has a size ceiling, and nothing is a varint
 
-Every size escalates to a width that holds it, named by the header rather than
-discovered byte by byte. The common size costs nothing extra, no size is refused,
-and **no read is ever a loop whose trip count is data** — which is also why there
-is no continuation run for an unauthenticated peer to make unbounded. What is
-left to refuse is a size larger than this platform can address.
+Every size escalates to a width that holds it, named by the header or by the
+length's first byte rather than discovered byte by byte. The common size costs
+nothing extra and **no read is ever a loop whose trip count is data** — which is
+also why there is no continuation run for an unauthenticated peer to make
+unbounded. What is left to refuse is a size larger than this platform can
+address.
 
-That is also why **a write cannot fail**: `Writer` has no error and no `Err`
-method. Anything the format could not express would have to be a value that does
-not fit in memory.
+That is also why **a write does not fail**: `Writer` has no error and no `Err`
+method. The one thing a narrow field cannot express is a payload of 4 GiB or
+more, which is a wide field's job.
 
 ### A write trusts, a read does not
 
@@ -151,16 +161,13 @@ The reader defends against the network; the writer trusts its own program.
 
 ## What it cannot do
 
-- **Skip an unknown key.** A header sizes a field but does not say which of the
-  four layouts it is, so a reader that does not know the key cannot step over it.
-  Adding a field is a coordinated deploy of both sides — the same trade compact
-  mode makes. The self-describing variant is the 8-bit key width, which carries a
-  class in its descriptor; see `INTERNALS.md` §4.
-- **Carry more than sixteen fields**, or a nested struct, map, pointer or
-  interface. A field's whole layout has to follow from its key.
-- **Be recognised by `Unmarshal`.** A narrow message has no version byte and no
-  mode bit — its first byte is a field header — so `colbin.UnmarshalMinimal` is
-  the only way back. `Unmarshal` refuses it.
+- **Say what an unknown field was.** A narrow reader can step over a key it does
+  not know, but not read it: the bytes mean what the schema's type says. Turning
+  a message into JSON without the Go type takes the schema section
+  (`INTERNALS.md` §10); the wide width carries a class in each descriptor
+  (`INTERNALS.md` §4).
+- **Carry more than sixteen fields**, or a dynamic value. Past sixteen a type
+  takes eight-bit keys, and `any` is wide-only.
 - **Beat a fixed layout on a record with no zero fields.** It writes a key per
   field; a fixed layout writes none. What it wins back is the zeros, and the
   offsets it does not have.

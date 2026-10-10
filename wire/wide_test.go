@@ -268,34 +268,63 @@ func TestWideMismatchedClassIsRefused(t *testing.T) {
 	}
 }
 
-// The two key widths cost the same on small integers and differ by a byte above
-// them, which is the trade the wide key makes.
+// The two key widths cost the same on small integers and differ by a byte
+// either side of them, which is the trade the wide key makes.
 func TestWideAgainstNarrowSize(t *testing.T) {
 	narrow := Writer{}
-	narrow.U32(0, 7)
+	narrow.U32(0, 3)
 	narrow.U32(1, 42)
-	narrow.U16(2, 103)
-	narrow.U16(3, 5)
+	narrow.U16(2, 200)
+	narrow.U16(3, 4)
 	narrow.U16(6, 0x0139)
 
 	wide := Writer8{}
-	wide.U32(0, 7)
+	wide.U32(0, 3)
 	wide.U32(1, 42)
-	wide.U16(2, 103)
-	wide.U16(3, 5)
+	wide.U16(2, 200)
+	wide.U16(3, 4)
 	wide.U16(6, 0x0139)
 
-	// Narrow spends no sign bit on an unsigned field, so 7 and 5 ride in the
-	// nibble with no payload at all and cost one byte each; 42 and 103 cost two;
-	// 0x0139 costs three. Wide pays a key byte and a descriptor byte before any
-	// of them.
+	// Narrow carries 1..4 in the nibble with no payload at all, so 3 and 4 cost
+	// one byte each; 42 and 200 cost two, a byte of magnitude behind the
+	// header; 0x0139 costs three. Wide pays a key byte and a descriptor byte
+	// before any of them, and the descriptor holds the value itself up to 127.
 	if len(narrow.Buffer) != 9 {
 		t.Fatalf("narrow wrote %d bytes, want 9", len(narrow.Buffer))
 	}
-	// 0x0139 takes the varint form, three bytes rather than four: nine value
-	// bits do not fit the descriptor's three, but they fit one continuation byte
-	// where the byte-count form would have spent two.
-	if len(wide.Buffer) != 11 {
-		t.Fatalf("wide wrote %d bytes, want 11", len(wide.Buffer))
+	// 200 is past the inline descriptor and costs three. 0x0139 takes the varint
+	// form, three bytes rather than four: nine value bits do not fit the
+	// descriptor's three, but they fit one continuation byte where the
+	// byte-count form would have spent two.
+	if len(wide.Buffer) != 12 {
+		t.Fatalf("wide wrote %d bytes, want 12", len(wide.Buffer))
+	}
+}
+
+// A wide VEC keeps the sign rule it has always been written under, in which a
+// 64-bit unsigned element type counts as signed: a []uint64 past 2^63 goes out
+// as eight-byte two's complement with the sign flag clear. The narrow array
+// takes signedness from the element type alone; this pins that the wide bytes
+// did not move with it.
+func TestWideVecSignRuleIsUnchanged(t *testing.T) {
+	for _, expect := range []struct {
+		write func(*Writer8)
+		bytes []byte
+	}{
+		{func(w *Writer8) { w.Uint64s(1, []uint64{1 << 63}) },
+			[]byte{1, 0xAC, 8, 0, 0, 0, 0, 0, 0, 0, 0x80}},
+		{func(w *Writer8) { w.Uint64s(1, []uint64{200}) }, []byte{1, 0xA2, 1, 200}},
+		{func(w *Writer8) { w.Uint32s(1, []uint32{1 << 31}) }, []byte{1, 0xAA, 4, 0, 0, 0, 0x80}},
+		{func(w *Writer8) { w.Ints(1, []int64{-1, 5}) }, []byte{1, 0xA0, 2, 0xFF, 5}},
+	} {
+		writer := Writer8{}
+		expect.write(&writer)
+		if !bytes.Equal(writer.Buffer, expect.bytes) {
+			t.Fatalf("wrote % x, want % x", writer.Buffer, expect.bytes)
+		}
+	}
+	reader := NewReader8([]byte{1, 0xAC, 8, 0, 0, 0, 0, 0, 0, 0, 0x80})
+	if got := reader.Uint64s(nil); len(got) != 1 || got[0] != 1<<63 {
+		t.Fatalf("read back %v", got)
 	}
 }

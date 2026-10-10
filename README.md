@@ -79,7 +79,7 @@ that opens it:
 
 | | layout | fields | can skip an unknown field |
 |---|---|---|---|
-| **K4** (narrow) | `[key:4][desc:4]`, one byte | ids 1–16 | no: the reader takes the type from its schema |
+| **K4** (narrow) | `[key:4][desc:4]`, one byte | ids 1–16 | yes: the descriptor says how long the field is; the type comes from the schema |
 | **K8** (wide) | `[key:8][desc:8]`, two bytes | ids 1–255 | yes: the descriptor names a class with a known size rule |
 
 A nested struct opens its own run, so a narrow struct can hold a wide one and
@@ -121,12 +121,11 @@ relative order:
 - Reordering is only unsafe when two names hash to the same byte, because
   declaration order decides which one moves.
 
-What an untagged type costs and gains, measured on a six-field record:
-- **Cost:** derived keys span 0–255, so the type always uses K8. That is one
-  extra byte per present field: 33 B instead of 27, and 44 ns instead of 38 to
-  encode. Decode time is the same.
-- **Gain:** K8 makes every field skippable, so producer and consumer can add
-  fields independently.
+What an untagged type costs, measured on a six-field record: derived keys span
+0–255, so the type always uses K8. That is one extra byte per present field:
+33 B instead of 27, and 44 ns instead of 38 to encode. Decode time is the same.
+Both widths skip a field the reader does not know, so producer and consumer can
+add or drop fields independently either way.
 
 Tags are therefore an optimization for size and for the narrow fast path, not a
 requirement. In a table, keys are written per column rather than per row, so
@@ -138,21 +137,23 @@ the key width hardly matters there.
   slice or map is not written at all.
 - **Integers are sign-and-magnitude**, with the byte count in the descriptor:
   - A value takes 1 to 8 bytes, as many as it needs.
-  - In K4, an unsigned field spends no descriptor bit on the sign, so codes
-    0–7 are the value itself: a `bool`, a flag or a small count is one byte,
-    key included.
+  - In K4 the descriptor is a byte count first: 0–3 carry no payload, 4–11
+    carry 1–8 bytes, 12–15 a length. The values 1–4 (1–3 and −1 for a signed
+    field) are the descriptor itself, so a `bool`, a status code or a small
+    count is one byte, key included. A negative value other than −1 takes the
+    length form, one byte more.
   - K8 adds a varint form, which the encoder writes only when it is shorter:
     3.34 B against 3.60 per field on ids 0–1000.
 - **Floats are written byte-reversed.** The zero bytes of an IEEE-754 value are
   the low mantissa bytes, and reversing them lets the byte count drop them:
   `1.0` is 2 bytes, and a `float64` holding an exact `float32` is 5.
-- **Strings and blobs** carry their size in the header when it fits (2 047 bytes
-  in K4). Past that, the header names the width (2, 4 or 8 bytes) of a size
-  that follows. A decoded string is a sub-slice of the message, not a copy.
+- **Strings and blobs** of up to 8 bytes carry no size in K4: the descriptor's
+  byte count is the size. Longer ones carry a length of 1, 3 or 5 bytes. A
+  decoded string is a sub-slice of the message, not a copy.
 - **No size is a varint.** Every read of a size is a single load of a width the
   header already gave, so decoding never runs a loop whose trip count is data.
 
-([INTERNALS §3.1, §5](INTERNALS.md#31-values))
+([INTERNALS §3.1–3.2, §5](INTERNALS.md#31-the-nibble-sizes-the-field))
 
 ### Composites carry a byte length
 
@@ -160,9 +161,9 @@ Nested structs, lists, tables and maps are written with a backpatched byte
 length:
 - In K8, that length is what lets a reader skip a composite without knowing its
   type.
-- In K4, the descriptor names the width of the length (`[key:4][lw:2][k8:1][—:1]`)
-  and the class comes from the schema. Composites therefore do not force the
-  wide width.
+- In K4, a composite is the length form of the descriptor (`[key:4][1 1 0 f]`,
+  the flag a struct's key width or a table), and the class comes from the
+  schema. Composites therefore do not force the wide width.
 
 Pointers distinguish "absent" from "zero":
 - A nil pointer is omitted.
@@ -446,9 +447,9 @@ so that colbin's `go.mod` stays free of protobuf.
 
 ## Limitations
 
-- **K4 messages cannot skip unknown fields.** Adding a field to a type whose
-  ids are all in 1–16 requires deploying the producer and the consumer
-  together. Untagged types, ids above 16, or an `any` field put the type on K8.
+- **A field's type is not on the K4 wire.** A reader steps over a field it does
+  not know, but a field whose type changed under the same id is read as the new
+  type. Give a changed field a new id.
 - **Untagged ids depend on field names and declaration order**, as described
   under [Field ids](#field-ids-tags-are-optional).
 - **Not supported yet:** fixed-size arrays, `map[K]*Struct` and `map[any]T`.

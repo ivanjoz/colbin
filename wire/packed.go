@@ -23,11 +23,10 @@ package wire
 //	enc 2   dictionary reference (reserved, refused)
 //	enc 3   packed5, stream opens in uppercase
 //
-// and under four-bit keys it is the blob header's escape code (escapePacked1Lo).
+// and under four-bit keys it is the flags of the field's length form: `00` raw,
+// `01` packed5 opening in lowercase, `10` opening in uppercase, `11` refused.
 
 import (
-	"encoding/binary"
-
 	"github.com/ivanjoz/colbin/packed5"
 )
 
@@ -125,123 +124,57 @@ func (r *Reader8) String() string {
 // PackedString writes a string in the packed5 encoding when that makes the field
 // smaller, and raw when it does not. Nothing is written for an empty string.
 //
-// The narrow header has no enc field, so the encoding rides in the blob header's
-// escape code — see escapePacked1Lo. That keeps a packed string's header at two
-// bytes up to a 255-byte payload, the same as a raw one's; past that a packed
-// header is five bytes against a raw one's two or three, which the comparison
-// below accounts for.
+// The narrow header has no enc field, so the encoding rides in the length form's
+// flags: `01` for a stream opening in lower case, `10` for upper. A packed string
+// always carries a length, where a raw one of up to eight bytes carries none, so
+// the comparison below is of whole fields rather than of payloads.
 func (w *Writer) PackedString(key uint8, value string) {
 	if len(value) == 0 {
 		return
 	}
-	// The payload's length is not known until it is written, so two header bytes
-	// are reserved and filled in after. A payload past 255 bytes needs three more,
-	// which shifts it up; that is a memmove on a value already large enough to
-	// have earned one.
+	// The payload's length is not known until it is written, so one length byte
+	// is reserved and patched after, exactly as a composite's is. A payload past
+	// 253 bytes shifts up to make room, which is a memmove on a value already
+	// large enough to have earned one.
 	start := len(w.Buffer)
-	w.Buffer = append(w.Buffer, key<<4|moreSizeFlag, 0)
+	w.Buffer = append(w.Buffer, key<<4|nibbleLength|flagPackedLower, 0)
 	buf, size, upper, ok := packed5.AppendPayload(w.Buffer, value)
-	if !ok || packedHeaderSize(size)+size >= blobHeaderSize(len(value))+len(value) {
+	if !ok || 1+lengthBytes(size)+size >= rawStringSize(len(value)) {
 		w.Buffer = buf[:start]
 		w.String(key, value)
 		return
 	}
 	w.Buffer = buf
-
-	if size <= 0xFF {
-		code := uint8(escapePacked1Lo)
-		if upper {
-			code = escapePacked1Up
-		}
-		w.Buffer[start] = key<<4 | moreSizeFlag | code
-		w.Buffer[start+1] = uint8(size)
-		return
-	}
-	code := uint8(escapePacked4Lo)
 	if upper {
-		code = escapePacked4Up
+		w.Buffer[start] = key<<4 | nibbleLength | flagPackedUpper
 	}
-	w.Buffer = append(w.Buffer, 0, 0, 0)
-	copy(w.Buffer[start+5:], w.Buffer[start+2:start+2+size])
-	w.Buffer[start] = key<<4 | moreSizeFlag | code
-	binary.LittleEndian.PutUint32(w.Buffer[start+1:], uint32(size))
+	w.Close(Mark{at: start + 1})
 }
 
-// blobHeaderSize is what blobHeader spends on a raw blob of size bytes.
-func blobHeaderSize(size int) int {
-	switch {
-	case size <= inlineBlobSize:
-		return 2
-	case size <= 0xFFFF:
-		return 3
-	case uint64(size) <= 0xFFFF_FFFF:
-		return 5
-	default:
-		return 9
+// rawStringSize is the whole field String writes for a string of size bytes.
+func rawStringSize(size int) int {
+	if size <= maxSized {
+		return 1 + size
 	}
+	return 1 + lengthBytes(size) + size
 }
 
-// packedHeaderSize is what PackedString spends on a packed payload of size bytes.
-func packedHeaderSize(size int) int {
-	if size <= 0xFF {
-		return 2
-	}
-	return 5
-}
-
-// stringWide is String for every header its inline raw path does not take: the
-// packed escapes, the wide raw sizes, and every way a header can be malformed.
+// stringWide is String for every field its inline raw paths do not take: the
+// packed forms, the wider lengths, and every way a field can be malformed.
 func (r *Reader) stringWide() string {
-	header, ok := r.header()
-	if !ok {
+	nibble, start, size, ok := r.field()
+	switch {
+	case !ok:
 		return ""
-	}
-	var size, start int
-	packed, upper := false, false
-	if header&moreSizeFlag == 0 {
-		if r.at+2 > len(r.buffer) {
-			r.fail(ErrTruncated)
-			return ""
-		}
-		size, start = int(header&0b111)<<8|int(r.buffer[r.at+1]), r.at+2
-	} else {
-		code := header & 0b111
-		switch code {
-		case escapePacked1Lo, escapePacked1Up:
-			if r.at+2 > len(r.buffer) {
-				r.fail(ErrTruncated)
-				return ""
-			}
-			size, start, packed = int(r.buffer[r.at+1]), r.at+2, true
-			upper = code == escapePacked1Up
-		case escapePacked4Lo, escapePacked4Up:
-			if r.at+5 > len(r.buffer) {
-				r.fail(ErrTruncated)
-				return ""
-			}
-			size, start, packed = int(binary.LittleEndian.Uint32(r.buffer[r.at+1:])), r.at+5, true
-			upper = code == escapePacked4Up
-			if size <= 0xFF { // one size has one encoding
-				r.fail(ErrBadEscape)
-				return ""
-			}
-		default:
-			if size, start, ok = r.escapedSize(code); !ok {
-				return ""
-			}
-		}
-	}
-	if size > len(r.buffer)-start {
-		r.fail(ErrTruncated)
+	case nibble < nibbleSized || nibble == nibbleLength|flagBits:
+		r.fail(ErrBadEscape)
 		return ""
-	}
-	r.at = start + size
-	if !packed {
+	case nibble <= nibbleLength|flagRaw:
 		return string(r.buffer[start : start+size])
 	}
 	// packed5 takes a whole word per group, so it is handed the rest of the
 	// message and reads the slack that follows the payload for free.
-	out, err := packed5.AppendString(nil, r.buffer[start:], size, upper)
+	out, err := packed5.AppendString(nil, r.buffer[start:], size, nibble&flagBits == flagPackedUpper)
 	if err != nil {
 		r.fail(err)
 		return ""

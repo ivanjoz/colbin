@@ -195,7 +195,7 @@ func TestListOfScalarsAndMapRoundTrip(t *testing.T) {
 }
 
 // The capability the byte length buys: a composite is skippable without its
-// sub-schema, which a narrow run, with no class in its descriptor, cannot do.
+// sub-schema. TestSkipStepsOverEveryShape is the same at four key bits.
 func TestCompositesAreSkippable(t *testing.T) {
 	writer := Writer8{}
 	writer.U32(0, 7)

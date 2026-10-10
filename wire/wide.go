@@ -7,21 +7,24 @@ package wire
 // # What the extra byte buys
 //
 //   - **256 fields**, against sixteen.
-//   - **Skip.** Every class either carries a byte length or has one derivable
-//     from the descriptor alone, so a reader that has never heard of a key can
-//     step over it — which is schema evolution, and the foundation for an
-//     interface field. Reader.Skip refuses under K4 and works here.
+//   - **A class.** Every descriptor names what the field is as well as how long
+//     it is, so a reader that has never heard of a key can still say what it
+//     was — which is what a dynamic value needs, and the foundation for an
+//     interface field. Both widths step over an unknown key; only this one can
+//     describe it.
 //   - **An inline value.** A descriptor whose top bit is clear *is* the value,
-//     0..127, so a small integer costs two bytes — the same as under K4, where
-//     it costs a header byte and a value byte. That is why the wide key is not
-//     simply a byte worse per field: it is a byte worse only above 127.
+//     0..127, so a small integer costs two bytes — the same as under K4 from
+//     five upward, where it costs a header byte and a value byte. That is why
+//     the wide key is not simply a byte worse per field: it is a byte worse only
+//     above 127, and below five.
 //
 // # Descriptor
 //
 //	0 vvvvvvv                   the value, 0..127, no payload
 //	1 ccc dddd                  class ccc, detail dddd
 //
-//	class 0 INT      [pos:1][n:3]          n magnitude bytes, as K4
+//	class 0 INT      [pos:1][n:3]          n magnitude bytes, as a narrow
+//	                                       signed element
 //	class 1 BLOB     [enc:2][lw:2]         [size: lw] then size bytes (packed.go)
 //	class 2 VEC      [w:2][pos:1][lw:1]    [bytelen: 1|4] then the elements
 //	class 3 COL      [—:2][lw:2]           [bytelen: lw] a table column (table.go)
@@ -220,7 +223,8 @@ type Writer8 struct {
 // Uint writes an unsigned integer, and nothing at all when it is zero.
 //
 // Values to 127 are the descriptor itself, which is the whole reason a wide key
-// is affordable: the common small field is two bytes here and two under K4.
+// is affordable: the common small field is two bytes here and at most two under
+// K4.
 func (w *Writer8) Uint(key uint8, value uint64) {
 	if value == 0 {
 		return
@@ -431,6 +435,71 @@ func appendVec[T Integer](buffer []byte, key uint8, values []T) []byte {
 	buffer = appendMagnitude(
 		append(buffer, key, descriptor(classVec, detail)), uint64(byteLength), lengthBytes)
 	return appendElements(buffer, values, width)
+}
+
+// arrayPlanOf is the one pass that decides both a VEC's sign flag and its width:
+// a negative anywhere turns the whole array into two's complement, which needs
+// the width that holds the most negative element as well as the largest
+// positive one. It is generic over the element type and takes no pointer.
+//
+// A narrow array has no sign flag — its element type says how it reads back —
+// and plans its width in narrowArrayWidth instead.
+func arrayPlanOf[T Integer](values []T) (allPositive bool, width int, widthCode uint8) {
+	signed := vecSigned[T]()
+	allPositive = true
+	var widest uint64
+	for _, value := range values {
+		if asSigned := int64(value); signed && asSigned < 0 {
+			allPositive = false
+			if magnitude := -uint64(asSigned); magnitude > widest {
+				widest = magnitude
+			}
+			continue
+		}
+		if magnitude := uint64(value); magnitude > widest {
+			widest = magnitude
+		}
+	}
+	width, widthCode = arrayWidth(widest, allPositive)
+	return allPositive, width, widthCode
+}
+
+// vecSigned is the sign rule a VEC has always been written under, which is not
+// quite isSigned: −1 converted to a uint64, or to a 64-bit uint, reads back
+// through int64 as −1, so those two count as signed here. A []uint64 holding a
+// value past 2^63 therefore goes out as eight-byte two's complement with the
+// sign flag clear, where a correct rule would set it — the same element bytes,
+// and lossless either way, since a reader of an unsigned type takes eight bytes
+// to the same value whichever way it extends them. It is kept so that the wide
+// format's bytes do not move under a change that is the narrow format's.
+func vecSigned[T Integer]() bool {
+	var minusOne T
+	minusOne--
+	return int64(minusOne) < 0
+}
+
+// arrayWidth picks the narrowest element width that holds every element. A
+// two's complement array needs one more bit than its magnitude, which is what
+// the shift below tests.
+func arrayWidth(widest uint64, allPositive bool) (width int, code uint8) {
+	if !allPositive {
+		// A magnitude that already fills the top bit cannot gain one: shifting
+		// it would wrap to zero and pick a one-byte width for math.MinInt64.
+		if widest > 1<<62 {
+			return 8, widthCode8Bytes
+		}
+		widest <<= 1
+	}
+	switch {
+	case widest <= 0xFF:
+		return 1, widthCode1Byte
+	case widest <= 0xFFFF:
+		return 2, widthCode2Bytes
+	case widest <= 0xFFFF_FFFF:
+		return 4, widthCode4Bytes
+	default:
+		return 8, widthCode8Bytes
+	}
 }
 
 // Strings writes a count and then each element behind its own length, inside a
@@ -798,11 +867,9 @@ func (r *Reader8) stringList() (int, Reader, bool) {
 	return count, Reader{buffer: body[at:]}, true
 }
 
-// Skip steps over the field at the cursor without knowing what it is, which is
-// the capability the wide key exists for. Reader.Skip, at four key bits, can
-// only refuse: its descriptor has no room for a class, so the same four bits
-// mean different things under different keys and nothing can size a field it
-// cannot classify.
+// Skip steps over the field at the cursor without knowing what it is. Reader.Skip
+// does the same at four key bits, from a nibble that sizes the field without
+// classifying it; here the descriptor does both.
 func (r *Reader8) Skip() bool {
 	size, ok := r.fieldSize()
 	if !ok {
@@ -913,7 +980,8 @@ func (r *Reader8) Fail(err error) {
 }
 
 // Zero and EmptyString write a field the omit-zero rule would otherwise drop.
-// See the narrow pair for why pointers need them.
+// See the narrow Zero for why pointers need them. A descriptor types what it
+// carries, so the wide width needs two: an integer zero and an empty blob.
 
 // Zero writes an explicit zero integer.
 func (w *Writer8) Zero(key uint8) {

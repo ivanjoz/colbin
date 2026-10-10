@@ -200,19 +200,6 @@ func TestGeneratedIntIsRangeChecked(t *testing.T) {
 	}
 }
 
-// An unknown narrow key ends a generated decode, as it does a reflective one: it
-// cannot be stepped over.
-func TestGeneratedNarrowDecodeRefusesAnUnknownKey(t *testing.T) {
-	message, err := Marshal(&everyShape{Counts: []uint32{7}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var back GenCharge
-	if err := back.UnmarshalColbin(message); err == nil {
-		t.Fatal("a foreign key was decoded")
-	}
-}
-
 var genCharge = GenCharge{CompanyID: 7, UserID: 42, RouteID: 103, CPU: 5, Access1: 0x0139}
 
 func BenchmarkGeneratedAppend(b *testing.B) {

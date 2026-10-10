@@ -17,7 +17,9 @@
 //!         0 => assert_eq!(r.u32(), 7),
 //!         1 => assert_eq!(r.u16(), 103),
 //!         2 => assert_eq!(r.string(), "ok"),
-//!         _ => r.skip(),
+//!         _ => {
+//!             r.skip();
+//!         }
 //!     }
 //! }
 //! r.err()?;
@@ -28,53 +30,50 @@
 //!
 //! | | type | key | skip | fields |
 //! |---|---|---|---|---|
-//! | narrow | [`Writer`] / [`Reader`] | 4 bits, shares the descriptor byte | no | 16 |
-//! | wide | [`Writer8`] / [`Reader8`] | 8 bits, own byte | **yes** | 256 |
+//! | narrow | [`Writer`] / [`Reader`] | 4 bits, shares a byte with the size | yes | 16 |
+//! | wide | [`Writer8`] / [`Reader8`] | 8 bits, own byte | yes | 256 |
 //! | bitmap | [`BitmapWriter`] / [`BitmapReader`] | a presence bitmap, no key at all | yes | 64 |
 //!
 //! They are separate types, not a flag, exactly as in Go: a key width the
 //! compiler cannot see is a width it cannot fold. The framing is written three
-//! times; the value codecs under it — magnitudes, blobs, array elements — are
+//! times; the value codecs under it — magnitudes, array elements, counts — are
 //! written once and shared by this module.
 //!
-//! # Wire format
+//! # Wire format, narrow
 //!
 //! A message is a sequence of fields and ends when its buffer ends — the frame
 //! that carries it already states its length. Every multi-byte quantity is
 //! little-endian. A field whose value is zero, empty or false is omitted.
 //!
 //! ```text
-//! integer        [key:4][positive:1][n:3]                       [magnitude: n bytes]
+//! [key:4][nibble:4] [payload]
 //!
-//!     n          0 → no bytes, the value is 1 (which is what makes a true bool
-//!                one byte) · 1..6 → that many bytes · 7 → eight bytes
-//!     positive   1 = the bytes are a magnitude; 0 = negative, bytes are |value|
+//!     0..3       no payload
+//!     4..11      exactly nibble − 3 bytes
+//!     12..15     11 f1 f0, then a length (one byte ≤ 253, 0xFE + u16, 0xFF + u32)
+//!                and that many bytes
 //!
-//! unsigned       [key:4][code:4]                                [magnitude]
-//!
-//!     code       0..7 → the value itself, no payload
-//!                8..15 → a magnitude of (code - 7) bytes
-//!
-//! float          the integer shape, carrying the IEEE-754 bit pattern with its
+//! unsigned       0..3 → the value nibble + 1 · 4..11 → the value's bytes
+//! signed         0..2 → 1..3, 3 → −1 · 4..11 → a positive value's bytes ·
+//!                1100 → a negative value's magnitude
+//! float          the unsigned form, carrying the IEEE-754 bit pattern with its
 //!                bytes reversed, so the trim reaches the zero low mantissa bytes
-//!
-//! string/bytes   [key:4][more:1][size hi:3] [size lo:8]         [bytes: size]
-//!                [key:4][1][escape:3]       [size: 2|4|8]       [bytes: size]
-//!
-//! integer array  [key:4][positive:1][width:2][more:1] [count:8] [count × width]
-//!
-//! string array   [key:4][more:1][count:11]   then per element
-//!                [size: 1 byte, 0xFF → 4 bytes follow] [bytes: size]
+//! string/bytes   4..11 → 1..8 raw bytes · 11 f1f0 → raw (00) or packed5 (01, 10)
+//! integer array  11 w w → elements of 1 << ww bytes; the count is length >> ww
+//! string array   1100 → per element [size: 1 byte, 0xFF → 4 bytes follow][bytes]
+//! explicit zero  1100 with length 0, for every type
 //! ```
 //!
-//! # Nothing has a size ceiling, and nothing is a varint
+//! The nibble says how long the field is and the type says only what the bytes
+//! mean, so a reader steps over a key it does not know at either width.
 //!
-//! Every size escalates to a width that holds it, named by the header rather
-//! than discovered byte by byte. So no read is ever a loop whose trip count is
-//! data — which is also why there is no continuation run for an unauthenticated
-//! peer to make unbounded — and **a write cannot fail**: neither writer has an
-//! error, because anything the format could not express would have to be a value
-//! that does not fit in memory.
+//! # Nothing is a varint
+//!
+//! Every size is named by the header rather than discovered byte by byte. So no
+//! read is ever a loop whose trip count is data — which is also why there is no
+//! continuation run for an unauthenticated peer to make unbounded. A write
+//! cannot fail on anything a program could hold, with one exception: a narrow
+//! field's length is a u32, so a field past four gigabytes is a wide one's job.
 
 use alloc::vec::Vec;
 
@@ -96,11 +95,10 @@ pub const MAX_FIELDS: usize = 16;
 /// What eight key bits buy: keys 0..=255.
 pub const MAX_WIDE_FIELDS: usize = 256;
 
-// Integer size codes. Code 0 carries no bytes at all and means the magnitude is
-// one, which is what makes a true bool a single byte. Codes 1..=6 are the byte
-// count outright; code 7 is eight bytes, so a seven-byte magnitude rounds up to
-// eight and every other width is exact.
-pub(crate) const SIZE_CODE_ONE: u8 = 0;
+// Integer size codes, the `[n:3]` of a wide INT detail and of a narrow signed
+// element. Code 0 carries no bytes at all and means the magnitude is one. Codes
+// 1..=6 are the byte count outright; code 7 is eight bytes, so a seven-byte
+// magnitude rounds up to eight and every other width is exact.
 pub(crate) const SIZE_CODE_8BYTES: u8 = 7;
 
 /// Maps a size code to its byte count.
@@ -125,48 +123,19 @@ pub(crate) const WIDTH_CODE_2BYTES: u8 = 1;
 pub(crate) const WIDTH_CODE_4BYTES: u8 = 2;
 pub(crate) const WIDTH_CODE_8BYTES: u8 = 3;
 
-// A size or count did not fit its inline bits and a wider one follows. It is
-// bit 3 in a blob header and bit 0 in an array header, because an array spends
-// bits 2..1 on its element width.
-pub(crate) const MORE_SIZE_FLAG: u8 = 0b1000;
-pub(crate) const MORE_ARRAY_LEN_FLAG: u8 = 0b0001;
-pub(crate) const ARRAY_WIDTH_SHIFT: u8 = 1;
-
-// Bit 3 of a *signed* integer header, directly above the three size-code bits,
-// and bit 3 of an array header. They are deliberately separate constants: one
-// value used for both would land on a size-code bit.
+// The positive bit of a `[pos:1][n:3]` integer: a wide INT detail, a bitmap
+// field's, and a narrow signed element's.
 pub(crate) const INT_POSITIVE_FLAG: u8 = 0b1000;
-pub(crate) const ARRAY_POSITIVE_FLAG: u8 = 0b1000;
 
-// An unsigned narrow field spends no sign bit, so all sixteen nibble codes carry
-// information rather than eight: 0..=7 are the value itself and 8..=15 are a
-// magnitude of (code - 7) bytes. A K4 reader has the schema and therefore
-// already knows whether the field it is looking at is signed.
+// A narrow unsigned *element* — a map key or value — spends no sign bit, so all
+// sixteen codes carry information: 0..=7 are the value itself and 8..=15 are a
+// magnitude of (code - 7) bytes. It is not the field nibble, which has to size
+// the field; an element sits inside a composite whose length already does that.
 pub(crate) const UINT_INLINE_MAX: u64 = 7;
 pub(crate) const UINT_WIDTH_BASE: u8 = 8;
 
-// Escape codes, which occupy a blob header's three size bits once `more` is set
-// and they no longer carry size.
-pub(crate) const ESCAPE_2BYTES: u8 = 0;
-pub(crate) const ESCAPE_4BYTES: u8 = 1;
-pub(crate) const ESCAPE_8BYTES: u8 = 2;
-
-/// The packed5 escapes. A narrow blob header has no `enc` field — under narrow
-/// keys the schema says what a field is, not the wire — so a packed string names
-/// itself here, and carries the one bit the schema cannot know: the case mode
-/// its unit stream opens in. Spending four codes buys a two-byte header, the
-/// same as a raw blob's. Code 7 is still free.
-pub(crate) const ESCAPE_PACKED1_LO: u8 = 3;
-pub(crate) const ESCAPE_PACKED1_UP: u8 = 4;
-pub(crate) const ESCAPE_PACKED4_LO: u8 = 5;
-pub(crate) const ESCAPE_PACKED4_UP: u8 = 6;
-
-// What each header carries before an escape is needed.
-pub(crate) const INLINE_BLOB_SIZE: usize = (1 << 11) - 1;
-pub(crate) const INLINE_ARRAY_COUNT: usize = (1 << 8) - 1;
-
-/// The largest element length a string array writes in one byte; `0xFF` escapes
-/// to four bytes.
+/// The largest element length a string array, a list element or a count writes
+/// in one byte; `0xFF` escapes to four bytes.
 pub(crate) const INLINE_ELEMENT_SIZE: usize = 0xFE;
 pub(crate) const ELEMENT_SIZE_ESCAPE: u8 = 0xFF;
 
@@ -176,9 +145,6 @@ pub(crate) const ELEMENT_SIZE_ESCAPE: u8 = 0xFF;
 pub struct Mark {
     at: usize,
 }
-
-/// What the reserved byte holds before the body grows past it.
-pub(crate) const INLINE_COMPOSITE_LENGTH: usize = 0xFF;
 
 /// The code that describes a magnitude, and the byte count that code implies —
 /// which is the magnitude's own byte count except at seven, which rounds to
@@ -272,8 +238,15 @@ pub(crate) fn read_count(body: &[u8]) -> Option<(usize, usize)> {
 
 /// Every integer type an array field can hold.
 pub trait Integer: Copy {
-    /// Whether an element of this type can read as negative, which is what
-    /// decides between a magnitude array and a two's complement one.
+    /// Whether the type is signed, which is what decides a narrow array's form:
+    /// two's complement for `i8`..`i64`, magnitudes for `u8`..`u64`. The flag
+    /// bits of the narrow length form are spent on the element width, so the
+    /// form has to come from the type both sides already agree on rather than
+    /// from the wire.
+    const SIGNED_TYPE: bool;
+    /// Whether an element of this type can read as negative in a *wide* VEC,
+    /// which is what decides between a magnitude array and a two's complement
+    /// one there.
     ///
     /// It is not quite "is this type signed". Go answers the question with
     /// `isSigned`, which converts −1 to the element type and asks whether the
@@ -300,8 +273,9 @@ pub trait Integer: Copy {
 }
 
 macro_rules! impl_integer {
-    ($($type:ty => $signed:literal),*) => {$(
+    ($($type:ty => $signed_type:literal, $signed:literal),*) => {$(
         impl Integer for $type {
+            const SIGNED_TYPE: bool = $signed_type;
             const SIGNED: bool = $signed;
             #[inline]
             #[allow(clippy::cast_lossless, clippy::cast_possible_wrap)]
@@ -320,20 +294,22 @@ macro_rules! impl_integer {
 }
 
 impl_integer!(
-    i8 => true, i16 => true, i32 => true, i64 => true,
-    u8 => false, u16 => false, u32 => false,
+    i8 => true, true, i16 => true, true, i32 => true, true, i64 => true, true,
+    u8 => false, false, u16 => false, false, u32 => false, false,
     // Not a slip: see `SIGNED`. `u64::MAX` widens to −1, so Go's `isSigned`
-    // answers true here and the array is two's complement.
-    u64 => true
+    // answers true here and a wide array is two's complement. A narrow one goes
+    // by the type and is magnitudes.
+    u64 => false, true
 );
 
-/// The one pass that decides both the sign flag and the width: a negative
-/// anywhere turns the whole array into two's complement, which needs the width
-/// that holds the most negative element as well as the largest positive one.
+/// The one pass that decides both a wide VEC's sign flag and its width: a
+/// negative anywhere turns the whole array into two's complement, which needs
+/// the width that holds the most negative element as well as the largest
+/// positive one.
 ///
-/// It returns the pieces rather than a header byte, because the two key widths
-/// spend them in different places: K4 ORs them into the byte it shares with the
-/// key, K8 into a descriptor of its own.
+/// It returns the pieces rather than a descriptor, because the descriptor is
+/// the caller's to assemble. A narrow array has no sign flag and takes its form
+/// from the element type instead (`narrow::array_plan`).
 pub(crate) fn array_plan_of<T: Integer>(values: &[T]) -> (bool, usize, u8) {
     let mut all_positive = true;
     let mut widest = 0_u64;

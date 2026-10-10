@@ -132,14 +132,13 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
     // The key width, by the rule `codec/wide.go` states: a derived key lands
     // anywhere in 0..=255, and an id above sixteen has a key past the nibble.
-    // Either way the run goes wide, and so do packed strings, whose
-    // encoding lives in a descriptor a narrow field does not have.
+    // Either way the run goes wide.
     let derived = fields.iter().any(|field| field.id.is_none());
     let past_narrow = fields
         .iter()
         .any(|field| field.id.is_some_and(|id| id > MAX_NARROW_KEY));
-    // packed5 no longer decides the key width: a narrow blob header says
-    // "packed" in its escape code, so the encoding costs what it weighs.
+    // packed5 does not decide the key width: a narrow string says "packed" in
+    // its length form's flag, so the encoding costs what it weighs.
     let wide = derived || past_narrow || options.wide;
 
     let keys = KeyConstants::build(name, &fields);
@@ -230,7 +229,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                         #[allow(unreachable_patterns)]
                         match r.key() {
                             #(#wide_reads)*
-                            // A wide field sizes itself, so one this type does
+                            // Every field sizes itself, so one this type does
                             // not declare is stepped over — which is schema
                             // evolution without a coordinated deploy.
                             _ => if !r.skip() { break },
@@ -244,11 +243,10 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                         #[allow(unreachable_patterns)]
                         match r.key() {
                             #(#narrow_reads)*
-                            // Four descriptor bits have no room for a class, so
-                            // nothing can size a field it cannot classify: an
-                            // unknown narrow key ends the run.
-                            key => return ::core::result::Result::Err(
-                                ::colbin::Error::UnknownKey(key)),
+                            // The nibble says how long a field is whatever its
+                            // type, so an unknown narrow key is stepped over
+                            // exactly as a wide one is.
+                            _ => if !r.skip() { break },
                         }
                     }
                     r.err()?;
@@ -824,18 +822,16 @@ impl Shape {
         }
     }
 
-    /// How a present zero is spelled. The signed nibble and the unsigned one are
-    /// different tables over the same four bits, so a zero has to be written in
-    /// the one its reader will use — which is a distinction the wide descriptor
-    /// does not have.
+    /// How a present zero is spelled. Under narrow keys every type reads the
+    /// empty length form as its zero, so there is one spelling; a wide string's
+    /// zero is an empty BLOB, because its reader asks for that class.
     fn explicit_zero(
         &self,
         key: &proc_macro2::TokenStream,
         wide: bool,
     ) -> proc_macro2::TokenStream {
         match self {
-            Self::Str => quote!(w.empty_string(#key);),
-            Self::Int(_) if !wide => quote!(w.zero_signed(#key);),
+            Self::Str if wide => quote!(w.empty_string(#key);),
             _ => quote!(w.zero(#key);),
         }
     }
@@ -858,13 +854,11 @@ impl Shape {
             Self::Uint(_) => quote!(r.u64()),
             Self::Float(32) => quote!(r.f32()),
             Self::Float(_) => quote!(r.f64()),
-            // A wide string reads through the packed reader whether or not this
-            // type writes packed ones: the descriptor's `enc` code says which
-            // encoding is there, so a message written with packing on reads back
-            // with it off. A narrow descriptor has no room for that code, so a
-            // narrow string is always raw.
-            // packed_string reads a raw blob too — the header says which — so
-            // the reader needs no setting and cannot be wrong about it.
+            // A string reads through the packed reader whether or not this type
+            // writes packed ones: the wide descriptor's `enc` code, or the
+            // narrow length form's flag, says which encoding is there, so a
+            // message written with packing on reads back with it off and the
+            // reader needs no setting it could get wrong.
             Self::Str => quote!(r.packed_string()),
             Self::Bytes => quote!(r.bytes().to_vec()),
             Self::Ints => quote!(r.ints()),

@@ -773,7 +773,7 @@ func unmarshalBody(
 	if wide {
 		err = unmarshalWide(body, section, plan, record)
 	} else {
-		err = unmarshalNarrow(body, plan, record, what)
+		err = unmarshalNarrow(body, plan, record)
 	}
 	if err != nil {
 		return errDecoding(what, err)
@@ -788,17 +788,15 @@ func errDecoding(what reflect.Type, err error) error {
 
 // unmarshalNarrow decodes a narrow-key message into an already-zeroed record.
 //
-// An unknown key is refused rather than skipped. Four descriptor bits have no
-// room for a class, so the same bits mean different things under different keys
-// and nothing can size a field it cannot classify — which is the trade the
-// narrow width makes for its byte. A type that needs to evolve past its readers
-// should carry an id above sixteen, which puts the message on the wide path.
-func unmarshalNarrow(body []byte, plan *typePlan, record unsafe.Pointer, what reflect.Type) error {
+// A key the plan does not declare is stepped over, as it is at eight bits: the
+// nibble beside a narrow key says how long the field is whatever its type, so a
+// type can drop a field, or a newer peer add one, at any id and the two still
+// read each other. What the narrow width cannot do is say what an unknown field
+// was — that takes a class, which is what the wide descriptor spends its byte on.
+func unmarshalNarrow(body []byte, plan *typePlan, record unsafe.Pointer) error {
 	reader := wire.NewReader(body)
 	if plan.simple {
-		if key, ok := readScalars(&reader, plan, record); !ok {
-			return errUnknownNarrowKey(key, what)
-		}
+		readScalars(&reader, plan, record)
 		return reader.Err()
 	}
 	return unmarshalNarrowRun(&reader, len(body), plan, record)
@@ -812,15 +810,6 @@ func unmarshalNarrowRun(reader *wire.Reader, size int, plan *typePlan, record un
 	defer buf.release()
 	readNarrowRun(reader, plan, record, &buf)
 	return reader.Err()
-}
-
-// errUnknownNarrowKey names the field a narrow message carried and the type did
-// not declare. It is out of line so that neither decode loop carries the
-// formatting for a failure that ends the message anyway.
-func errUnknownNarrowKey(key uint8, what reflect.Type) error {
-	return fmt.Errorf(
-		"message holds field id %d, which %s does not declare, "+
-			"and a narrow key cannot be skipped", int(key)+1, what)
 }
 
 // find resolves a wire key to its field.
@@ -1032,7 +1021,7 @@ func (codec *Codec[T]) Unmarshal(data []byte, value *T) error {
 	if wide {
 		err = unmarshalWide(body, section, codec.plan, unsafe.Pointer(value))
 	} else {
-		err = unmarshalNarrow(body, codec.plan, unsafe.Pointer(value), codec.what)
+		err = unmarshalNarrow(body, codec.plan, unsafe.Pointer(value))
 	}
 	if err != nil {
 		return errDecoding(codec.what, err)

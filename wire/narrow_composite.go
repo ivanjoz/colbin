@@ -2,39 +2,44 @@ package wire
 
 // Composites at four key bits.
 //
-// A narrow descriptor has no room for a class, and it does not need one: a
-// narrow reader has the schema, so it already knows whether the field it is
-// looking at is a struct, a list, a map or a table. What it needs from the wire
-// is the same thing the wide form needs — a byte length — and the same four
-// detail bits carry it.
+// A narrow composite is the length form of a field with a body in it, so a
+// reader that does not know the key steps over one as it does any other field:
 //
-//	struct  [key:4][k8:1][—:1][lw:2]    [len: lw] [key run]
-//	list    [key:4][homog:1][—:1][lw:2] [len: lw] [count] ( [len] [body] )*
-//	map     [key:4][sub=0:1][—:1][lw:2] [len: lw] [count] ( key value )*
-//	table   [key:4][sub=1:1][—:1][lw:2] [len: lw] [rows]  column run
+//	struct  [key:4][1 1 0 k8]    [length] [key run]
+//	list    [key:4][1 1 0 0]     [length] [count] ( [len] [body] )*
+//	table   [key:4][1 1 0 1]     [length] [rows]  column run
+//	map     [key:4][1 1 0 0]     [length] [count] ( key value )*
 //
-// The detail nibble is bit for bit the wide one's: the wide descriptor spends
-// its extra nibble on the class, and K4 takes the class from the schema, so
-// everything below the class is shared.
+// The flag bit f0 tells apart only what the schema cannot: a struct's own key
+// width, and whether a []Struct went out as a list or a table. A struct and a
+// map are other Go types, so their flags overlap nothing. f1 is refused.
 //
 // A table's column run uses the row type's key width, which the reader takes
-// from the schema as it does a list element's shape: four-bit columns are
-// [key:4][lw:4-detail][len][column], eight-bit ones are Writer8's.
-//
-// A field K4 does not recognise cannot be stepped over, composite or not,
-// because nothing on the wire says what shape it is.
+// from the schema as it does a list element's shape: a four-bit integer column
+// is [key:4][1100][length][column], a string column a string array with one
+// element per row, and eight-bit ones are Writer8's.
 
 import (
 	"encoding/binary"
+	"math"
 	"math/bits"
 
 	"github.com/ivanjoz/colbin/column"
 )
 
-// openNarrowComposite writes a key, a detail nibble and a one-byte length
-// placeholder, exactly as the wide form does minus the class.
-func (w *Writer) openNarrowComposite(key, detail uint8) Mark {
-	w.Buffer = append(w.Buffer, key<<4|detail, 0)
+// The composites' flag bit f0.
+const (
+	// narrowWideKeys is a struct's f0, set when the key run inside uses eight-bit
+	// keys.
+	narrowWideKeys uint8 = 0b01
+	// narrowTable is a []Struct's f0, set when it went out as a table.
+	narrowTable uint8 = 0b01
+)
+
+// openNarrowComposite writes a key, the length form's nibble and a one-byte
+// length placeholder for Close to patch.
+func (w *Writer) openNarrowComposite(key, flags uint8) Mark {
+	w.Buffer = append(w.Buffer, key<<4|nibbleLength|flags, 0)
 	return Mark{at: len(w.Buffer) - 1}
 }
 
@@ -46,7 +51,7 @@ func (w *Writer) OpenStruct(key uint8) Mark {
 // OpenStructWide begins a nested run whose own keys are eight bits, which is how
 // a narrow struct holds a type that needs more than sixteen ids.
 func (w *Writer) OpenStructWide(key uint8) Mark {
-	return w.openNarrowComposite(key, structWideKeys)
+	return w.openNarrowComposite(key, narrowWideKeys)
 }
 
 // OpenList begins a list of count elements under key. Each element is opened
@@ -69,7 +74,7 @@ func (w *Writer) OpenMap(key uint8, count int) Mark {
 // type's key width: Column for four bits, or a Writer8 over the same buffer for
 // eight. Close it with Close.
 func (w *Writer) OpenTable(key uint8, rows int) Mark {
-	mark := w.openNarrowComposite(key, tableFlag)
+	mark := w.openNarrowComposite(key, narrowTable)
 	w.Buffer = appendCount(w.Buffer, rows)
 	return mark
 }
@@ -85,12 +90,22 @@ func (w *Writer) OpenElement() Mark {
 // outgrew it. It is the same backpatch the wide writer does, and the same
 // reason: sizing the value first would cost a pass over every nested one.
 //
-// It is for a *keyed* composite only. A list element has no descriptor in front
-// of it, so there is nothing to put a wider length code in and CloseElement is
-// the one to call — see the comment there.
+// A body of up to 253 bytes fits the placeholder. A longer one moves up by two
+// for the 0xFE escape and a u16, or by four for 0xFF and a u32 — the length's
+// own escape says which, so nothing in front of the placeholder changes.
+//
+// It does not inline, where the single-escape version did: that one inlined a
+// widen costing 47 of the budget's 80, and two escapes cost more than the
+// budget has left, so the widen is a call and Close is one too. Measured as a
+// third of a nanosecond per composite, which is what two bytes less than a lone
+// u32 escape, on every body of 254 to 65 535 bytes, costs.
+//
+// It is for a *keyed* field only — a composite, or a packed string's payload. A list element's length is a count-style
+// size, one byte up to 254 or 0xFF and a u32, and CloseElement is the one to
+// call — see the comment there.
 func (w *Writer) Close(mark Mark) {
 	body := len(w.Buffer) - (mark.at + 1)
-	if body < inlineCompositeLength {
+	if body <= inlineLength {
 		w.Buffer[mark.at] = uint8(body)
 		return
 	}
@@ -99,19 +114,18 @@ func (w *Writer) Close(mark Mark) {
 
 // CloseElement patches a narrow list element's length.
 //
-// It is not Close, and the difference is the whole reason it exists. Close
-// widens by setting the `lw` bits of the descriptor *before* the placeholder —
-// and a list element has no descriptor before it, which is exactly what makes a
-// narrow list of small structs cheaper than a wide one. Calling Close on an
-// element therefore OR-ed 2 into whatever byte happened to precede it, which is
-// the element count for the first element and the tail of the previous
-// element's body for every one after it, and then wrote a bare four-byte length
-// where Element expects the 0xFF escape.
+// It is not Close, and the difference is the whole reason it exists. An
+// element's size is the form a count and a string-array element take — one byte
+// up to 254, or 0xFF and four — which is what Element reads, and Close writes a
+// field's length, whose 0xFE escape means a u16. Calling Close on an element
+// whose body reached 254 bytes wrote a length Element misreads.
 //
-// The result was a message Marshal produced and Unmarshal refused, for any
-// narrow list whose element body reached 255 bytes — a `[]struct` under the
-// table threshold holding a string of a couple of hundred characters, which is
-// an ordinary record rather than a corner. TestNarrowListElementWidths pins it.
+// The old shape of this bug wrote a bare four-byte length and OR-ed a width code
+// into the byte before the placeholder: a message Marshal produced and
+// Unmarshal refused, for any narrow list whose element body reached 255 bytes —
+// a `[]struct` under the table threshold holding a string of a couple of hundred
+// characters, which is an ordinary record rather than a corner.
+// TestNarrowListElementWidths pins it.
 func (w *Writer) CloseElement(mark Mark) {
 	body := len(w.Buffer) - (mark.at + 1)
 	if body <= inlineElementSize {
@@ -126,32 +140,51 @@ func (w *Writer) CloseElement(mark Mark) {
 	binary.LittleEndian.PutUint32(w.Buffer[mark.at+1:], uint32(body))
 }
 
+// widenLength turns a one-byte length placeholder into three or five bytes,
+// shifting the body up to make room. Out of line because it is the rare path.
 func (w *Writer) widenLength(mark Mark, body int) {
-	w.Buffer = append(w.Buffer, 0, 0, 0)
-	copy(w.Buffer[mark.at+4:], w.Buffer[mark.at+1:len(w.Buffer)-3])
-	binary.LittleEndian.PutUint32(w.Buffer[mark.at:], uint32(body))
-	w.Buffer[mark.at-1] |= 2 // lw code 2: a four-byte length
+	if body <= 0xFFFF {
+		w.Buffer = append(w.Buffer, 0, 0)
+		copy(w.Buffer[mark.at+3:], w.Buffer[mark.at+1:len(w.Buffer)-2])
+		w.Buffer[mark.at] = length16
+		binary.LittleEndian.PutUint16(w.Buffer[mark.at+1:], uint16(body))
+		return
+	}
+	if uint64(body) > math.MaxUint32 {
+		panic(errFieldTooLarge)
+	}
+	w.Buffer = append(w.Buffer, 0, 0, 0, 0)
+	copy(w.Buffer[mark.at+5:], w.Buffer[mark.at+1:len(w.Buffer)-4])
+	w.Buffer[mark.at] = length32
+	binary.LittleEndian.PutUint32(w.Buffer[mark.at+1:], uint32(body))
 }
 
 // Element writers, the key-less values a narrow map's entries are made of. A
 // narrow list's elements are whole key runs and go through OpenElement instead.
+//
+// They keep a code table of their own rather than the field nibble: an element
+// sits inside a composite whose length already steps over it, so it does not
+// need to size itself, and its code spends no bit on a length form it would
+// never use.
 
+// ElementUint writes an unsigned element: codes 0..7 are the value itself and
+// 8..15 a magnitude of code−7 bytes.
 func (w *Writer) ElementUint(value uint64) {
-	// The unsigned nibble carries 0..7 outright, so a map value of zero is one
-	// byte and needs no special case. It used to need one: the signed form's
-	// code 0 means "the value is one", and a map value is not a field, so the
-	// omit-zero rule that keeps a field away from that code does not cover it.
-	if value <= uintInlineMax {
+	// Zero is code 0, so a map value of zero is one byte and needs no special
+	// case. It used to need one: the signed form's code 0 means "the value is
+	// one", and a map value is not a field, so the omit-zero rule that keeps a
+	// field away from that code does not cover it.
+	if value <= elementInlineMax {
 		w.Buffer = append(w.Buffer, uint8(value))
 		return
 	}
 	width := (bits.Len64(value) + 7) / 8
 	w.Buffer = appendMagnitude(
-		append(w.Buffer, uintWidthBase+uint8(width)-1), value, width)
+		append(w.Buffer, elementWidthBase+uint8(width)-1), value, width)
 }
 
 // ElementInt writes the signed [positive:1][size:3] form, and does not hand a
-// positive value to ElementUint: the two nibbles are different tables, and
+// positive value to ElementUint: the two codes are different tables, and
 // ElementInt is what will read this back.
 func (w *Writer) ElementInt(value int64) {
 	if value >= 0 {
@@ -179,47 +212,30 @@ func (w *Writer) ElementString(value string) {
 
 // Reader side.
 
-// compositeBody reads a narrow composite's length and returns its body, advancing
-// past the whole field.
-func (r *Reader) compositeBody() ([]byte, bool) {
-	if r.at+2 > len(r.buffer) {
-		r.fail(ErrTruncated)
-		return nil, false
+// compositeBody reads a narrow composite's framing and returns its body,
+// advancing past the whole field. A composite is the length form with f1 clear;
+// anything else is a field of some other shape.
+func (r *Reader) compositeBody() (body []byte, flags uint8, ok bool) {
+	nibble, start, size, ok := r.field()
+	if !ok {
+		return nil, 0, false
 	}
-	width := lengthWidth[r.buffer[r.at]&0b11]
-	rest := r.buffer[r.at+1:]
-	if len(rest) < width {
-		r.fail(ErrTruncated)
-		return nil, false
+	if nibble&^narrowTable != nibbleLength {
+		r.fail(ErrBadEscape)
+		return nil, 0, false
 	}
-	length := leUint(rest, width)
-	if length > uint64(maxInt) {
-		r.fail(ErrSizeTooLarge)
-		return nil, false
-	}
-	start := r.at + 1 + width
-	if int(length) > len(r.buffer)-start {
-		r.fail(ErrTruncated)
-		return nil, false
-	}
-	r.at = start + int(length)
-	return r.buffer[start : start+int(length)], true
+	return r.buffer[start : start+size], nibble & narrowTable, true
 }
 
 // StructBody returns a nested run's bytes and the key width it uses.
 func (r *Reader) StructBody() (body []byte, wideKeys, ok bool) {
-	if r.at >= len(r.buffer) {
-		r.fail(ErrTruncated)
-		return nil, false, false
-	}
-	wideKeys = r.buffer[r.at]&structWideKeys != 0
-	body, ok = r.compositeBody()
-	return body, wideKeys, ok
+	body, flags, ok := r.compositeBody()
+	return body, flags == narrowWideKeys, ok
 }
 
 // IsTable reports whether the field at the cursor is a table rather than a list.
 func (r *Reader) IsTable() bool {
-	return r.at < len(r.buffer) && r.buffer[r.at]&tableFlag != 0
+	return r.at < len(r.buffer) && r.buffer[r.at]&0b1111 == nibbleLength|narrowTable
 }
 
 // List returns a list's element count and a reader over its elements. The count
@@ -231,7 +247,7 @@ func (r *Reader) List() (int, Reader, bool) { return r.counted(1) }
 func (r *Reader) Map() (int, Reader, bool) { return r.counted(2) }
 
 func (r *Reader) counted(minSize int) (int, Reader, bool) {
-	body, ok := r.compositeBody()
+	body, _, ok := r.compositeBody()
 	if !ok {
 		return 0, Reader{}, false
 	}
@@ -250,12 +266,12 @@ func (r *Reader) counted(minSize int) (int, Reader, bool) {
 // zeros, so a table of a million rows can be a few bytes — and a caller that
 // allocates for it must budget rows itself.
 func (r *Reader) Table() (rows int, columns []byte, ok bool) {
-	if r.at < len(r.buffer) && r.buffer[r.at]&tableFlag == 0 {
-		r.fail(ErrBadDescriptor)
+	body, flags, ok := r.compositeBody()
+	if !ok {
 		return 0, nil, false
 	}
-	body, ok := r.compositeBody()
-	if !ok {
+	if flags != narrowTable {
+		r.fail(ErrBadDescriptor)
 		return 0, nil, false
 	}
 	rows, at, ok := readCount(body)
@@ -302,11 +318,11 @@ func (r *Reader) ElementUint() uint64 {
 		return 0
 	}
 	code := r.buffer[r.at] & 0b1111
-	if code <= uintInlineMax {
+	if code <= elementInlineMax {
 		r.at++
 		return uint64(code)
 	}
-	width := int(code) - uintWidthBase + 1
+	width := int(code) - elementWidthBase + 1
 	rest := r.buffer[r.at+1:]
 	if len(rest) < width {
 		r.fail(ErrTruncated)
@@ -326,9 +342,26 @@ func (r *Reader) ElementInt() int64 {
 	return r.signed(positive, magnitude)
 }
 
-// elementMagnitude is signedMagnitude for a key-less element, which ElementInt
-// needs for the same reason Int needs it: the signed and unsigned nibbles are
-// different tables over the same four bits.
+// signed applies a sign to a magnitude, refusing one no int64 holds: past 2^63-1
+// when positive, past 2^63 when negative.
+func (r *Reader) signed(positive bool, magnitude uint64) int64 {
+	if positive {
+		if magnitude > math.MaxInt64 {
+			r.fail(ErrFieldTooWide)
+			return 0
+		}
+		return int64(magnitude)
+	}
+	if magnitude > 1<<63 {
+		r.fail(ErrFieldTooWide)
+		return 0
+	}
+	return -int64(magnitude)
+}
+
+// elementMagnitude reads a signed element's [size:3] magnitude, which ElementInt
+// needs rather than ElementUint's table: the two codes are different tables over
+// the same four bits.
 func (r *Reader) elementMagnitude() uint64 {
 	if r.at >= len(r.buffer) {
 		r.fail(ErrTruncated)
@@ -370,6 +403,9 @@ func (r *Reader) ElementString() string {
 
 // Column writes an integer column under key, for a narrow-keyed table. It is
 // Writer8.Column with four key bits: the column codec underneath is the same.
+//
+// The column is the length form with clear flags, so a reader that does not
+// know the column's key steps over it.
 func (w *Writer) Column(key uint8, values []int64) {
 	if allZero(values) {
 		return
@@ -382,7 +418,7 @@ func (w *Writer) Column(key uint8, values []int64) {
 // Column reads a column written by Column. The row count comes from the table,
 // which said it once for every column.
 func (r *Reader) Column(rows int, dst []int64) []int64 {
-	body, ok := r.compositeBody()
+	body, _, ok := r.compositeBody()
 	if !ok {
 		return dst
 	}

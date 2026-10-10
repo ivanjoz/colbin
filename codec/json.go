@@ -33,9 +33,11 @@ package codec
 //   - **Floats are byte-reversed bit patterns** in a scalar field and *plain*
 //     bit patterns in a column. Reading one as the other is silent nonsense, so
 //     the two paths are separate and each has a test.
-//   - **K4 cannot skip.** A narrow message holding a key the schema does not
-//     list ends the decode, as it does for a Go type. That is K4's standing
-//     trade and the error says so.
+//   - **An unknown key is stepped over, at either width.** A message from a
+//     newer peer holds fields the schema does not list; the nibble beside a
+//     narrow key sizes the field as the wide descriptor does, so the walk steps
+//     over it and the document is the fields the schema knows, as it is for a Go
+//     type.
 //   - **The message is untrusted.** The walk descends at most maxSchemaDepth
 //     levels, a message's tables declare at most rowBudget rows between them,
 //     and nothing continues once a failure is recorded.
@@ -371,15 +373,13 @@ func (w *walker) narrowFields(plan *typePlan, body []byte) {
 	reader := wire.NewReader(body)
 	var seen fieldSet
 	for reader.More() && w.err == nil {
-		key := reader.Key()
-		index := plan.findIndex(key)
+		index := plan.findIndex(reader.Key())
 		if index < 0 {
-			// Four descriptor bits have no room for a class, so nothing can size
-			// a field it cannot classify. See unmarshalNarrow.
-			w.fail(fmt.Errorf(
-				"colbin: message holds field id %d, which the schema does not declare, "+
-					"and a narrow key cannot be skipped", key))
-			return
+			if !reader.Skip() {
+				w.fail(reader.Err())
+				return
+			}
+			continue
 		}
 		seen.add(index)
 		w.to.key(plan.names[index])
@@ -773,14 +773,13 @@ func (w *walker) narrowTable(reader *wire.Reader, field *planField) {
 	columns := wire.NewReader(body)
 	gathered := newTableColumns(len(sub.fields))
 	for columns.More() {
-		key := columns.Key()
-		index := sub.findIndex(key)
+		index := sub.findIndex(columns.Key())
 		if index < 0 {
-			// A narrow key cannot be skipped here either.
-			w.fail(fmt.Errorf(
-				"colbin: a table holds column id %d, which the schema does not declare, "+
-					"and a narrow key cannot be skipped", int(key)+1))
-			return
+			if !columns.Skip() {
+				w.fail(columns.Err())
+				return
+			}
+			continue
 		}
 		if sub.fields[index].op == opString {
 			gathered.strings[index] = columns.StringsBytes(nil)

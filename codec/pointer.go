@@ -12,9 +12,11 @@ package codec
 // What needs saying out loud is the other case. A non-nil pointer *to* a zero
 // value — `new(int32)`, a `*bool` to false — would be omitted by the same rule
 // and read back as nil, which is a different value. So it writes an explicit
-// zero: `Zero` for a number and `EmptyString` for a string. That is the one
-// place in this format where a zero goes on the wire, and it is there because
-// the alternative is losing a distinction the Go type makes.
+// zero: at four key bits one `Zero` for every type, the length form with nothing
+// in it, and at eight `Zero` for a number and `EmptyString` for a string, since
+// a wide descriptor types what it carries. That is the one place in this format
+// where a zero goes on the wire, and it is there because the alternative is
+// losing a distinction the Go type makes.
 //
 // # Scalars here, structs next door
 //
@@ -112,28 +114,10 @@ func appendPointer(writer *wire.Writer, field *planField, at unsafe.Pointer, pac
 		return
 	}
 	if isZeroScalar(field.elemOp, pointee) {
-		switch {
-		case field.elemOp == opString:
-			writer.EmptyString(field.key)
-		case signedOp(field.elemOp):
-			writer.ZeroSigned(field.key)
-		default:
-			writer.Zero(field.key)
-		}
+		writer.Zero(field.key)
 		return
 	}
 	writeValue(writer, field.key, field.elemOp, pointee, packed)
-}
-
-// signedOp says the field is read back through Int rather than through Uint,
-// which is what decides the shape an explicit zero has to take. Floats are not
-// signed here: they ride in the unsigned field as a reversed bit pattern.
-func signedOp(op fieldOp) bool {
-	switch op {
-	case opInt8, opInt16, opInt32, opInt64:
-		return true
-	}
-	return false
 }
 
 func appendPointerWide(writer *wire.Writer8, field *planField, at unsafe.Pointer, packed bool) {

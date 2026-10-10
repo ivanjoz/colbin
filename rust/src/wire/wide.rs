@@ -20,7 +20,7 @@
 //! 0 vvvvvvv                   the value, 0..127, no payload
 //! 1 ccc dddd                  class ccc, detail dddd
 //!
-//! class 0 INT      [pos:1][n:3]         n magnitude bytes, as K4
+//! class 0 INT      [pos:1][n:3]         n magnitude bytes
 //! class 1 BLOB     [enc:2][lw:2]        [size: lw] then size bytes
 //! class 2 VEC      [w:2][pos:1][lw:1]   [bytelen: lw] then the elements
 //! class 3 COL      [kind:2][lw:2]       [bytelen: lw] then a blocked column
@@ -35,10 +35,9 @@
 //! and one load rather than a loop whose trip count is data.
 
 use super::{
-    ELEMENT_SIZE_ESCAPE, INLINE_COMPOSITE_LENGTH, INLINE_ELEMENT_SIZE, INT_POSITIVE_FLAG, Integer,
-    MAGNITUDE_WIDTH, Mark, append_array, append_count, append_elements, append_magnitude,
-    array_plan_of, count_bytes, le_uint, length_code_for, narrow::widen_length, read_count,
-    size_code_for,
+    ELEMENT_SIZE_ESCAPE, INLINE_ELEMENT_SIZE, INT_POSITIVE_FLAG, Integer, MAGNITUDE_WIDTH, Mark,
+    append_array, append_count, append_elements, append_magnitude, array_plan_of, count_bytes,
+    le_uint, length_code_for, read_count, size_code_for,
 };
 use crate::{Error, column, packed5};
 use alloc::borrow::ToOwned;
@@ -177,6 +176,21 @@ pub(super) fn read_varint_at(buf: &[u8], at: usize, detail: u8) -> Option<(u64, 
 
 pub(super) const fn descriptor(class: u8, detail: u8) -> u8 {
     DESC_EXPLICIT | class << 4 | detail
+}
+
+/// What a composite's reserved length byte holds before the body grows past it.
+const INLINE_COMPOSITE_LENGTH: usize = 0xFF;
+
+/// Turns a one-byte length placeholder into four, shifting the body up to make
+/// room, and ORs `lw = 2` into the descriptor in front of it — which is where a
+/// wide length says its own width.
+#[allow(clippy::cast_possible_truncation)]
+fn widen_length(buf: &mut Vec<u8>, mark: Mark, body: usize) {
+    buf.extend_from_slice(&[0, 0, 0]);
+    let end = buf.len() - 3;
+    buf.copy_within(mark.at + 1..end, mark.at + 4);
+    buf[mark.at..mark.at + 4].copy_from_slice(&(body as u32).to_le_bytes());
+    buf[mark.at - 1] |= 2;
 }
 
 /// Appends fields with eight-bit keys. Like [`super::Writer`] it holds no state

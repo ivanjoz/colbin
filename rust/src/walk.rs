@@ -201,11 +201,14 @@ impl<'s> Walker<'s> {
         let mut reader = Reader::new(body);
         let mut seen = alloc::vec![false; plan.fields.len()];
         while reader.more() {
-            let key = reader.key();
-            // Four descriptor bits have no room for a class, so nothing can size
-            // a field it cannot classify: an unknown narrow key ends the decode
-            // rather than being stepped over.
-            let index = plan.field_of(key).ok_or(Error::UnknownKey(key))?;
+            let Some(index) = plan.field_of(reader.key()) else {
+                // The nibble sizes the field whatever its type, so a key the
+                // schema does not list is stepped over exactly as a wide one is:
+                // a type that dropped a field still reads its old rows.
+                reader.skip();
+                reader.err()?;
+                continue;
+            };
             seen[index] = true;
             self.write_key(plan_at, index);
             let field = plan.fields[index].clone();
@@ -413,8 +416,16 @@ impl<'s> Walker<'s> {
                 self.text_array(&values);
             }
             o if plan::array_element_op(o) != plan::OP_COUNT => {
+                // A narrow array's form is its element type's, and the op is the
+                // only element type a walk has: it says whether the elements are
+                // two's complement and how wide one may be.
+                let element = plan::array_element_op(o);
                 let mut values: Vec<i64> = Vec::new();
-                reader.ints_into(&mut values);
+                reader.ints_into_as(
+                    &mut values,
+                    plan::is_signed_op(element),
+                    plan::width_of_op(element),
+                );
                 self.int_array(&values, o);
             }
             o => return Err(Error::UnwalkableOp(o)),
@@ -831,8 +842,11 @@ impl<'s> Walker<'s> {
         let plan = self.plan_at(at)?;
         let mut gathered = Gathered::new(plan.fields.len());
         while columns.more() {
-            let key = columns.key();
-            let index = plan.field_of(key).ok_or(Error::UnknownKey(key))?;
+            let Some(index) = plan.field_of(columns.key()) else {
+                columns.skip();
+                columns.err()?;
+                continue;
+            };
             let op = plan.fields[index].op;
             gathered.take(&mut columns, index, op, rows);
             columns.err()?;

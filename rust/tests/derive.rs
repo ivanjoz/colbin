@@ -41,20 +41,20 @@ fn the_benchmark_record_is_the_bytes_internals_documents() {
         ..Charge::colbin_zero()
     };
     let message = charge.encode();
-    // The benchmark record in ten bytes: an unsigned field spends no sign bit
-    // (INTERNALS.md §3.1), so all sixteen nibble codes
-    // carry information and 0..=7 are the value itself. 7 and 5 are therefore a
-    // whole field in one byte each. The same bytes are pinned against Go in
+    // The benchmark record in twelve bytes. The nibble sizes the field
+    // (INTERNALS.md §3.1): 0..3 are the values 1..4 inline and 4..11 count the
+    // bytes that follow, so every value here is past the inline range and
+    // carries one or two. The same bytes are pinned against Go in
     // tests/vectors.rs under `charge.benchmark`.
     assert_eq!(
         message,
         vec![
             0xD0, // root: STRUCT, narrow keys — the frame bounds it
-            0x07, // key 0, the value 7 inline
-            0x18, 0x2A, // key 1, one magnitude byte: 42
-            0x28, 0x67, // key 2, one magnitude byte: 103
-            0x35, // key 3, the value 5 inline
-            0x69, 0x39, 0x01, // key 6, two magnitude bytes: 0x0139, low byte first
+            0x04, 0x07, // key 0, one byte: 7
+            0x14, 0x2A, // key 1, one byte: 42
+            0x24, 0x67, // key 2, one byte: 103
+            0x34, 0x05, // key 3, one byte: 5
+            0x65, 0x39, 0x01, // key 6, two bytes: 0x0139, low byte first
         ]
     );
     assert_eq!(Charge::decode(&message).expect("decode"), charge);
@@ -454,8 +454,8 @@ fn a_wide_reader_steps_over_a_field_it_does_not_know() {
     );
 }
 
-/// The narrow width cannot: four descriptor bits have no room for a class, so
-/// nothing can size a field it cannot classify.
+/// And so can the narrow one: the nibble says how long a field is whatever its
+/// type, so a type that dropped a field still reads the rows written before.
 #[derive(Colbin, Debug, PartialEq)]
 struct NarrowOne {
     #[cb(1)]
@@ -463,7 +463,7 @@ struct NarrowOne {
 }
 
 #[test]
-fn a_narrow_reader_refuses_a_field_it_does_not_know() {
+fn a_narrow_reader_skips_a_field_it_does_not_know() {
     let two = Charge {
         company_id: 1,
         user_id: 2,
@@ -471,8 +471,8 @@ fn a_narrow_reader_refuses_a_field_it_does_not_know() {
     };
     assert_eq!(
         NarrowOne::decode(&two.encode()),
-        Err(Error::UnknownKey(1)),
-        "an unknown narrow key ends the run"
+        Ok(NarrowOne { first: 1 }),
+        "an unknown narrow key is stepped over"
     );
 }
 

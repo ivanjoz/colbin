@@ -123,12 +123,14 @@ func writeValue(writer *wire.Writer, key uint8, op fieldOp, at unsafe.Pointer, p
 }
 
 // readScalars reads a simple plan. See scalars.go.
-func readScalars(reader *wire.Reader, plan *typePlan, record unsafe.Pointer) (unknown uint8, ok bool) {
+func readScalars(reader *wire.Reader, plan *typePlan, record unsafe.Pointer) {
 	for reader.More() {
-		key := reader.Key()
-		field := plan.find(key)
+		field := plan.find(reader.Key())
 		if field == nil {
-			return key, false
+			if !reader.Skip() {
+				return
+			}
+			continue
 		}
 		at := unsafe.Add(record, field.offset)
 		switch field.op {
@@ -178,7 +180,6 @@ func readScalars(reader *wire.Reader, plan *typePlan, record unsafe.Pointer) (un
 			reader.Fail(errNotValueOp(field.op))
 		}
 	}
-	return 0, true
 }
 
 // readValue reads one value op, and reports false for an op that is not
@@ -399,8 +400,7 @@ func writeValueWide(writer *wire.Writer8, key uint8, op fieldOp, at unsafe.Point
 // readScalarsWide reads a simple plan. See scalars.go.
 func readScalarsWide(reader *wire.Reader8, plan *typePlan, record unsafe.Pointer) {
 	for reader.More() {
-		key := reader.Key()
-		field := plan.find(key)
+		field := plan.find(reader.Key())
 		if field == nil {
 			if !reader.Skip() {
 				return

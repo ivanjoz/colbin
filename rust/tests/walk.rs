@@ -125,3 +125,192 @@ fn a_corrupted_byte_is_refused_or_renders_something_well_formed() {
     }
     assert!(seen > 0);
 }
+
+// ---- unknown narrow keys ------------------------------------------------------
+//
+// The nibble says how long a narrow field is whatever its type, so a reader
+// whose schema has lost a field steps over it exactly as a wide reader does.
+// Each shape below is written under a key the reading schema does not list,
+// between two it does; the walk must land on the second one every time.
+
+use colbin::plan::{OP_INT64, OP_STRING, OP_STRUCTS, OP_UINT32, Plan, PlanField};
+use colbin::wire::Writer;
+
+/// A schema that knows key 0 (`a`, a `u32`), key 15 (`z`, a string) and key 14
+/// (`rows`, a slice of a struct whose only field is key 0, `n`, an `i64`).
+fn reader_schema() -> section::Schema {
+    let mut root = Plan::default();
+    root.fields = vec![
+        PlanField {
+            key: 0,
+            op: OP_UINT32,
+            ..PlanField::default()
+        },
+        PlanField {
+            key: 14,
+            op: OP_STRUCTS,
+            sub: Some(1),
+            ..PlanField::default()
+        },
+        PlanField {
+            key: 15,
+            op: OP_STRING,
+            ..PlanField::default()
+        },
+    ];
+    root.names = vec!["a".into(), "rows".into(), "z".into()];
+    root.finish();
+    let mut row = Plan::default();
+    row.fields = vec![PlanField {
+        key: 0,
+        op: OP_INT64,
+        ..PlanField::default()
+    }];
+    row.names = vec!["n".into()];
+    row.finish();
+    section::Schema {
+        plans: vec![root, row],
+        size: 0,
+    }
+}
+
+/// Writes one field under the key it is given.
+type WriteUnder = fn(&mut Writer<'_>, u8);
+
+/// Every shape a narrow field can take, each written under `key`.
+fn unknown_shapes() -> Vec<(&'static str, WriteUnder)> {
+    vec![
+        ("uint", |w, key| w.u64(key, 70_000)),
+        ("inline uint", |w, key| w.u64(key, 3)),
+        ("negative int", |w, key| w.i64(key, -300)),
+        ("minus one", |w, key| w.i64(key, -1)),
+        ("short string", |w, key| w.string(key, "abc")),
+        ("long string", |w, key| w.string(key, &"x".repeat(300))),
+        ("packed string", |w, key| {
+            let at = w.buf.len();
+            w.packed_string(key, "the quick brown fox jumps over the lazy dog");
+            assert_eq!(w.buf[at] & 0b1111, 0b1101, "the string really packed");
+        }),
+        ("int array", |w, key| w.ints(key, &[-1_i32, 70_000, 3])),
+        ("string array", |w, key| w.strings(key, &["a", "", "ccc"])),
+        ("explicit zero", |w, key| w.zero(key)),
+        ("struct", |w, key| {
+            let mark = w.open_struct(key);
+            {
+                let mut inner = Writer::new(w.buf);
+                inner.u64(0, 9);
+                inner.string(1, "inner");
+            }
+            w.close(mark);
+        }),
+        ("wide struct", |w, key| {
+            let mark = w.open_struct_wide(key);
+            {
+                let mut inner = colbin::wire::Writer8::new(w.buf);
+                inner.u64(200, 9);
+            }
+            w.close(mark);
+        }),
+        ("list", |w, key| {
+            let list = w.open_list(key, 2);
+            for value in [1_u64, 2] {
+                let element = w.open_element();
+                Writer::new(w.buf).u64(0, value);
+                w.close_element(element);
+            }
+            w.close(list);
+        }),
+        ("table", |w, key| {
+            let table = w.open_table(key, 8);
+            w.column(0, &[1_i64, 2, 3, 4, 5, 6, 7, 8]);
+            w.strings(1, &["a"; 8]);
+            w.close(table);
+        }),
+        ("map", |w, key| {
+            let map = w.open_map(key, 2);
+            w.element_string("k");
+            w.element_int(-7);
+            w.element_string("l");
+            w.element_int(70_000);
+            w.close(map);
+        }),
+        ("long struct", |w, key| {
+            let mark = w.open_struct(key);
+            Writer::new(w.buf).string(0, &"y".repeat(70_000));
+            w.close(mark);
+        }),
+    ]
+}
+
+#[test]
+fn an_unknown_narrow_key_of_every_shape_is_stepped_over() {
+    let schema = reader_schema();
+    for (name, write) in unknown_shapes() {
+        let mut body = Vec::new();
+        {
+            let mut w = Writer::new(&mut body);
+            w.u32(0, 7);
+            write(&mut w, 1);
+            w.string(15, "end");
+        }
+        let json = walk::to_json(&schema, &body, false).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            String::from_utf8(json).expect("UTF-8"),
+            r#"{"a":7,"z":"end","rows":null}"#,
+            "{name}",
+        );
+    }
+}
+
+#[test]
+fn every_shape_at_once_is_stepped_over() {
+    let schema = reader_schema();
+    let shapes = unknown_shapes();
+    let mut body = Vec::new();
+    {
+        let mut w = Writer::new(&mut body);
+        w.u32(0, 7);
+        // Keys 1..=13, wrapping onto the shapes that did not fit; none of them
+        // is one the schema lists.
+        for (at, (_, write)) in shapes.iter().enumerate() {
+            write(&mut w, 1 + (at % 13) as u8);
+        }
+        w.string(15, "end");
+    }
+    let json = walk::to_json(&schema, &body, false).expect("walk");
+    assert_eq!(
+        String::from_utf8(json).expect("UTF-8"),
+        r#"{"a":7,"z":"end","rows":null}"#,
+    );
+}
+
+/// A table column the row type no longer declares is stepped over too, and the
+/// rows still carry the columns it does.
+#[test]
+fn an_unknown_narrow_column_is_stepped_over() {
+    let schema = reader_schema();
+    let mut body = Vec::new();
+    {
+        let mut w = Writer::new(&mut body);
+        let table = w.open_table(14, 8);
+        w.strings(1, &["gone"; 8]);
+        w.column(0, &[1_i64, 2, 3, 4, 5, 6, 7, -8]);
+        w.column(2, &[9_i64; 8]);
+        w.close(table);
+    }
+    let json = walk::to_json(&schema, &body, false).expect("walk");
+    assert_eq!(
+        String::from_utf8(json).expect("UTF-8"),
+        r#"{"rows":[{"n":1},{"n":2},{"n":3},{"n":4},{"n":5},{"n":6},{"n":7},{"n":-8}],"a":0,"z":""}"#,
+    );
+}
+
+/// What the walk refuses is a field it *does* know written in a form its type
+/// does not have — not a field it does not know.
+#[test]
+fn a_known_narrow_key_in_the_wrong_form_is_refused() {
+    let schema = reader_schema();
+    let mut body = Vec::new();
+    Writer::new(&mut body).i64(0, -300); // `a` is a u32
+    assert!(walk::to_json(&schema, &body, false).is_err());
+}

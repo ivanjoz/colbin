@@ -1501,3 +1501,70 @@ holder is zeroed per entry, or a field one entry omits would keep the last
 one's. `map[K]*Struct` stays refused, since a nil value inside a map has no
 form. The Rust walk renders a wide map of structs and still refuses every
 narrow map; the derive does not do maps of structs.
+
+## A narrow nibble that sizes the field
+
+**Context** — A record type in an application dropped a field, id 6 of seven, and
+every row already stored stopped decoding: `message holds field id 5, which
+types.UserAccess does not declare, and a narrow key cannot be skipped`. (The id in
+that message was also one short; 0.4 fixed the print, not the cause.) This was the
+documented trade — a K4 nibble meant something different per type, so nothing
+could size a field the reader did not know — but the documented escape, "an id
+above sixteen puts the type on K8", does nothing for rows already written narrow.
+A type with ids 1..16 could never lose a field.
+
+**Decision** — The nibble now says how long the field is and the type says only
+what the bytes mean (INTERNALS §3.1): `0..3` carries no payload, `4..11` carries
+`nibble − 3` bytes, and `12..15` is a length form whose two low bits are a
+per-type flag. Every narrow field is skippable with one branch, and an unknown
+narrow key is skipped exactly as a wide one is.
+
+Something had to give four codes to the length form, and four variants of what
+were measured, each by instrumenting every narrow writer to record the bytes it
+wrote next to what the variant would write for the same value. Two datasets: the
+Medium corpus (2.8 MB, mostly unsigned fields), and the same values typed the way
+the application that hit this types its records — every integer signed: `int32`
+ids, `int8` / `int16` codes. Its types hold 200 `int32`, 66 `int8`, 59 `int16`
+and 53 `int64` fields against one unsigned.
+
+| variant | corpus | signed corpus |
+|---|---:|---:|
+| A: inline 0..3, signed fields zigzagged | +0.85% | 0.00% |
+| **B: inline 1..4, negatives in the length form** | **+0.02%** | **−1.29%** |
+| C: inline 1..6, one flag bit | −0.15% | −1.5% |
+| D: inline 1..5, three length codes | −0.07% | −1.4% |
+
+**A** is the obvious design and lost: zigzag charges a bit to every positive
+value of a signed field — cents, timestamps, `int32` ids — and those outnumber
+negatives everywhere measured. **B** keeps positives as unsigned magnitudes and
+sends a negative other than −1 through the length form, a byte more than before.
+Zero gives up its inline code because the writer never writes a zero except
+behind a pointer, where it now costs two bytes through the empty length form.
+A string array drops its count, which the reader recovers by walking the element
+sizes it walks anyway; with the count, B was 0.23% larger.
+
+**C** wins a little more inline range but has a single flag bit, so packed5's
+opening case and an integer array's width move into the body: with packed5 on it
+was 3.5% *larger* on products. **D** is 0.1% smaller than B on these datasets but
+puts an integer array's width in the body, a byte per array — the corpus has no
+integer arrays and the application has eighteen fields of them. B is what was
+built: every flag fits the header and the rule is one sentence.
+
+Where B's bytes go, on both datasets together:
+
+| | fields | bytes |
+|---|---:|---:|
+| signed integers: 1..3 now inline, they cost two bytes before | 883 728 | −31 182 |
+| strings: 1..8 bytes carry no length | 38 130 | −7 742 |
+| composite lengths: 254 and up take 3 bytes, not 4 | 43 602 | −818 |
+| unsigned 5..7: they were inline | 258 429 | +6 840 |
+
+The signed row is the old format's own debt: a signed `+1` cost two bytes and
+`−1` one, because `[pos][n:3]` spent code 0 on "magnitude one" and the sign bit
+on the rare case.
+
+**What it cost** — The narrow format changed, so 0.6 reads no narrow message an
+earlier version wrote, and the reverse. Not measured by either dataset, and
+therefore the places to look if a real one disagrees: negative values (a byte
+more each, except −1), explicit zeros (two bytes where an unsigned one was one),
+and integer arrays (modelled at no change).

@@ -140,8 +140,11 @@ pub fn to_buffer(schema: &Schema, message: &[u8], wide: bool) -> Result<Option<V
         let mut columns = Reader::new(body);
         let mut gathered = Gathered::new(sub_plan.fields.len());
         while columns.more() {
-            let key = columns.key();
-            let index = sub_plan.field_of(key).ok_or(Error::UnknownKey(key))?;
+            let Some(index) = sub_plan.field_of(columns.key()) else {
+                columns.skip();
+                columns.err()?;
+                continue;
+            };
             let op = sub_plan.fields[index].op;
             gathered.take(&mut columns, index, op, rows);
             columns.err()?;

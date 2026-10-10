@@ -17,7 +17,8 @@ pub enum Error {
     /// disagreement, refused rather than truncated into a different,
     /// valid-looking value.
     FieldTooWide,
-    /// A size escape code this version does not assign.
+    /// A string encoding this version does not assign, or a packed string read
+    /// as bytes: its payload is a unit stream, not the text.
     BadEscape,
     /// A descriptor this version does not assign, or one whose class is not the
     /// one the caller asked to read.
@@ -34,10 +35,6 @@ pub enum Error {
     ShortBuffer,
     /// Byte 0 is not a root descriptor this version writes.
     BadRoot(u8),
-    /// A four-bit key run holds a field this type does not declare. Four
-    /// descriptor bits have no room for a class, so nothing can size a field it
-    /// cannot classify — the wide key width is the one that can skip.
-    UnknownKey(u8),
     /// A string field holds bytes that are not UTF-8. The Go codec is byte
     /// exact and permits it; a Rust `String` cannot be.
     NotUtf8,
@@ -94,7 +91,7 @@ impl fmt::Display for Error {
                 out.write_str("colbin: a declared size is larger than this platform can address")
             }
             Self::FieldTooWide => out.write_str("colbin: a field is wider than its declared type"),
-            Self::BadEscape => out.write_str("colbin: unassigned size escape code"),
+            Self::BadEscape => out.write_str("colbin: unassigned or unexpected string encoding"),
             Self::BadDescriptor => out.write_str("colbin: unassigned or mismatched descriptor"),
             Self::BadBitmap => out.write_str("colbin: bad presence bitmap"),
             Self::BadWidth => out.write_str("colbin: column block width above 64 bits"),
@@ -105,11 +102,6 @@ impl fmt::Display for Error {
             Self::BadRoot(byte) => write!(
                 out,
                 "colbin: byte 0 is {byte:#04x}, which is not a root descriptor this version writes"
-            ),
-            Self::UnknownKey(key) => write!(
-                out,
-                "colbin: the message holds field id {key}, which this type does not declare, \
-                 and a narrow key cannot be skipped"
             ),
             Self::NotUtf8 => out.write_str("colbin: a string field is not valid UTF-8"),
             Self::BadSection => out.write_str("colbin: malformed schema section"),
