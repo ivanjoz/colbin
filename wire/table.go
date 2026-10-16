@@ -69,12 +69,20 @@ func allZero(values []int64) bool {
 // all-zero integer column is: its absence already says so, and writing it would
 // cost a byte per row to say nothing.
 func (w *Writer8) StringColumn(key uint8, values []string) {
+	if allEmpty(values) {
+		return
+	}
+	w.Strings(key, values)
+}
+
+// allEmpty is allZero for a string column.
+func allEmpty(values []string) bool {
 	for _, value := range values {
 		if len(value) != 0 {
-			w.Strings(key, values)
-			return
+			return false
 		}
 	}
+	return true
 }
 
 // Table returns the row count and a reader over the columns, which are an

@@ -1174,6 +1174,10 @@ func cases() []caseOut {
 		ID:    1,
 		Lines: lines(40),
 	})
+	add("order.table blank strings", "a table whose string column is empty in every row, so the column is omitted", Order{
+		ID:    5,
+		Lines: blankSKUs(lines(40)),
+	})
 	add("order.empty list", "an empty slice of structs is an absent key", Order{ID: 2})
 	add("ledger.wide rows table", "a narrow parent's table of wide rows, whose columns keep eight-bit keys",
 		Ledger{ID: 3, Lines: wideLines(20)})
@@ -1229,6 +1233,13 @@ func lines(count int) []Line {
 		}
 	}
 	return out
+}
+
+func blankSKUs(rows []Line) []Line {
+	for index := range rows {
+		rows[index].SKU = ""
+	}
+	return rows
 }
 
 func repeat(unit string, times int) string {

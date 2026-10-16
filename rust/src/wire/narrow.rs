@@ -390,6 +390,16 @@ impl<'a> Writer<'a> {
         }
     }
 
+    /// Writes a string column of a narrow-keyed table. It is
+    /// `Writer8::string_column` with four key bits: a column of nothing but empty
+    /// strings is omitted at both widths, since its absence already says so.
+    pub fn string_column<S: AsRef<[u8]>>(&mut self, key: u8, values: &[S]) {
+        if values.iter().all(|value| value.as_ref().is_empty()) {
+            return;
+        }
+        self.strings(key, values);
+    }
+
     /// Writes a field the omit-zero rule would otherwise drop: the length form
     /// with nothing in it, `[key | 1100] 00`.
     ///

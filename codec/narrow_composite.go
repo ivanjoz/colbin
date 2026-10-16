@@ -105,7 +105,7 @@ func appendNarrowTable(writer *wire.Writer, field *planField, at unsafe.Pointer,
 		column := &field.sub.fields[index]
 		if column.op == opString {
 			columns.strings = gatherStrings(columns.strings[:0], slice, field.stride, column.offset)
-			writer.Strings(column.key, columns.strings)
+			writer.StringColumn(column.key, columns.strings)
 			continue
 		}
 		columns.ints = gatherInts(columns.ints[:0], slice, field.stride, column)

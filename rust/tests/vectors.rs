@@ -424,6 +424,20 @@ fn composite_cases() {
         },
     );
     check(
+        "order.table blank strings",
+        &Order {
+            id: 5,
+            lines: lines(40)
+                .into_iter()
+                .map(|line| Line {
+                    sku: String::new(),
+                    ..line
+                })
+                .collect(),
+            ..Order::colbin_zero()
+        },
+    );
+    check(
         "order.empty list",
         &Order {
             id: 2,

@@ -291,11 +291,8 @@ impl<'a, 'd> Builder<'a, 'd> {
                 break;
             }
             if field.op == OP_STRING {
-                // Written even when every row is empty, where a wide table omits
-                // it: that is the narrow table's rule in Go's encoder, and two
-                // encoders must agree on the bytes, not only on what they mean.
                 let values = self.gather_string_column(plan, index, node, rows);
-                w.strings(field.key, &values);
+                w.string_column(field.key, &values);
                 continue;
             }
             let values = self.gather_column(plan, index, node, rows);

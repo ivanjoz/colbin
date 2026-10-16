@@ -415,6 +415,16 @@ func (w *Writer) Column(key uint8, values []int64) {
 	w.Close(mark)
 }
 
+// StringColumn writes a string column under key, for a narrow-keyed table. It is
+// Writer8.StringColumn with four key bits: a column of nothing but empty strings
+// is omitted at both widths, since its absence already says so.
+func (w *Writer) StringColumn(key uint8, values []string) {
+	if allEmpty(values) {
+		return
+	}
+	w.Strings(key, values)
+}
+
 // Column reads a column written by Column. The row count comes from the table,
 // which said it once for every column.
 func (r *Reader) Column(rows int, dst []int64) []int64 {

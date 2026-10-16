@@ -344,11 +344,7 @@ fn write_table<T: Colbin>(w: &mut Writer<'_>, key: u8, values: &[T]) {
             ColumnKind::Str => {
                 strings.clear();
                 strings.extend(values.iter().map(|value| value.colbin_column_str(index)));
-                // A narrow table writes the column even when every row is empty,
-                // where the wide one omits it. Both are legal and each reader
-                // takes its own, but they are not the same bytes, so the two must
-                // not be folded together.
-                w.strings(spec.key, &strings);
+                w.string_column(spec.key, &strings);
             }
             ColumnKind::Int => {
                 ints.clear();

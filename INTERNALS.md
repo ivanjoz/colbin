@@ -339,8 +339,8 @@ wide (a `wire.Writer8` over the same buffer) and four otherwise. A reader takes 
 row type's width from the schema.
 
 An integer column whose every value is zero is not written, and its absence means
-zeros. A wide string column of only empty strings is omitted too; a narrow one is
-written.
+zeros. A string column of only empty strings is omitted too, at both widths, and
+its absence means empty strings.
 
 On the Go side a table is gathered into one reusable column buffer (`scratch`,
 pooled up to 2¹⁶ rows) and scattered straight into the destination slice, so a
@@ -1022,8 +1022,6 @@ What the code does not do yet, or does inconsistently:
   rows is written as a table every decoder refuses.
 - **A table column is scattered into a narrower field without a range check**,
   where a scalar field would be refused.
-- **A narrow table writes a string column of only empty strings**, where a wide
-  one omits it.
 - **The derive does not do `Option<Struct>`, maps of structs or pages**, and the
   JSON encoder writes no maps, blobs or pointers to structs (`rust/ENCODER.md`).
 - **The module's decode diagnostics use code 2**, which the encoder's diagnostics
