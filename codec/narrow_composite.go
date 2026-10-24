@@ -100,16 +100,17 @@ func appendNarrowTable(writer *wire.Writer, field *planField, at unsafe.Pointer,
 		writer.Close(mark)
 		return
 	}
-	columns := buf.reserve(slice.len, field.sub.hasStringColumn())
+	ints, strings := gatherTable(field.sub, slice, field.stride, buf)
+	rows := slice.len
 	for index := range field.sub.fields {
 		column := &field.sub.fields[index]
 		if column.op == opString {
-			columns.strings = gatherStrings(columns.strings[:0], slice, field.stride, column.offset)
-			writer.StringColumn(column.key, columns.strings)
+			writer.StringColumn(column.key, strings[:rows:rows])
+			strings = strings[rows:]
 			continue
 		}
-		columns.ints = gatherInts(columns.ints[:0], slice, field.stride, column)
-		writer.Column(column.key, columns.ints)
+		writer.Column(column.key, ints[:rows:rows])
+		ints = ints[rows:]
 	}
 	writer.Close(mark)
 }

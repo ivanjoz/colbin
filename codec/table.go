@@ -122,8 +122,9 @@ type columnBuffers struct {
 var columnPool sync.Pool // *columnBuffers
 
 // maxPooledRows is the largest buffer the pool keeps, so that one huge table
-// does not pin its memory for the life of the process.
-const maxPooledRows = 1 << 16
+// does not pin its memory for the life of the process. An encode holds a whole
+// table in it (rows times columns), so it is counted in values: 4 MB of int64.
+const maxPooledRows = 1 << 19
 
 // release hands the transposition buffer back. Every scratch that may have
 // reserved one is released when its message is done.
@@ -213,6 +214,19 @@ func (buf *scratch) reserve(rows int, strings bool) *columnBuffers {
 	return columns
 }
 
+// reserveTable grows the transposition buffers to hold a whole table at once:
+// ints values for its integer columns and strings for its string columns.
+func (buf *scratch) reserveTable(ints, strings int) *columnBuffers {
+	columns := buf.reserve(0, false)
+	if cap(columns.ints) < ints {
+		columns.ints = make([]int64, 0, ints)
+	}
+	if cap(columns.strings) < strings {
+		columns.strings = make([]string, 0, strings)
+	}
+	return columns
+}
+
 // hasStringColumn says a row type has a string field, which is what needs the
 // strings half of the transposition buffer.
 func (plan *typePlan) hasStringColumn() bool {
@@ -237,60 +251,127 @@ func appendTableField(writer *wire.Writer8, field *planField, at unsafe.Pointer,
 // table under a wide parent, one under a narrow parent whose rows are wide, and
 // one in a dynamic value.
 func appendColumns(writer *wire.Writer8, plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratch) {
-	columns := buf.reserve(slice.len, plan.hasStringColumn())
+	ints, strings := gatherTable(plan, slice, stride, buf)
+	rows := slice.len
 	for index := range plan.fields {
 		column := &plan.fields[index]
 		if column.op == opString {
-			columns.strings = gatherStrings(columns.strings[:0], slice, stride, column.offset)
-			writer.StringColumn(column.key, columns.strings)
+			writer.StringColumn(column.key, strings[:rows:rows])
+			strings = strings[rows:]
 			continue
 		}
-		columns.ints = gatherInts(columns.ints[:0], slice, stride, column)
-		writer.Column(column.key, columns.ints)
+		writer.Column(column.key, ints[:rows:rows])
+		ints = ints[rows:]
 	}
+}
+
+// gatherChunk is how many rows gatherTable transposes at a time: few enough
+// that their bytes stay in cache while every column is read out of them.
+const gatherChunk = 256
+
+// gatherTable transposes a whole table, every column, in one pass over its
+// rows. It returns the integer columns back to back, rows values each, in
+// field order, and the string columns likewise.
+//
+// Gathering a column at a time walked every row once per column, and a row of
+// a wide table is a cache line or more: sixteen columns read the slice sixteen
+// times, and the gathering was most of a table's encode. In chunks, a chunk's
+// rows are read from memory once and each column is gathered out of cache —
+// still with one specialised loop per column, never a dispatch per value.
+func gatherTable(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratch) ([]int64, []string) {
+	rows := slice.len
+	intColumns, stringColumns := plan.columnCounts()
+	columns := buf.reserveTable(rows*intColumns, rows*stringColumns)
+	ints := columns.ints[:rows*intColumns]
+	strings := columns.strings[:rows*stringColumns]
+	for start := 0; start < rows; start += gatherChunk {
+		end := min(start+gatherChunk, rows)
+		chunk := sliceHeader{data: unsafe.Add(slice.data, uintptr(start)*stride), len: end - start}
+		intAt, stringAt := 0, 0
+		for index := range plan.fields {
+			column := &plan.fields[index]
+			if column.op == opString {
+				gatherStrings(strings[stringAt+start:stringAt+end], &chunk, stride, column.offset)
+				stringAt += rows
+				continue
+			}
+			gatherInts(ints[intAt+start:intAt+end], &chunk, stride, column)
+			intAt += rows
+		}
+	}
+	return ints, strings
+}
+
+// columnCounts is how many of a row type's fields go out as integer columns
+// and how many as string columns.
+func (plan *typePlan) columnCounts() (ints, strings int) {
+	for index := range plan.fields {
+		if plan.fields[index].op == opString {
+			strings++
+		} else {
+			ints++
+		}
+	}
+	return ints, strings
 }
 
 // gatherInts reads one field out of every row, widened to int64. A float's bit
 // pattern travels as an integer: the column codec's transforms find nothing in
 // it, and raw blocks at the element width are what it would have cost anyway.
+//
+// The op is dispatched once per column, not once per value: each case is a
+// loop that only loads and widens, which is what generated code would run.
+// Switching inside the loop cost a third of a table's encode.
 func gatherInts(dst []int64, slice *sliceHeader, stride uintptr, column *planField) []int64 {
-	for row := range slice.len {
-		at := unsafe.Add(slice.data, uintptr(row)*stride+column.offset)
-		var value int64
-		switch column.op {
-		case opBool:
-			if *(*bool)(at) {
-				value = 1
+	n := slice.len
+	dst = dst[:n]
+	base := unsafe.Add(slice.data, column.offset)
+	switch column.op {
+	case opBool:
+		gather(dst, base, stride, func(v bool) int64 {
+			if v {
+				return 1
 			}
-		case opInt8:
-			value = int64(*(*int8)(at))
-		case opInt16:
-			value = int64(*(*int16)(at))
-		case opInt32:
-			value = int64(*(*int32)(at))
-		case opInt64:
-			value = *(*int64)(at)
-		case opUint8:
-			value = int64(*(*uint8)(at))
-		case opUint16:
-			value = int64(*(*uint16)(at))
-		case opUint32:
-			value = int64(*(*uint32)(at))
-		case opUint64:
-			value = int64(*(*uint64)(at))
-		case opFloat32:
-			value = int64(math.Float32bits(*(*float32)(at)))
-		case opFloat64:
-			value = int64(math.Float64bits(*(*float64)(at)))
-		}
-		dst = append(dst, value)
+			return 0
+		})
+	case opInt8:
+		gather(dst, base, stride, func(v int8) int64 { return int64(v) })
+	case opInt16:
+		gather(dst, base, stride, func(v int16) int64 { return int64(v) })
+	case opInt32:
+		gather(dst, base, stride, func(v int32) int64 { return int64(v) })
+	case opInt64:
+		gather(dst, base, stride, func(v int64) int64 { return v })
+	case opUint8:
+		gather(dst, base, stride, func(v uint8) int64 { return int64(v) })
+	case opUint16:
+		gather(dst, base, stride, func(v uint16) int64 { return int64(v) })
+	case opUint32:
+		gather(dst, base, stride, func(v uint32) int64 { return int64(v) })
+	case opUint64:
+		gather(dst, base, stride, func(v uint64) int64 { return int64(v) })
+	case opFloat32:
+		gather(dst, base, stride, func(v float32) int64 { return int64(math.Float32bits(v)) })
+	case opFloat64:
+		gather(dst, base, stride, func(v float64) int64 { return int64(math.Float64bits(v)) })
 	}
 	return dst
 }
 
+// gather loads one field of type T from each of len(dst) rows stride bytes
+// apart, starting at base, widened by widen. widen is a func literal at every
+// call site, so it inlines into the instantiation and the loop has no call.
+func gather[T any](dst []int64, base unsafe.Pointer, stride uintptr, widen func(T) int64) {
+	for row := range dst {
+		dst[row] = widen(*(*T)(unsafe.Add(base, uintptr(row)*stride)))
+	}
+}
+
 func gatherStrings(dst []string, slice *sliceHeader, stride, offset uintptr) []string {
-	for row := range slice.len {
-		dst = append(dst, *(*string)(unsafe.Add(slice.data, uintptr(row)*stride+offset)))
+	dst = dst[:slice.len]
+	base := unsafe.Add(slice.data, offset)
+	for row := range dst {
+		dst[row] = *(*string)(unsafe.Add(base, uintptr(row)*stride))
 	}
 	return dst
 }
