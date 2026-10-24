@@ -120,6 +120,22 @@ import (
 		}
 		out.WriteString("default:\nreturn false\n}\nreturn true\n}\n")
 
+		// The nesting read: writeFields' mirror, one switch per field.
+		reads := narrowReadComposites
+		if width.suffix != "" {
+			reads = wideReadComposites
+		}
+		fmt.Fprintf(&out, "\n// read%sField fills one field of a nested plan: every value op inline, and the\n// composites by call.\n", width.suffix)
+		fmt.Fprintf(&out, "func read%sField(reader *%s, field *planField, record unsafe.Pointer, buf *scratch) {\n", width.suffix, width.reader)
+		out.WriteString("at := unsafe.Add(record, field.offset)\nif field.indirect {\nat = newPointee(field, at)\n}\nswitch field.op {\n")
+		for _, row := range valueOps {
+			readArm(&out, row)
+		}
+		for _, arm := range reads {
+			fmt.Fprintf(&out, "case %s:\n%s\n", arm[0], arm[1])
+		}
+		out.WriteString("default:\nreader.Fail(errNotValueOp(field.op))\n}\n}\n")
+
 		walk := "narrowScalar"
 		if width.suffix != "" {
 			walk = "wideScalar"
@@ -151,6 +167,27 @@ var (
 		{"opPointerStruct", "appendPointerStructField(writer, field, at, buf)"},
 		{"opAny", "appendAnyField(writer, field, at, buf)"},
 		{"opAnys", "appendAnysField(writer, field, at, buf)"},
+	}
+	// A narrow read has no dynamic arms: a dynamic value names its own class,
+	// which four descriptor bits cannot, so a plan holding one is wide and a
+	// narrow message for it is a message for some other type.
+	narrowReadComposites = [][2]string{
+		{"opStruct", "readNarrowStruct(reader, field, at, buf)"},
+		{"opStructs", "readNarrowStructs(reader, field, at, buf)"},
+		{"opMap", "readNarrowMap(reader, field, at, buf)"},
+		{"opPointer", "readPointer(reader, field, at)"},
+		{"opPointerStruct", "readNarrowPointerStruct(reader, field, at, buf)"},
+	}
+	wideReadComposites = [][2]string{
+		{"opStruct", "readStructField(reader, field, at, buf)"},
+		{"opStructs", "readStructsField(reader, field, at, buf)"},
+		{"opMap", "readMapField(reader, field, at, buf)"},
+		{"opPointer", "readPointerWide(reader, field, at)"},
+		{"opPointerStruct", "readPointerStructField(reader, field, at, buf)"},
+		// The key is a field's and everything behind it is a key-less value's,
+		// so the cursor steps onto the value first.
+		{"opAny", "if reader.Payload() {\n*(*any)(at) = readAnyValue(reader, buf)\n}"},
+		{"opAnys", "if reader.Payload() {\n*(*[]any)(at) = readAnyList(reader, buf)\n}"},
 	}
 )
 

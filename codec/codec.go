@@ -828,34 +828,6 @@ func (plan *typePlan) indexKeys() {
 	}
 }
 
-// readField reads one field of a narrow run: the composite arms here, and every
-// value op through readValue (ops_gen.go).
-func readField(reader *wire.Reader, field *planField, record unsafe.Pointer, buf *scratch) {
-	at := unsafe.Add(record, field.offset)
-	if field.indirect {
-		at = newPointee(field, at)
-	}
-	switch field.op {
-	case opStruct:
-		readNarrowStruct(reader, field, at, buf)
-	case opStructs:
-		readNarrowStructs(reader, field, at, buf)
-	case opMap:
-		readNarrowMap(reader, field, at, buf)
-	case opPointer:
-		readPointer(reader, field, at)
-	case opPointerStruct:
-		readNarrowPointerStruct(reader, field, at, buf)
-	default:
-		if !readValue(reader, field.op, at) {
-			// A dynamic value names its own class, which four descriptor bits
-			// cannot, so a plan holding one is wide and a narrow message for it
-			// is a message for some other type.
-			reader.Fail(errNotValueOp(field.op))
-		}
-	}
-}
-
 // FieldIDs reports the id of every field — the number its tag gives, or the one
 // derived from its name, counted from one — for a type the format accepts. A
 // reader in another language needs the numbers, and reading them out of the tags

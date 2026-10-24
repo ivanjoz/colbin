@@ -309,6 +309,71 @@ func readValue(reader *wire.Reader, op fieldOp, at unsafe.Pointer) bool {
 	return true
 }
 
+// readField fills one field of a nested plan: every value op inline, and the
+// composites by call.
+func readField(reader *wire.Reader, field *planField, record unsafe.Pointer, buf *scratch) {
+	at := unsafe.Add(record, field.offset)
+	if field.indirect {
+		at = newPointee(field, at)
+	}
+	switch field.op {
+	case opBool:
+		*(*bool)(at) = reader.Bool()
+	case opInt8:
+		*(*int8)(at) = reader.I8()
+	case opInt16:
+		*(*int16)(at) = reader.I16()
+	case opInt32:
+		*(*int32)(at) = reader.I32()
+	case opInt64:
+		*(*int64)(at) = reader.Int()
+	case opUint8:
+		*(*uint8)(at) = reader.U8()
+	case opUint16:
+		*(*uint16)(at) = reader.U16()
+	case opUint32:
+		*(*uint32)(at) = reader.U32()
+	case opUint64:
+		*(*uint64)(at) = reader.Uint()
+	case opFloat32:
+		*(*float32)(at) = reader.F32()
+	case opFloat64:
+		*(*float64)(at) = reader.F64()
+	case opString:
+		*(*string)(at) = reader.String()
+	case opBytes:
+		*(*[]byte)(at) = append([]byte(nil), reader.Bytes()...)
+	case opInt8s:
+		*(*[]int8)(at) = reader.Int8s(nil)
+	case opInt16s:
+		*(*[]int16)(at) = reader.Int16s(nil)
+	case opInt32s:
+		*(*[]int32)(at) = reader.Int32s(nil)
+	case opInt64s:
+		*(*[]int64)(at) = reader.Ints(nil)
+	case opUint16s:
+		*(*[]uint16)(at) = reader.Uint16s(nil)
+	case opUint32s:
+		*(*[]uint32)(at) = reader.Uint32s(nil)
+	case opUint64s:
+		*(*[]uint64)(at) = reader.Uint64s(nil)
+	case opStrings:
+		*(*[]string)(at) = reader.Strings(nil)
+	case opStruct:
+		readNarrowStruct(reader, field, at, buf)
+	case opStructs:
+		readNarrowStructs(reader, field, at, buf)
+	case opMap:
+		readNarrowMap(reader, field, at, buf)
+	case opPointer:
+		readPointer(reader, field, at)
+	case opPointerStruct:
+		readNarrowPointerStruct(reader, field, at, buf)
+	default:
+		reader.Fail(errNotValueOp(field.op))
+	}
+}
+
 // narrowScalar hands one value op to the walk's sink. See json.go.
 func (w *walker) narrowScalar(reader *wire.Reader, op fieldOp) {
 	switch op {
@@ -661,6 +726,79 @@ func readValueWide(reader *wire.Reader8, op fieldOp, at unsafe.Pointer) bool {
 		return false
 	}
 	return true
+}
+
+// readWideField fills one field of a nested plan: every value op inline, and the
+// composites by call.
+func readWideField(reader *wire.Reader8, field *planField, record unsafe.Pointer, buf *scratch) {
+	at := unsafe.Add(record, field.offset)
+	if field.indirect {
+		at = newPointee(field, at)
+	}
+	switch field.op {
+	case opBool:
+		*(*bool)(at) = reader.Bool()
+	case opInt8:
+		*(*int8)(at) = reader.I8()
+	case opInt16:
+		*(*int16)(at) = reader.I16()
+	case opInt32:
+		*(*int32)(at) = reader.I32()
+	case opInt64:
+		*(*int64)(at) = reader.Int()
+	case opUint8:
+		*(*uint8)(at) = reader.U8()
+	case opUint16:
+		*(*uint16)(at) = reader.U16()
+	case opUint32:
+		*(*uint32)(at) = reader.U32()
+	case opUint64:
+		*(*uint64)(at) = reader.Uint()
+	case opFloat32:
+		*(*float32)(at) = reader.F32()
+	case opFloat64:
+		*(*float64)(at) = reader.F64()
+	case opString:
+		*(*string)(at) = reader.String()
+	case opBytes:
+		*(*[]byte)(at) = append([]byte(nil), reader.Bytes()...)
+	case opInt8s:
+		*(*[]int8)(at) = reader.Int8s(nil)
+	case opInt16s:
+		*(*[]int16)(at) = reader.Int16s(nil)
+	case opInt32s:
+		*(*[]int32)(at) = reader.Int32s(nil)
+	case opInt64s:
+		*(*[]int64)(at) = reader.Ints(nil)
+	case opUint16s:
+		*(*[]uint16)(at) = reader.Uint16s(nil)
+	case opUint32s:
+		*(*[]uint32)(at) = reader.Uint32s(nil)
+	case opUint64s:
+		*(*[]uint64)(at) = reader.Uint64s(nil)
+	case opStrings:
+		*(*[]string)(at) = reader.Strings(nil)
+	case opStruct:
+		readStructField(reader, field, at, buf)
+	case opStructs:
+		readStructsField(reader, field, at, buf)
+	case opMap:
+		readMapField(reader, field, at, buf)
+	case opPointer:
+		readPointerWide(reader, field, at)
+	case opPointerStruct:
+		readPointerStructField(reader, field, at, buf)
+	case opAny:
+		if reader.Payload() {
+			*(*any)(at) = readAnyValue(reader, buf)
+		}
+	case opAnys:
+		if reader.Payload() {
+			*(*[]any)(at) = readAnyList(reader, buf)
+		}
+	default:
+		reader.Fail(errNotValueOp(field.op))
+	}
 }
 
 // wideScalar hands one value op to the walk's sink. See json.go.

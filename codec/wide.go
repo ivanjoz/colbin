@@ -56,40 +56,6 @@ func appendWide(writer *wire.Writer8, plan *typePlan, record unsafe.Pointer, buf
 	writeFieldsWide(writer, plan, record, buf)
 }
 
-// readWideField is readField for the wide key width.
-func readWideField(reader *wire.Reader8, field *planField, record unsafe.Pointer, buf *scratch) {
-	at := unsafe.Add(record, field.offset)
-	if field.indirect {
-		at = newPointee(field, at)
-	}
-	switch field.op {
-	case opStruct:
-		readStructField(reader, field, at, buf)
-	case opStructs:
-		readStructsField(reader, field, at, buf)
-	case opMap:
-		readMapField(reader, field, at, buf)
-	case opPointer:
-		readPointerWide(reader, field, at)
-	case opPointerStruct:
-		readPointerStructField(reader, field, at, buf)
-	case opAny:
-		// The key is a field's and everything behind it is a key-less value's,
-		// so the cursor steps onto the value first.
-		if reader.Payload() {
-			*(*any)(at) = readAnyValue(reader, buf)
-		}
-	case opAnys:
-		if reader.Payload() {
-			*(*[]any)(at) = readAnyList(reader, buf)
-		}
-	default:
-		if !readValueWide(reader, field.op, at) {
-			reader.Fail(errNotValueOp(field.op))
-		}
-	}
-}
-
 // unmarshalWide decodes a wide-key message into an already-zeroed record.
 //
 // A key the plan does not declare is *skipped* rather than refused: the
