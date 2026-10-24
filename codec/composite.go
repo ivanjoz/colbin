@@ -180,14 +180,26 @@ func readStructsField(reader *wire.Reader8, field *planField, at unsafe.Pointer,
 // elements than its bytes hold, and a table's rows come out of the message's
 // budget — so what this allocates is bounded by the message and the type.
 //
-// It is published into the field before it is filled, not after: a
-// reflect.MakeSlice result is not addressable, and the field is what keeps the
+// It is grown in the field itself rather than made by reflect.MakeSlice, whose
+// Value holds the new slice's header on the heap: one allocation more per slice,
+// which on a list of orders each with its lines was half of a decode's
+// allocations once the strings stopped taking one each. Grow zeroes the elements
+// it adds. An empty list is still a non-nil empty slice, as MakeSlice made it.
+//
+// The slice is in the field before it is filled, and the field is what keeps the
 // backing array reachable while the elements are written into it. A failure part
 // way therefore leaves a slice whose tail is zero, which is why a caller must
 // check Err before reading one.
 func newSlice(field *planField, at unsafe.Pointer, count int) {
-	slice := reflect.MakeSlice(field.sliceType, count, count)
-	*(*sliceHeader)(at) = sliceHeader{data: slice.UnsafePointer(), len: count, cap: count}
+	if count == 0 {
+		slice := reflect.MakeSlice(field.sliceType, 0, 0)
+		*(*sliceHeader)(at) = sliceHeader{data: slice.UnsafePointer()}
+		return
+	}
+	*(*sliceHeader)(at) = sliceHeader{}
+	slice := reflect.NewAt(field.sliceType, at).Elem()
+	slice.Grow(count)
+	slice.SetLen(count)
 }
 
 // readRun fills a record from a key run, which is what a nested struct's body
