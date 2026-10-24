@@ -120,14 +120,37 @@ type columnBuffers struct {
 	ints    []int64
 	strings []string
 	decoded []decodedColumn
+	// usedInts and usedStrings are the most of each buffer the current message
+	// has reserved, which is what release judges a large buffer by.
+	usedInts, usedStrings int
 }
 
 var columnPool sync.Pool // *columnBuffers
 
-// maxPooledRows is the largest buffer the pool keeps, so that one huge table
-// does not pin its memory for the life of the process. An encode holds a whole
-// table in it (rows times columns), so it is counted in values: 4 MB of int64.
-const maxPooledRows = 1 << 19
+// The pool keeps a buffer by its size and by what the message that held it
+// used of it, counted in values: an encode holds a whole table in it, rows
+// times columns.
+//
+// Up to maxPooledRows (4 MB of int64) a buffer is always kept. Past it, only
+// while it is earning its size: a message must have used a quarter of it, so a
+// large buffer survives a run of large tables and is dropped by the first small
+// one, rather than being handed from small table to small table for the life
+// of the process. Past maxPooledValues it is never kept.
+//
+// Dropping one large buffer early costs one allocation the next large table
+// would have made anyway; keeping one late costs its memory. And a buffer the
+// pool does keep is not kept forever: sync.Pool lets go of what was not taken
+// within two collections, so an idle process returns it within two GCs.
+const (
+	maxPooledRows   = 1 << 19
+	maxPooledValues = 1 << 23
+)
+
+// keepPooled is whether release puts back a buffer of capacity values of which
+// the message used used.
+func keepPooled(capacity, used int) bool {
+	return capacity <= maxPooledRows || capacity <= maxPooledValues && used >= capacity/4
+}
 
 // release hands the transposition buffer back. Every scratch that may have
 // reserved one is released when its message is done.
@@ -137,11 +160,17 @@ func (buf *scratch) release() {
 		return
 	}
 	buf.columns = nil
-	if cap(columns.ints) > maxPooledRows || cap(columns.strings) > maxPooledRows {
-		return
+	if !keepPooled(cap(columns.ints), columns.usedInts) {
+		columns.ints = nil
 	}
-	// The strings are the caller's, and a pooled buffer must not keep them alive.
-	clear(columns.strings[:cap(columns.strings)])
+	if !keepPooled(cap(columns.strings), columns.usedStrings) {
+		columns.strings = nil
+	}
+	// The strings are the caller's, and a pooled buffer must not keep them
+	// alive. Only what this message reserved can hold any: the rest was cleared
+	// when the buffer last came back.
+	clear(columns.strings[:min(columns.usedStrings, cap(columns.strings))])
+	columns.usedInts, columns.usedStrings = 0, 0
 	columnPool.Put(columns)
 }
 
@@ -208,6 +237,10 @@ func (buf *scratch) reserve(rows int, strings bool) *columnBuffers {
 		}
 		buf.columns = columns
 	}
+	columns.usedInts = max(columns.usedInts, rows)
+	if strings {
+		columns.usedStrings = max(columns.usedStrings, rows)
+	}
 	if cap(columns.ints) < rows {
 		columns.ints = make([]int64, 0, rows)
 	}
@@ -221,6 +254,8 @@ func (buf *scratch) reserve(rows int, strings bool) *columnBuffers {
 // ints values for its integer columns and strings for its string columns.
 func (buf *scratch) reserveTable(ints, strings int) *columnBuffers {
 	columns := buf.reserve(0, false)
+	columns.usedInts = max(columns.usedInts, ints)
+	columns.usedStrings = max(columns.usedStrings, strings)
 	if cap(columns.ints) < ints {
 		columns.ints = make([]int64, 0, ints)
 	}
