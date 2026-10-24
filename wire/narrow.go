@@ -513,15 +513,7 @@ func (w *Writer) Strings(key uint8, values []string) {
 		payload += elementSizeBytes(len(value)) + len(value)
 	}
 	w.Buffer = appendLength(append(w.Buffer, key<<4|nibbleLength), payload)
-	for _, value := range values {
-		if len(value) <= inlineElementSize {
-			w.Buffer = append(w.Buffer, uint8(len(value)))
-		} else {
-			w.Buffer = binary.LittleEndian.AppendUint32(
-				append(w.Buffer, elementSizeEscape), uint32(len(value)))
-		}
-		w.Buffer = append(w.Buffer, value...)
-	}
+	w.Buffer = appendStringElements(w.Buffer, values, payload)
 }
 
 // elementSizeBytes is what an element size costs: one byte, or the escape and

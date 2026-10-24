@@ -42,7 +42,6 @@ package wire
 // shorter.
 
 import (
-	"encoding/binary"
 	"errors"
 	"math"
 	"math/bits"
@@ -525,15 +524,7 @@ func (w *Writer8) Strings(key uint8, values []string) {
 	w.Buffer[len(w.Buffer)-1] |= code
 	w.Buffer = appendMagnitude(w.Buffer, uint64(counted), width)
 	w.Buffer = appendCount(w.Buffer, len(values))
-	for _, value := range values {
-		if len(value) <= inlineElementSize {
-			w.Buffer = append(w.Buffer, uint8(len(value)))
-		} else {
-			w.Buffer = binary.LittleEndian.AppendUint32(
-				append(w.Buffer, elementSizeEscape), uint32(len(value)))
-		}
-		w.Buffer = append(w.Buffer, value...)
-	}
+	w.Buffer = appendStringElements(w.Buffer, values, payload)
 }
 
 // Reader8 walks a message written by Writer8.

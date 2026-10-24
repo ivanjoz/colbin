@@ -841,3 +841,53 @@ func TestNarrowListElementWidths(t *testing.T) {
 		}
 	}
 }
+
+// BenchmarkStrings is a string column the size of TPC-H's: many short
+// values, each its own allocation, from one-byte flags to comments.
+func BenchmarkStrings(b *testing.B) {
+	for _, shape := range []struct {
+		name    string
+		lengths []int
+	}{
+		{"flags", []int{1}},
+		{"short", []int{3, 5, 7, 10, 12, 15, 17}},
+		{"comments", []int{10, 19, 27, 33, 43, 60, 79}},
+		{"long", []int{300, 1000}},
+	} {
+		b.Run(shape.name, func(b *testing.B) {
+			values := make([]string, 1<<16)
+			total := 0
+			for index := range values {
+				size := shape.lengths[index*7919%len(shape.lengths)]
+				values[index] = strings.Clone(strings.Repeat("x", size))
+				total += size
+			}
+			writer := Writer{}
+			b.SetBytes(int64(total))
+			for b.Loop() {
+				writer.Buffer = writer.Buffer[:0]
+				writer.Strings(1, values)
+			}
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*len(values)), "ns/value")
+		})
+	}
+	// A column cut from rows, as a loader that splits lines makes it: each
+	// value inside its own line's allocation, the lines far past the caches,
+	// so that every value is a miss the prefetcher cannot see coming.
+	b.Run("rows", func(b *testing.B) {
+		values := make([]string, 1<<18)
+		total := 0
+		for index := range values {
+			line := strings.Repeat("y", 90+index*7919%80)
+			values[index] = line[40 : 40+10+index%30]
+			total += len(values[index])
+		}
+		writer := Writer{}
+		b.SetBytes(int64(total))
+		for b.Loop() {
+			writer.Buffer = writer.Buffer[:0]
+			writer.Strings(1, values)
+		}
+		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*len(values)), "ns/value")
+	})
+}
