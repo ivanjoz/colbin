@@ -814,16 +814,15 @@ func (r *Reader8) vecBody() (elements []byte, width int, positive, ok bool) {
 	return elements, width, desc&0b10 != 0, true
 }
 
-// Strings copies each element into a Go string.
+// Strings copies each element into a Go string. See Reader.appendStrings.
 func (r *Reader8) Strings(dst []string) []string {
-	count, elements, _ := r.stringList()
-	for range count {
-		element, ok := elements.Element()
-		if !ok {
-			r.fail(elements.err)
-			return dst
-		}
-		dst = append(dst, string(element))
+	count, elements, ok := r.stringList()
+	if !ok {
+		return dst
+	}
+	dst, ok = elements.appendStrings(dst, count)
+	if !ok {
+		r.fail(elements.err)
 	}
 	return dst
 }

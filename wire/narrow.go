@@ -910,15 +910,33 @@ func (r *Reader) StringsBytes(dst [][]byte) [][]byte {
 // Strings copies each element into a Go string.
 func (r *Reader) Strings(dst []string) []string {
 	elements, ok := r.stringElements()
-	for ok && elements.More() {
-		element, ok := elements.Element()
-		if !ok {
-			r.fail(elements.err)
-			return dst
-		}
-		dst = append(dst, string(element))
+	if !ok {
+		return dst
+	}
+	dst, ok = elements.appendStrings(dst, -1)
+	if !ok {
+		r.fail(elements.err)
 	}
 	return dst
+}
+
+// appendStrings appends count elements of r to dst as strings, or every one
+// left for a negative count. The strings share one copy of r's bytes rather
+// than taking one allocation each: a column of strings is a million small
+// allocations otherwise, and the collector's work after them. The price is
+// that one string kept alive keeps its whole list's bytes alive too.
+func (r *Reader) appendStrings(dst []string, count int) ([]string, bool) {
+	whole := string(r.buffer[r.at:])
+	base := r.at
+	for ; count != 0 && (count > 0 || r.More()); count-- {
+		element, ok := r.Element()
+		if !ok {
+			return dst, false
+		}
+		end := r.at - base
+		dst = append(dst, whole[end-len(element):end])
+	}
+	return dst, true
 }
 
 // Width-typed writers.
