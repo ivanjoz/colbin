@@ -402,6 +402,16 @@ func DecodeArray[T Signed](buf []byte, n int, out []T) (int, error) {
 		if len(buf)-position < bytes {
 			return 0, errTruncated
 		}
+		if !unpackVectorised && w <= wideWidth && len(buf)-position >= bytes+8 {
+			// Eight bytes past the block: every value is one load, so it is
+			// read and transformed in one go, with no scratch between.
+			spill := readFused(buf[position:], target[start:end], w, transform, zz, base, &accumulator)
+			if spill != 0 {
+				return 0, errOutOfRange
+			}
+			position += bytes
+			continue
+		}
 		block := scratch[:end-start]
 		unpackRun(buf[position:], block, w)
 		position += bytes
@@ -453,6 +463,50 @@ func headerWritten(header uint8, n int) bool {
 
 // fits reports whether v is in T's range.
 func fits[T Signed](v int64) bool { return int64(T(v)) == v }
+
+// readFused is unpackRun and DecodeArray's inverse transform as one pass: each
+// residual is loaded, masked and turned back into its value in the same
+// iteration, where the two passes wrote a block into scratch and read it back.
+// buf must hold eight bytes past the block, and w be at most wideWidth. It
+// returns the bits the values lost on their way into T, as DecodeArray's own
+// loops do.
+func readFused[T Signed](buf []byte, target []T, w int, transform uint8, zz bool, base int64, accumulator *int64) (spill int64) {
+	mask := uint64(1)<<w - 1
+	position := 0
+	switch {
+	case transform == trFOR:
+		for index := range target {
+			value := int64(uint64(base) + (binary.LittleEndian.Uint64(buf[position>>3:])>>(position&7))&mask)
+			position += w
+			target[index] = T(value)
+			spill |= value ^ int64(T(value))
+		}
+	case transform == trDelta:
+		sum := *accumulator
+		for index := range target {
+			sum += unzigzag((binary.LittleEndian.Uint64(buf[position>>3:]) >> (position & 7)) & mask)
+			position += w
+			target[index] = T(sum)
+			spill |= sum ^ int64(T(sum))
+		}
+		*accumulator = sum
+	case zz:
+		for index := range target {
+			value := unzigzag((binary.LittleEndian.Uint64(buf[position>>3:]) >> (position & 7)) & mask)
+			position += w
+			target[index] = T(value)
+			spill |= value ^ int64(T(value))
+		}
+	default:
+		for index := range target {
+			value := int64((binary.LittleEndian.Uint64(buf[position>>3:]) >> (position & 7)) & mask)
+			position += w
+			target[index] = T(value)
+			spill |= value ^ int64(T(value))
+		}
+	}
+	return spill
+}
 
 // decode inverts encode.
 func decode(u uint64, zz bool) int64 {
