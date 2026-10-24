@@ -1,10 +1,10 @@
 # colbin
 
-colbin is a binary serialization format for Go structs, with Rust and
-JavaScript (WebAssembly) implementations that read and write the same bytes.
+**A binary serialization format faster than and as compact as Protocol
+Buffers. No schema compilation, no dependencies. Go, Rust and JS.**
 
-**It gives the compression and performance of Protocol Buffers without a
-precompilation step and without dependencies in Go.** An optional
+The Go module, the Rust crate and the JavaScript (WebAssembly) package read
+and write the same bytes. An optional
 self-describing mode, colbin/JSON, makes a message convertible to JSON with
 nothing else on hand.
 
