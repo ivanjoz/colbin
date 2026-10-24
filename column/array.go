@@ -156,7 +156,90 @@ func AppendArray[T Signed](out []byte, vals []T) []byte {
 	if len(vals) == 0 {
 		return append(out, trRaw)
 	}
+	if len(vals) <= shortColumn && forcedTransform < 0 {
+		return appendShort(out, vals)
+	}
+	return appendLong(out, vals)
+}
 
+// shortColumn is the longest column appendShort encodes. Past it the scans'
+// kernels win; below it their fixed cost per call, four of them a column, is
+// most of the work.
+const shortColumn = 32
+
+// appendShort is AppendArray for a column of one short block, in two scalar
+// passes rather than the four of the general path, and to the same bytes.
+//
+// It needs no OR of each transform's residuals: the width of an OR is the bit
+// length of its largest member, and the largest residual raw and frame of
+// reference make is the one of the column's maximum or minimum. So the first
+// pass takes the extremes, whether a delta overflows, and the OR of the steps,
+// which have no such shortcut; the second writes the residuals at the width
+// already chosen.
+func appendShort[T Signed](out []byte, vals []T) []byte {
+	n := len(vals)
+	first := int64(vals[0])
+	low, high, previous := first, first, first
+	var steps, overflow uint64
+	for _, value := range vals[1:] {
+		x := int64(value)
+		low, high = min(low, x), max(high, x)
+		step := x - previous
+		overflow |= uint64((x ^ previous) & (x ^ step)) // subOverflows' sign bit
+		steps |= zigzag(step)
+		previous = x
+	}
+
+	zz := low < 0
+	rawWidth := bits.Len64(uint64(high))
+	if zz {
+		rawWidth = bits.Len64(max(zigzag(low), zigzag(high)))
+	}
+	transform, zigzagged, w := trRaw, zz, rawWidth
+	best := 1 + blockBytes(n, rawWidth)
+	frameWidth := bits.Len64(uint64(high) - uint64(low))
+	if frame := 8 + 1 + blockBytes(n, frameWidth); frame < best {
+		transform, zigzagged, w, best = trFOR, false, frameWidth, frame
+	}
+	if overflow>>63 == 0 && n > 1 {
+		stepsWidth := bits.Len64(steps)
+		if cost := 8 + 1 + blockBytes(n-1, stepsWidth); cost < best {
+			transform, zigzagged, w, best = trDelta, true, stepsWidth, cost
+		}
+	}
+	if low == high && constantCost < best {
+		return binary.LittleEndian.AppendUint64(append(out, trConstant), zigzag(low))
+	}
+
+	header := transform
+	if zigzagged {
+		header |= zigzagFlag
+	}
+	out = append(out, header)
+	var scratch [shortColumn]uint64
+	block := scratch[:residualsUnder(transform, n)]
+	switch transform {
+	case trFOR:
+		out = binary.LittleEndian.AppendUint64(out, zigzag(low))
+		for index := range block {
+			block[index] = uint64(int64(vals[index])) - uint64(low)
+		}
+	case trDelta:
+		out = binary.LittleEndian.AppendUint64(out, zigzag(first))
+		for index := range block {
+			block[index] = zigzag(int64(vals[index+1]) - int64(vals[index]))
+		}
+	default:
+		for index := range block {
+			block[index] = encode(int64(vals[index]), zz)
+		}
+	}
+	return packRun(append(out, byte(w)), block, w)
+}
+
+// appendLong is AppendArray for a column past shortColumn, or under the
+// ablation's forced transform.
+func appendLong[T Signed](out []byte, vals []T) []byte {
 	var minimum int64
 	var constant, deltaOverflows bool
 	if wide, ok := any(vals).([]int64); ok && useSIMD {

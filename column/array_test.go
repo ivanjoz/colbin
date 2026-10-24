@@ -828,3 +828,42 @@ func TestArraySizeReport(t *testing.T) {
 		}
 	}
 }
+
+// appendShort is a faster route to appendLong's bytes, never different ones.
+func TestShortColumnsEncodeAsLongOnesDo(t *testing.T) {
+	r := rand.New(rand.NewPCG(2026, 10))
+	shapes := []func(i int) int64{
+		func(i int) int64 { return int64(r.Uint64N(128)) },
+		func(i int) int64 { return int64(r.Uint64()) },
+		func(i int) int64 { return int64(i) * 1000 },
+		func(i int) int64 { return -int64(i) * 1000 },
+		func(i int) int64 { return 1<<40 + int64(r.Uint64N(256)) },
+		func(i int) int64 { return int64(r.Uint64N(1<<20)) - 1<<19 },
+		func(i int) int64 { return 0 },
+		func(i int) int64 { return -1 },
+		func(i int) int64 { return math.MaxInt64 - int64(i) },
+		func(i int) int64 { return math.MinInt64 + int64(i) },
+		func(i int) int64 { return []int64{math.MinInt64, math.MaxInt64, 0, -1}[r.UintN(4)] },
+		func(i int) int64 { return int64(r.Uint64N(3)) },
+	}
+	for _, shape := range shapes {
+		for n := 1; n <= shortColumn; n++ {
+			for range 50 {
+				vals := make([]int64, n)
+				for i := range vals {
+					vals[i] = shape(i)
+				}
+				if short, long := appendShort(nil, vals), appendLong(nil, vals); !bytes.Equal(short, long) {
+					t.Fatalf("%v:\nshort %x\nlong  %x", vals, short, long)
+				}
+				narrow := make([]int16, n)
+				for i, v := range vals {
+					narrow[i] = int16(v)
+				}
+				if short, long := appendShort(nil, narrow), appendLong(nil, narrow); !bytes.Equal(short, long) {
+					t.Fatalf("%v:\nshort %x\nlong  %x", narrow, short, long)
+				}
+			}
+		}
+	}
+}
