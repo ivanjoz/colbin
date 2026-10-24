@@ -391,7 +391,7 @@ func readField(reader *wire.Reader, field *planField, record unsafe.Pointer, buf
 	case opFloat64:
 		*(*float64)(at) = reader.F64()
 	case opString:
-		*(*string)(at) = reader.String()
+		*(*string)(at) = reader.StringIn(&buf.strings)
 	case opBytes:
 		*(*[]byte)(at) = append([]byte(nil), reader.Bytes()...)
 	case opInt8s:
@@ -810,7 +810,7 @@ func readWideField(reader *wire.Reader8, field *planField, record unsafe.Pointer
 	case opFloat64:
 		*(*float64)(at) = reader.F64()
 	case opString:
-		*(*string)(at) = reader.String()
+		*(*string)(at) = reader.StringIn(&buf.strings)
 	case opBytes:
 		*(*[]byte)(at) = append([]byte(nil), reader.Bytes()...)
 	case opInt8s:

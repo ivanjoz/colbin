@@ -90,6 +90,8 @@ type scratch struct {
 	columns *columnBuffers
 	// rowsLeft is a decode's row budget. See rowBudget.
 	rowsLeft int
+	// strings is where a nested decode copies its string fields. See wire.Arena.
+	strings wire.Arena
 	// section is the struct table being built, when the message is carrying one.
 	// A dynamic struct adds itself to it and writes the index; nil means there is
 	// nowhere to put a def, and such a struct goes out as a map of names.

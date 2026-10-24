@@ -78,6 +78,7 @@ func unmarshalWide(body, section []byte, plan *typePlan, record unsafe.Pointer) 
 func unmarshalWideRun(body, section []byte, plan *typePlan, record unsafe.Pointer) error {
 	reader := wire.NewReader8(body)
 	buf := scratch{rawSection: section, rowsLeft: rowBudget(len(body))}
+	buf.strings.Reset(len(body))
 	defer buf.release()
 	readRun(&reader, plan, record, &buf)
 	return reader.Err()

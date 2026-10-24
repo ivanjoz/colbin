@@ -162,6 +162,10 @@ import (
 		fmt.Fprintf(&out, "func read%sField(reader *%s, field *planField, record unsafe.Pointer, buf *scratch) {\n", width.suffix, width.reader)
 		out.WriteString("at := unsafe.Add(record, field.offset)\nif field.indirect {\nat = newPointee(field, at)\n}\nswitch field.op {\n")
 		for _, row := range valueOps {
+			// A nested decode has a scratch, and its strings share its arena.
+			if row.op == opString {
+				row.read = "StringIn(&buf.strings)"
+			}
 			readArm(&out, row)
 		}
 		for _, arm := range reads {

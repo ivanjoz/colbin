@@ -878,6 +878,7 @@ func unmarshalNarrow(body []byte, plan *typePlan, record unsafe.Pointer) error {
 // measured 11 ns on a ten-field record that decodes in 28.
 func unmarshalNarrowRun(reader *wire.Reader, size int, plan *typePlan, record unsafe.Pointer) error {
 	buf := scratch{rowsLeft: rowBudget(size)}
+	buf.strings.Reset(size)
 	defer buf.release()
 	readNarrowRun(reader, plan, record, &buf)
 	return reader.Err()

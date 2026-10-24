@@ -27,6 +27,8 @@ package wire
 // `01` packed5 opening in lowercase, `10` opening in uppercase, `11` refused.
 
 import (
+	"unsafe"
+
 	"github.com/ivanjoz/colbin/packed5"
 )
 
@@ -89,7 +91,11 @@ func (w *Writer8) PackedString(key uint8, value string) {
 // String reads a string written by String or by PackedString: the descriptor's
 // enc code says which, so a reader needs no configuration and cannot be wrong
 // about it.
-func (r *Reader8) String() string {
+func (r *Reader8) String() string { return r.StringIn(nil) }
+
+// StringIn is String with the copy made in a, or in an allocation of its own
+// for a nil a. See Reader.StringIn.
+func (r *Reader8) StringIn(a *Arena) string {
 	if r.at+2 > len(r.buffer) {
 		r.fail(ErrTruncated)
 		return ""
@@ -106,7 +112,10 @@ func (r *Reader8) String() string {
 	r.at = start + size
 	switch enc {
 	case encRaw:
-		return string(r.buffer[start : start+size])
+		if a == nil {
+			return string(r.buffer[start : start+size])
+		}
+		return a.String(r.buffer[start : start+size])
 	case encDictionary:
 		r.fail(ErrBadDescriptor)
 		return ""
@@ -118,7 +127,7 @@ func (r *Reader8) String() string {
 		r.fail(err)
 		return ""
 	}
-	return string(out)
+	return unsafe.String(unsafe.SliceData(out), len(out))
 }
 
 // PackedString writes a string in the packed5 encoding when that makes the field
