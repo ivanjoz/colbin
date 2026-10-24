@@ -3,9 +3,12 @@ package codec
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/ivanjoz/colbin/wire"
 )
 
 type withMaps struct {
@@ -42,6 +45,127 @@ func TestMapsRoundTrip(t *testing.T) {
 	if back.Empty != nil {
 		t.Fatalf("an empty map round-tripped as %v", back.Empty)
 	}
+}
+
+type typedMapAttrs map[string]string
+
+// Maps of basic types have compiled walks (maps_typed.go). They must write the
+// bytes the reflection walk writes and read back what it reads, at both key
+// widths, and refuse a value too wide for the map as it does.
+func TestTypedMapsAgreeWithReflection(t *testing.T) {
+	type narrow struct {
+		A map[string]string  `cb:"1"`
+		B map[int]float64    `cb:"2"`
+		C map[uint32]bool    `cb:"3"`
+		D map[int64]int32    `cb:"4"`
+		E map[string]float32 `cb:"5"`
+		F map[uint64]uint64  `cb:"6"`
+		G map[int32]int      `cb:"7"`
+		H typedMapAttrs      `cb:"8"`
+		I map[string]int64   `cb:"9"`
+	}
+	type wide struct {
+		A map[string]string  `cb:"20"`
+		B map[int]float64    `cb:"21"`
+		C map[uint32]bool    `cb:"22"`
+		D map[int64]int32    `cb:"23"`
+		E map[string]float32 `cb:"24"`
+		F map[uint64]uint64  `cb:"25"`
+		G map[int32]int      `cb:"26"`
+		H typedMapAttrs      `cb:"27"`
+		I map[string]int64   `cb:"28"`
+	}
+	value := narrow{
+		A: map[string]string{"b": "2", "a": "1", "": "", "long": strings.Repeat("x", 300)},
+		B: map[int]float64{-5: 1.5, 3: -0.25, 0: 0},
+		C: map[uint32]bool{9: true, 1: false, 1 << 31: true},
+		D: map[int64]int32{-1 << 40: -7, 1 << 40: 1 << 30},
+		E: map[string]float32{"pi": 3.14, "z": 0},
+		F: map[uint64]uint64{^uint64(0): 1, 0: ^uint64(0)},
+		G: map[int32]int{-3: -1 << 50, 4: 4},
+		H: typedMapAttrs{"k": "v", "j": "w"},
+		I: map[string]int64{"big": 1 << 50},
+	}
+	wideValue := wide(value)
+	for name, root := range map[string]any{"narrow": &value, "wide": &wideValue} {
+		plan, err := planFor(reflect.TypeOf(root).Elem())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var compiled []*mapOps
+		var walk func(plan *typePlan)
+		walk = func(plan *typePlan) {
+			for index := range plan.fields {
+				field := &plan.fields[index]
+				if field.op == opMap {
+					if field.typedMap == nil {
+						t.Fatalf("%s: field %d has no compiled walk, so this tests nothing", name, index)
+					}
+					compiled = append(compiled, field.typedMap)
+				}
+				if field.op == opStruct {
+					walk(field.sub)
+				}
+			}
+		}
+		walk(plan)
+		typed, err := Marshal(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		setTypedMaps(plan, nil)
+		reflected, err := Marshal(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		back := reflect.New(reflect.TypeOf(root).Elem())
+		if err := Unmarshal(typed, back.Interface()); err != nil {
+			t.Fatal(err)
+		}
+		setTypedMaps(plan, compiled)
+		if !bytes.Equal(typed, reflected) {
+			t.Fatalf("%s: the compiled walk wrote other bytes than reflection", name)
+		}
+		compiledBack := reflect.New(reflect.TypeOf(root).Elem())
+		if err := Unmarshal(typed, compiledBack.Interface()); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(compiledBack.Interface(), root) || !reflect.DeepEqual(back.Interface(), root) {
+			t.Fatalf("%s: a typed map did not round-trip", name)
+		}
+	}
+
+	// A value wider than the map's type is refused, not truncated.
+	type tooNarrow struct {
+		I map[string]int32 `cb:"9"`
+	}
+	message, err := Marshal(&value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var into tooNarrow
+	if err := Unmarshal(message, &into); !errors.Is(err, wire.ErrFieldTooWide) {
+		t.Fatalf("a too-wide map value decoded with %v", err)
+	}
+}
+
+// setTypedMaps hands out a plan's map fields' compiled walks in field order,
+// nested plans included, or takes them away for a nil list.
+func setTypedMaps(plan *typePlan, walks []*mapOps) []*mapOps {
+	for index := range plan.fields {
+		field := &plan.fields[index]
+		if field.op == opMap {
+			if walks == nil {
+				field.typedMap = nil
+			} else {
+				field.typedMap, walks = walks[0], walks[1:]
+			}
+		}
+		if field.op == opStruct {
+			walks = setTypedMaps(field.sub, walks)
+		}
+	}
+	return walks
 }
 
 // A map is a composite, so it carries a byte length and a reader that does not

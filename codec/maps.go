@@ -158,6 +158,10 @@ func appendMapField(writer *wire.Writer8, field *planField, at unsafe.Pointer, b
 		return
 	}
 	defer buf.leave()
+	if field.typedMap != nil {
+		field.typedMap.appendWide(writer, field.key, at)
+		return
+	}
 	keys := sortedMapKeys(value)
 	holder := structHolder(field)
 	mark := writer.OpenMap(field.key, len(keys))
@@ -234,6 +238,10 @@ func readMapField(reader *wire.Reader8, field *planField, at unsafe.Pointer, buf
 		return
 	}
 	defer buf.leave()
+	if field.typedMap != nil {
+		reader.Fail(field.typedMap.readWide(&entries, count, at))
+		return
+	}
 	target := reflect.NewAt(field.sliceType, at).Elem()
 	built := reflect.MakeMapWithSize(field.sliceType, count)
 	key := reflect.New(field.sliceType.Key()).Elem()

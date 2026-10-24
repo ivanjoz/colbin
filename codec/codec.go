@@ -89,8 +89,10 @@ type planField struct {
 	stride    uintptr
 	// Pointers only: the op of what is pointed at. See pointer.go.
 	elemOp fieldOp
-	// Maps only: what their keys and values are. See maps.go.
+	// Maps only: what their keys and values are. See maps.go. typedMap is the
+	// map's compiled walks, when its type has them. See maps_typed.go.
 	keyKind, valueKind mapKind
+	typedMap           *mapOps
 	// native says op came from a Go int, uint or uintptr, whose width is the
 	// platform's. The plan reads it at that width; the schema section names the
 	// 64-bit op either way, so a section does not depend on where it was written.
@@ -251,6 +253,7 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 		}
 		op, sub, sliceType, stride, compositeErr := compositeOpFor(fieldType, building)
 		var keyKind, valueKind mapKind
+		var typedMap *mapOps
 		var elemOp fieldOp
 		// A composite that failed to plan is reported as itself. Only
 		// errNotComposite means "try the other kinds" — see errNotComposite. The
@@ -269,7 +272,7 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 					return nil, fmt.Errorf("colbin: %s.%s: %w",
 						typeName(structType), field.Name, err)
 				}
-				op, sliceType = opMap, fieldType
+				op, sliceType, typedMap = opMap, fieldType, typedMapFor(fieldType)
 				if valueKind == mapStruct {
 					// The value's plan, the way a slice of structs holds its
 					// element's: an error in it is reported as itself.
@@ -306,6 +309,7 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 			elemOp:    elemOp,
 			keyKind:   keyKind,
 			valueKind: valueKind,
+			typedMap:  typedMap,
 			native:    isNative(fieldType),
 			indirect:  indirect,
 		})

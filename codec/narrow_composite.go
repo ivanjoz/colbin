@@ -125,6 +125,10 @@ func appendNarrowMap(writer *wire.Writer, field *planField, at unsafe.Pointer, b
 		return
 	}
 	defer buf.leave()
+	if field.typedMap != nil {
+		field.typedMap.appendNarrow(writer, field.key, at)
+		return
+	}
 	holder := structHolder(field)
 	mark := writer.OpenMap(field.key, count)
 	for _, key := range sortedMapKeys(value) {
@@ -305,6 +309,10 @@ func readNarrowMap(reader *wire.Reader, field *planField, at unsafe.Pointer, buf
 		return
 	}
 	defer buf.leave()
+	if field.typedMap != nil {
+		reader.Fail(field.typedMap.readNarrow(&entries, count, at))
+		return
+	}
 	target := reflect.NewAt(field.sliceType, at).Elem()
 	built := reflect.MakeMapWithSize(field.sliceType, count)
 	key := reflect.New(field.sliceType.Key()).Elem()
