@@ -210,15 +210,25 @@ func readRun(reader *wire.Reader8, plan *typePlan, record unsafe.Pointer, buf *s
 		return
 	}
 	defer buf.leave()
+	// The field after the last one first, as in readNarrowRun.
+	fields := plan.fields
+	next := 0
 	for reader.More() {
-		field := plan.find(reader.Key())
-		if field == nil {
+		key := reader.Key()
+		if next < len(fields) && fields[next].key == key {
+			readWideField(reader, &fields[next], record, buf)
+			next++
+			continue
+		}
+		index := plan.findIndex(key)
+		if index < 0 {
 			if !reader.Skip() {
 				return
 			}
 			continue
 		}
-		readWideField(reader, field, record, buf)
+		readWideField(reader, &fields[index], record, buf)
+		next = index + 1
 	}
 }
 

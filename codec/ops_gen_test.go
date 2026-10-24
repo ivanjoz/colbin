@@ -140,6 +140,9 @@ import (
 		// a field as the wide descriptor does.
 		fmt.Fprintf(&out, "\n// readScalars%s reads a simple plan. See scalars.go.\n", width.suffix)
 		fmt.Fprintf(&out, "func readScalars%s(reader *%s, plan *typePlan, record unsafe.Pointer) {\n", width.suffix, width.reader)
+		// The table alone, without the nested walks' check of the field after
+		// the last one first: on a flat record of a few fields that measured
+		// 4% slower, not faster. See readNarrowRun.
 		out.WriteString("for reader.More() {\nfield := plan.find(reader.Key())\nif field == nil {\nif !reader.Skip() {\nreturn\n}\ncontinue\n}\nat := unsafe.Add(record, field.offset)\nswitch field.op {\n")
 		for _, row := range valueOps {
 			readArm(&out, row)

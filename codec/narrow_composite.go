@@ -203,15 +203,27 @@ func readNarrowRun(reader *wire.Reader, plan *typePlan, record unsafe.Pointer, b
 		return
 	}
 	defer buf.leave()
+	// A writer emits fields in the plan's order, omitting the zero ones, so the
+	// field after the last one read is checked before the table: one compare
+	// against a key the field read is about to load anyway.
+	fields := plan.fields
+	next := 0
 	for reader.More() {
-		field := plan.find(reader.Key())
-		if field == nil {
+		key := reader.Key()
+		if next < len(fields) && fields[next].key == key {
+			readField(reader, &fields[next], record, buf)
+			next++
+			continue
+		}
+		index := plan.findIndex(key)
+		if index < 0 {
 			if !reader.Skip() {
 				return
 			}
 			continue
 		}
-		readField(reader, field, record, buf)
+		readField(reader, &fields[index], record, buf)
+		next = index + 1
 	}
 }
 

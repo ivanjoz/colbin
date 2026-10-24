@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/ivanjoz/colbin/wire"
 )
 
 // A narrow reader steps over a key it does not know, which is what lets a type
@@ -299,5 +301,68 @@ func TestATruncatedUnknownNarrowFieldIsRefused(t *testing.T) {
 		if _, err := ToJSON(mustSchema(t, &olderFlat{}), message[:cut]); err == nil {
 			t.Fatalf("a cut at %d of %d inside the unknown field rendered", cut, len(message))
 		}
+	}
+}
+
+// A decode checks the field after the last one it read before its key table,
+// since a writer emits them in order. Fields in another order, repeated, or
+// with unknown keys between them must still land where their keys say, the
+// last copy winning, at both key widths and both in a flat plan and a nested
+// one.
+func TestFieldsOutOfOrderStillLandByKey(t *testing.T) {
+	type inner struct {
+		A int64  `cb:"1"`
+		B string `cb:"2"`
+		C int64  `cb:"3"`
+	}
+	type outer struct {
+		X     int64  `cb:"1"`
+		Inner inner  `cb:"2"`
+		Y     string `cb:"3"`
+	}
+	want := inner{A: 7, B: "bee", C: -9}
+	writeInner := func(field func(key uint8, value int64), text func(key uint8, value string)) {
+		text(1, "stale")
+		field(2, -9)
+		field(9, 12345) // unknown
+		field(0, 1)
+		text(1, "bee")
+		field(0, 7)
+	}
+
+	narrow := wire.Writer{Buffer: []byte{rootStructNarrow}}
+	writeInner(narrow.Int, narrow.String)
+	var flat inner
+	if err := Unmarshal(narrow.Buffer, &flat); err != nil || flat != want {
+		t.Fatalf("narrow flat: %+v, %v", flat, err)
+	}
+
+	narrow = wire.Writer{Buffer: []byte{rootStructNarrow}}
+	narrow.String(2, "why")
+	mark := narrow.OpenStruct(1)
+	writeInner(narrow.Int, narrow.String)
+	narrow.Close(mark)
+	narrow.Int(0, 3)
+	var nested outer
+	if err := Unmarshal(narrow.Buffer, &nested); err != nil || nested != (outer{X: 3, Inner: want, Y: "why"}) {
+		t.Fatalf("narrow nested: %+v, %v", nested, err)
+	}
+
+	wide := wire.Writer8{Buffer: []byte{rootStructWide}}
+	writeInner(wide.Int, wide.String)
+	flat = inner{}
+	if err := Unmarshal(wide.Buffer, &flat); err != nil || flat != want {
+		t.Fatalf("wide flat: %+v, %v", flat, err)
+	}
+
+	wide = wire.Writer8{Buffer: []byte{rootStructWide}}
+	wide.String(2, "why")
+	mark = wide.OpenStructWide(1)
+	writeInner(wide.Int, wide.String)
+	wide.Close(mark)
+	wide.Int(0, 3)
+	nested = outer{}
+	if err := Unmarshal(wide.Buffer, &nested); err != nil || nested != (outer{X: 3, Inner: want, Y: "why"}) {
+		t.Fatalf("wide nested: %+v, %v", nested, err)
 	}
 }
