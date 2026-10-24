@@ -6,10 +6,13 @@ package codec
 import (
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/ivanjoz/colbin/wire"
@@ -123,8 +126,15 @@ type typePlan struct {
 	hasDynamic bool
 	// byKey maps a wire key to an index into fields, or -1. See find.
 	byKey []int16
-	// sizeHint is what Marshal reserves. See planSizeHint.
+	// sizeHint is what Marshal reserves for a record with no slices of structs.
+	// See planSizeHint, and sizeFor for the rest.
 	sizeHint int
+	// structSlices is the index of every field that is a slice of structs held
+	// directly, which is what sizeFor reads the lengths of.
+	structSlices []int32
+	// sizeRatio is what the last encodes came to against sizeFor, in
+	// sizeRatioShift fixed point, or zero before the first. See reserve.
+	sizeRatio atomic.Uint32
 	// canTable says every field of this plan is a column the column codec
 	// carries, which is what lets a slice of it be transposed. See table.go.
 	canTable bool
@@ -353,6 +363,85 @@ func (plan *typePlan) finish() {
 	plan.canTable = plan.transposable()
 	plan.simple = plan.simplePlan()
 	plan.sizeHint = plan.planSizeHint()
+	for index := range plan.fields {
+		if field := &plan.fields[index]; field.op == opStructs && !field.indirect {
+			plan.structSlices = append(plan.structSlices, int32(index))
+		}
+	}
+}
+
+// sizeFor is a starting capacity for encoding record: sizeHint, plus, for each
+// slice of structs the record holds, its length times what its first row is
+// estimated at. It reads lengths and first rows and nothing else, so it costs a
+// few loads rather than the pass over the value an exact size would; where the
+// first row is not typical the buffer grows past the estimate as it would have
+// anyway.
+//
+// A row's sizeHint is a bound on a scalar row, two or three times what a row
+// of small values or a table's compressed column comes to, so the estimate is
+// only where reserve starts: it learns from each encode how far off it is.
+func (plan *typePlan) sizeFor(record unsafe.Pointer) int {
+	return plan.sizeAt(record, 0)
+}
+
+// reserve is the room to make before encoding record, and the estimate it was
+// scaled from, which learn wants back.
+//
+// A message's size is most of what a generated encoder knows in advance and a
+// plan does not; but the same type tends to encode to a similar size per row
+// every time. So the first encode of a type reserves sizeFor's bound, and
+// every later one the bound scaled by what the last encodes came to — the
+// buffer made once and close to right, where a bound alone reserved two or
+// three times the message, and the collector paid for the rest.
+func (plan *typePlan) reserve(record unsafe.Pointer) (need, estimate int) {
+	if len(plan.structSlices) == 0 {
+		return plan.sizeHint, 0
+	}
+	estimate = plan.sizeFor(record)
+	if ratio := plan.sizeRatio.Load(); ratio != 0 {
+		return estimate*int(ratio)>>sizeRatioShift + plan.sizeHint, estimate
+	}
+	return estimate, estimate
+}
+
+// sizeRatioShift is the fixed point sizeRatio is in: 1<<sizeRatioShift is a
+// message exactly as large as its estimate.
+const sizeRatioShift = 12
+
+// learn records how large a message came out against its estimate, with a
+// sixteenth to spare. It writes only when the ratio moves by more than that,
+// so that encodes of one type on many goroutines are not all storing to the
+// same cache line.
+func (plan *typePlan) learn(estimate, actual int) {
+	if estimate <= 0 {
+		return
+	}
+	ratio := min(uint64(actual+actual>>4)<<sizeRatioShift/uint64(estimate), math.MaxUint32)
+	old := uint64(plan.sizeRatio.Load())
+	if ratio > old+old>>4 || ratio < old-old>>4 {
+		plan.sizeRatio.Store(uint32(max(ratio, 1)))
+	}
+}
+
+// sizeEstimateDepth is how far down first rows sizeFor looks. It is a bound
+// rather than the type's depth because a slice can hold itself: x[0].Rows = x.
+const sizeEstimateDepth = 4
+
+func (plan *typePlan) sizeAt(record unsafe.Pointer, depth int) int {
+	total := plan.sizeHint
+	for _, index := range plan.structSlices {
+		field := &plan.fields[index]
+		slice := (*sliceHeader)(unsafe.Add(record, field.offset))
+		if slice.len == 0 {
+			continue
+		}
+		row := field.sub.sizeHint
+		if len(field.sub.structSlices) > 0 && depth < sizeEstimateDepth {
+			row = field.sub.sizeAt(slice.data, depth+1)
+		}
+		total += slice.len * row
+	}
+	return total
 }
 
 // anyDynamic says some field carries a value whose type is not declared — an
@@ -711,10 +800,13 @@ func Marshal(v any) ([]byte, error) {
 	}
 	// One plan lookup, not two: sizing the buffer and writing it need the same
 	// plan, and resolving it twice cost about 12 ns of a 95 ns Marshal.
-	out, err := appendRecord(make([]byte, 0, plan.sizeHint), plan, unsafe.Pointer(value.UnsafeAddr()))
+	record := unsafe.Pointer(value.UnsafeAddr())
+	need, estimate := plan.reserve(record)
+	out, err := appendRecord(make([]byte, 0, need), plan, record)
 	if err != nil {
 		return nil, err
 	}
+	plan.learn(estimate, len(out))
 	return out, nil
 }
 
@@ -946,15 +1038,32 @@ func MustCodec[T any]() *Codec[T] {
 // a reader follows, and an `any` can hold a Go type the format has no form for,
 // or hold itself.
 func (codec *Codec[T]) Append(dst []byte, value *T) ([]byte, error) {
+	record := unsafe.Pointer(value)
+	// Room is made once, up front, the way a generated Marshal sizes its
+	// buffer before writing: a dst too small for the estimate would otherwise
+	// grow by doubling, copying everything written so far each time.
+	out := dst
 	if codec.plan.simple {
-		return appendPlan(dst, codec.plan, unsafe.Pointer(value)), nil
+		if cap(out)-len(out) < codec.plan.sizeHint {
+			out = slices.Grow(out, codec.plan.sizeHint)
+		}
+		return appendPlan(out, codec.plan, record), nil
 	}
-	return appendRecord(dst, codec.plan, unsafe.Pointer(value))
+	need, estimate := codec.plan.reserve(record)
+	if cap(out)-len(out) < need {
+		out = slices.Grow(out, need)
+	}
+	out, err := appendRecord(out, codec.plan, record)
+	if err != nil {
+		return dst, err
+	}
+	codec.plan.learn(estimate, len(out)-len(dst))
+	return out, nil
 }
 
 // Encode is Append onto a fresh buffer.
 func (codec *Codec[T]) Encode(value *T) ([]byte, error) {
-	return codec.Append(make([]byte, 0, codec.plan.sizeHint), value)
+	return codec.Append(nil, value)
 }
 
 // Unmarshal decodes a message into value, zeroing it first: a key the message
