@@ -51,40 +51,46 @@ func residualsUnder(transform uint8, n int) int {
 	return n
 }
 
-// blockedCost is the payload size a transform would produce, block widths and
-// all — which is what the transform has to be scored against. Scoring it by the
-// column's widest residual instead picks frame-of-reference over delta for a
-// column of small ids.
+// blockedCosts is the payload size raw, frame of reference and, when delta is
+// set, delta would produce, block widths and all — which is what a transform
+// has to be scored against. Scoring it by the column's widest residual instead
+// picks frame-of-reference over delta for a column of small ids.
 //
-// One pass over the data per candidate, with the residual inlined into the loop
-// and the block's width taken by OR-ing its residuals together, so there is not
-// even a compare inside.
-func blockedCost[T Signed](vals []T, transform uint8, base int64, zz bool) int {
-	n := residualsUnder(transform, len(vals))
-	total := 0
-	if transform != trRaw {
-		total += 8 // the base, in the clear
-	}
+// One pass for all three: a block's values are loaded once and scored three
+// ways while they are in cache, where a pass per transform walked the column
+// three times. A block's width is taken by OR-ing its residuals together, so
+// there is not even a compare inside. blockedCost, in the tests, is the pass
+// per transform it must agree with.
+func blockedCosts[T Signed](vals []T, base int64, zz, delta bool) (raw, frame, steps int) {
+	n := len(vals)
+	frame, steps = 8, 8 // the base, in the clear
 	for start := 0; start < n; start += blockSize {
 		end := min(start+blockSize, n)
-		var set uint64
-		switch transform {
-		case trFOR:
+		var setRaw, setFrame uint64
+		if zz {
 			for _, value := range vals[start:end] {
-				set |= uint64(int64(value)) - uint64(base)
+				setRaw |= zigzag(int64(value))
+				setFrame |= uint64(int64(value)) - uint64(base)
 			}
-		case trDelta:
-			for index := start; index < end; index++ {
-				set |= zigzag(int64(vals[index+1]) - int64(vals[index]))
-			}
-		default:
+		} else {
 			for _, value := range vals[start:end] {
-				set |= encode(int64(value), zz)
+				setRaw |= uint64(int64(value))
+				setFrame |= uint64(int64(value)) - uint64(base)
 			}
 		}
-		total += 1 + blockBytes(end-start, bits.Len64(set))
+		raw += 1 + blockBytes(end-start, bits.Len64(setRaw))
+		frame += 1 + blockBytes(end-start, bits.Len64(setFrame))
+		// Delta has one residual fewer, so its blocks end one value early and
+		// its last block can be one raw has and it does not.
+		if stepsEnd := min(start+blockSize, n-1); delta && start < stepsEnd {
+			var setSteps uint64
+			for index := start; index < stepsEnd; index++ {
+				setSteps |= zigzag(int64(vals[index+1]) - int64(vals[index]))
+			}
+			steps += 1 + blockBytes(stepsEnd-start, bits.Len64(setSteps))
+		}
 	}
-	return total
+	return raw, frame, steps
 }
 
 // encode applies the header's zigzag bit.
@@ -129,14 +135,13 @@ func AppendArray[T Signed](out []byte, vals []T) []byte {
 		return appendForced(out, vals, uint8(forced), minimum, zz, deltaOverflows)
 	}
 	transform, zigzagged := trRaw, zz
-	best := blockedCost(vals, trRaw, 0, zz)
-	if cost := blockedCost(vals, trFOR, minimum, false); cost < best {
-		transform, zigzagged, best = trFOR, false, cost
+	withDelta := !deltaOverflows && len(vals) > 1
+	best, frame, steps := blockedCosts(vals, minimum, zz, withDelta)
+	if frame < best {
+		transform, zigzagged, best = trFOR, false, frame
 	}
-	if !deltaOverflows && len(vals) > 1 {
-		if cost := blockedCost(vals, trDelta, 0, true); cost < best {
-			transform, zigzagged, best = trDelta, true, cost
-		}
+	if withDelta && steps < best {
+		transform, zigzagged, best = trDelta, true, steps
 	}
 	// Constant is scored rather than short-circuited. It is unbeatable on a long
 	// column and beaten on a short one: three small values are three bytes raw

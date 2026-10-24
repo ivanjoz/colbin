@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
+	"math/bits"
 	"math/rand/v2"
 	"slices"
 	"testing"
@@ -75,6 +76,66 @@ func roundtrip[T Signed](t *testing.T, vals []T) []byte {
 		}
 	}
 	return buf
+}
+
+// blockedCost is one transform's payload size, by a pass of its own: the
+// definition blockedCosts fuses, kept here to hold it to.
+func blockedCost[T Signed](vals []T, transform uint8, base int64, zz bool) int {
+	n := residualsUnder(transform, len(vals))
+	total := 0
+	if transform != trRaw {
+		total += 8
+	}
+	for start := 0; start < n; start += blockSize {
+		end := min(start+blockSize, n)
+		var set uint64
+		switch transform {
+		case trFOR:
+			for _, value := range vals[start:end] {
+				set |= uint64(int64(value)) - uint64(base)
+			}
+		case trDelta:
+			for index := start; index < end; index++ {
+				set |= zigzag(int64(vals[index+1]) - int64(vals[index]))
+			}
+		default:
+			for _, value := range vals[start:end] {
+				set |= encode(int64(value), zz)
+			}
+		}
+		total += 1 + blockBytes(end-start, bits.Len64(set))
+	}
+	return total
+}
+
+func TestBlockedCostsAgreeWithAPassEach(t *testing.T) {
+	random := rand.New(rand.NewPCG(1, 2))
+	for _, n := range []int{1, 2, 127, 128, 129, 255, 256, 257, 1000, 1025} {
+		for trial := range 20 {
+			vals := make([]int64, n)
+			spread := int64(1) << (trial * 3 % 62)
+			for index := range vals {
+				vals[index] = random.Int64N(spread) - spread/(1+int64(trial%3))
+				if trial%4 == 0 {
+					vals[index] = int64(index) * 3 // a run delta wins
+				}
+			}
+			minimum := slices.Min(vals)
+			zz := minimum < 0
+			raw, frame, steps := blockedCosts(vals, minimum, zz, n > 1)
+			if want := blockedCost(vals, trRaw, 0, zz); raw != want {
+				t.Fatalf("n=%d trial %d: raw %d, want %d", n, trial, raw, want)
+			}
+			if want := blockedCost(vals, trFOR, minimum, false); frame != want {
+				t.Fatalf("n=%d trial %d: frame %d, want %d", n, trial, frame, want)
+			}
+			if n > 1 {
+				if want := blockedCost(vals, trDelta, 0, true); steps != want {
+					t.Fatalf("n=%d trial %d: delta %d, want %d", n, trial, steps, want)
+				}
+			}
+		}
+	}
 }
 
 func TestArrayRoundtripTable(t *testing.T) {
