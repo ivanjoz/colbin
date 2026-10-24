@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -82,7 +83,7 @@ func TestTypedMapsAgreeWithReflection(t *testing.T) {
 		D: map[int64]int32{-1 << 40: -7, 1 << 40: 1 << 30},
 		E: map[string]float32{"pi": 3.14, "z": 0},
 		F: map[uint64]uint64{^uint64(0): 1, 0: ^uint64(0)},
-		G: map[int32]int{-3: -1 << 50, 4: 4},
+		G: map[int32]int{-3: math.MinInt, 4: 4}, // the widest int, on 386 too
 		H: typedMapAttrs{"k": "v", "j": "w"},
 		I: map[string]int64{"big": 1 << 50},
 	}
