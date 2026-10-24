@@ -51,6 +51,32 @@ func residualsUnder(transform uint8, n int) int {
 	return n
 }
 
+// residualAt is the residual transform makes of value index: the kernels'
+// scalar tail, and the definition they are held to.
+func residualAt(vals []int64, index int, transform uint8, base int64, zz bool) uint64 {
+	switch transform {
+	case trFOR:
+		return uint64(vals[index]) - uint64(base)
+	case trDelta:
+		return zigzag(vals[index+1] - vals[index])
+	}
+	return encode(vals[index], zz)
+}
+
+// residualMode is the kernels' number for a transform: raw, raw zigzagged,
+// frame of reference, delta.
+func residualMode(transform uint8, zz bool) int {
+	switch {
+	case transform == trFOR:
+		return 2
+	case transform == trDelta:
+		return 3
+	case zz:
+		return 1
+	}
+	return 0
+}
+
 // stats is the one pass everything the transforms are scored on needs: the
 // minimum for the frame of reference, and so whether anything is negative;
 // whether every value is the same; and whether a delta could overflow. vals is
@@ -186,9 +212,16 @@ func AppendArray[T Signed](out []byte, vals []T) []byte {
 func appendBlocks[T Signed](out []byte, vals []T, transform uint8, base int64, zz bool) []byte {
 	var scratch [blockSize]uint64
 	n := residualsUnder(transform, len(vals))
+	wide, isWide := any(vals).([]int64)
 	for start := 0; start < n; start += blockSize {
 		end := min(start+blockSize, n)
 		block := scratch[:end-start]
+		if isWide && useSIMD {
+			// The residuals and the OR their width is taken from, in one go.
+			w := bits.Len64(residualsSIMD(wide[start:], transform, base, zz, block))
+			out = packRun(append(out, byte(w)), block, w)
+			continue
+		}
 		switch transform {
 		case trFOR:
 			for index := range block {

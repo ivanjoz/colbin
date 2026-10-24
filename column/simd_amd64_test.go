@@ -49,6 +49,46 @@ func TestSIMDUnpackReadsWhatPackWrote(t *testing.T) {
 	}
 }
 
+// residualsSIMD must write each transform's residuals and their OR exactly
+// as residualAt makes them, at every block length around a vector.
+func TestSIMDResidualsAgreeWithScalar(t *testing.T) {
+	if !useSIMD {
+		t.Skip("this CPU has no AVX2")
+	}
+	random := rand.New(rand.NewPCG(9, 10))
+	for trial := range 6 {
+		for n := 1; n <= blockSize+3; n++ {
+			// One value more than the block, for delta's last step.
+			vals := make([]int64, n+1)
+			for index := range vals {
+				vals[index] = int64(random.Uint64()) >> (trial * 10)
+				if trial == 5 {
+					vals[index] = []int64{math.MinInt64, math.MaxInt64, -1, 0}[random.IntN(4)]
+				}
+			}
+			base := vals[random.IntN(len(vals))]
+			for _, transform := range []uint8{trRaw, trFOR, trDelta} {
+				for _, zz := range []bool{false, true} {
+					got := make([]uint64, n)
+					set := residualsSIMD(vals, transform, base, zz, got)
+					var want uint64
+					for index := range got {
+						residual := residualAt(vals, index, transform, base, zz)
+						want |= residual
+						if got[index] != residual {
+							t.Fatalf("trial %d n=%d transform %d zz=%v: residual %d is %x, want %x",
+								trial, n, transform, zz, index, got[index], residual)
+						}
+					}
+					if set != want {
+						t.Fatalf("trial %d n=%d transform %d zz=%v: or %x, want %x", trial, n, transform, zz, set, want)
+					}
+				}
+			}
+		}
+	}
+}
+
 // The kernels must answer exactly what the scalar loops do, or a SIMD build
 // would choose a different transform or width and write different bytes. Every
 // length around a vector and a block, over values that make each transform

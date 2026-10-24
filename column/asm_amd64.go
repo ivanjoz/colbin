@@ -69,6 +69,29 @@ func blockSetsAVX2(values *int64, n int, base int64, zz bool, out *[8]uint64)
 //go:noescape
 func stepsAVX2(values *int64, n int, out *[4]uint64)
 
+// residualsAVX2 stores the residuals of n values under mode (residualMode)
+// into dst, and the lanes of their OR into out. For delta, values holds n+1.
+//
+//go:noescape
+func residualsAVX2(values *int64, n int, base int64, mode int, dst *uint64, out *[4]uint64)
+
+// residualsSIMD fills block with the residuals of vals' first len(block)
+// values, and returns their OR, which is the block's width.
+func residualsSIMD(vals []int64, transform uint8, base int64, zz bool, block []uint64) uint64 {
+	var set uint64
+	full := len(block) &^ 3
+	if full > 0 {
+		var lanes [4]uint64
+		residualsAVX2(&vals[0], full, base, residualMode(transform, zz), &block[0], &lanes)
+		set = lanes[0] | lanes[1] | lanes[2] | lanes[3]
+	}
+	for index := full; index < len(block); index++ {
+		block[index] = residualAt(vals, index, transform, base, zz)
+		set |= block[index]
+	}
+	return set
+}
+
 // statsSIMD is stats for []int64.
 func statsSIMD(vals []int64) (minimum int64, constant, deltaOverflows bool) {
 	n := len(vals)

@@ -132,6 +132,37 @@ func orLanes(vector archsimd.Int64x4) uint64 {
 	return uint64(lanes[0] | lanes[1] | lanes[2] | lanes[3])
 }
 
+// residualsSIMD fills block with the residuals of vals' first len(block)
+// values, and returns their OR, which is the block's width.
+func residualsSIMD(vals []int64, transform uint8, base int64, zz bool, block []uint64) uint64 {
+	defer archsimd.ClearAVXUpperBits()
+	baseVector := archsimd.BroadcastInt64x4(base)
+	var zero, set archsimd.Int64x4
+	index := 0
+	for ; index+4 <= len(block); index += 4 {
+		value := archsimd.LoadInt64x4(vals[index:])
+		var residual archsimd.Int64x4
+		switch {
+		case transform == trFOR:
+			residual = value.Sub(baseVector)
+		case transform == trDelta:
+			residual = zigzagLanes(archsimd.LoadInt64x4(vals[index+1:]).Sub(value), zero)
+		case zz:
+			residual = zigzagLanes(value, zero)
+		default:
+			residual = value
+		}
+		residual.AsUint64x4().Store(block[index:])
+		set = set.Or(residual)
+	}
+	result := orLanes(set)
+	for ; index < len(block); index++ {
+		block[index] = residualAt(vals, index, transform, base, zz)
+		result |= block[index]
+	}
+	return result
+}
+
 // unpackSIMD is unpackRun's read, four values to an instruction, for w up to
 // wideWidth. It unpacks whole groups of eight values while the loads stay
 // inside buf, and reports how many values it did; unpackRun does the rest.

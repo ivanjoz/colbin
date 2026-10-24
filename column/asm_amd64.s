@@ -136,6 +136,81 @@ setsDone:
 	VZEROUPPER
 	RET
 
+// func residualsAVX2(values *int64, n int, base int64, mode int, dst *uint64, out *[4]uint64)
+//
+// mode 0 raw, 1 raw zigzagged, 2 frame of reference, 3 delta. Y0 the OR of
+// the residuals, Y2 base in every lane, Y3 zero.
+TEXT ·residualsAVX2(SB), NOSPLIT, $0-48
+	MOVQ    values+0(FP), SI
+	MOVQ    n+8(FP), CX
+	MOVQ    base+16(FP), AX
+	MOVQ    mode+24(FP), BX
+	MOVQ    dst+32(FP), DI
+	MOVQ    out+40(FP), DX
+	MOVQ    AX, X2
+	VPBROADCASTQ X2, Y2
+	VPXOR   Y0, Y0, Y0
+	VPXOR   Y3, Y3, Y3
+	CMPQ    BX, $1
+	JEQ     residualsZigzag
+	CMPQ    BX, $2
+	JEQ     residualsFrame
+	CMPQ    BX, $3
+	JEQ     residualsDelta
+
+residualsRaw:
+	VMOVDQU (SI), Y4
+	VMOVDQU Y4, (DI)
+	VPOR    Y4, Y0, Y0
+	ADDQ    $32, SI
+	ADDQ    $32, DI
+	SUBQ    $4, CX
+	JNZ     residualsRaw
+	JMP     residualsDone
+
+residualsZigzag:
+	VMOVDQU  (SI), Y4
+	VPSLLQ   $1, Y4, Y6
+	VPCMPGTQ Y4, Y3, Y7
+	VPXOR    Y7, Y6, Y6
+	VMOVDQU  Y6, (DI)
+	VPOR     Y6, Y0, Y0
+	ADDQ     $32, SI
+	ADDQ     $32, DI
+	SUBQ     $4, CX
+	JNZ      residualsZigzag
+	JMP      residualsDone
+
+residualsFrame:
+	VMOVDQU (SI), Y4
+	VPSUBQ  Y2, Y4, Y5
+	VMOVDQU Y5, (DI)
+	VPOR    Y5, Y0, Y0
+	ADDQ    $32, SI
+	ADDQ    $32, DI
+	SUBQ    $4, CX
+	JNZ     residualsFrame
+	JMP     residualsDone
+
+residualsDelta:
+	VMOVDQU  8(SI), Y4
+	VMOVDQU  (SI), Y5
+	VPSUBQ   Y5, Y4, Y6
+	VPSLLQ   $1, Y6, Y7
+	VPCMPGTQ Y6, Y3, Y8
+	VPXOR    Y8, Y7, Y7
+	VMOVDQU  Y7, (DI)
+	VPOR     Y7, Y0, Y0
+	ADDQ     $32, SI
+	ADDQ     $32, DI
+	SUBQ     $4, CX
+	JNZ      residualsDelta
+
+residualsDone:
+	VMOVDQU Y0, (DX)
+	VZEROUPPER
+	RET
+
 // func stepsAVX2(values *int64, n int, out *[4]uint64)
 //
 // Y0 the OR of the zigzagged steps, Y3 zero.
