@@ -1,6 +1,7 @@
 package column
 
 import (
+	"fmt"
 	"math"
 	"math/rand/v2"
 	"testing"
@@ -93,5 +94,25 @@ func TestWidthOfIsTheWidestResidual(t *testing.T) {
 		if got := widthOf(expect.block); got != expect.width {
 			t.Fatalf("widthOf(%v) = %d, want %d", expect.block, got, expect.width)
 		}
+	}
+}
+
+// BenchmarkUnpackRun reads one block at a few widths, from a buffer with room
+// after it as every block but a column's last has: the read alone, which is
+// what a SIMD build is compared on against a purego one.
+func BenchmarkUnpackRun(b *testing.B) {
+	for _, w := range []int{3, 12, 25, 40} {
+		b.Run(fmt.Sprintf("w=%d", w), func(b *testing.B) {
+			random := rand.New(rand.NewPCG(7, 8))
+			block := make([]uint64, blockSize)
+			for index := range block {
+				block[index] = random.Uint64() & (uint64(1)<<w - 1)
+			}
+			buf := append(packRun(nil, block, w), make([]byte, 64)...)
+			b.SetBytes(int64(blockSize * 8))
+			for b.Loop() {
+				unpackRun(buf, block, w)
+			}
+		})
 	}
 }

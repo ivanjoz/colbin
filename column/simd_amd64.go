@@ -128,6 +128,83 @@ func orLanes(vector archsimd.Int64x4) uint64 {
 	return uint64(lanes[0] | lanes[1] | lanes[2] | lanes[3])
 }
 
+// unpackSIMD is unpackRun's read, four values to an instruction, for w up to
+// wideWidth. It unpacks whole groups of eight values while the loads stay
+// inside buf, and reports how many values it did; unpackRun does the rest.
+//
+// Eight values at w bits are w bytes, so value 8j+k starts at byte j*w +
+// k*w/8 and bit k*w%8, whatever j is: the layout repeats every group, and all
+// that changes from one to the next is the group's first byte. Two values
+// next to each other span at most sixteen bytes from the first's byte, so a
+// 16-byte load holds a pair, a byte shuffle within each 128-bit half moves
+// each value's eight bytes into its own lane, and a shift per lane and a mask
+// finish it. The shuffle, the shifts and where the loads start are the same
+// for every group of a width, and are worked out once, in unpackTables.
+func unpackSIMD(buf []byte, dst []uint64, w int) int {
+	defer archsimd.ClearAVXUpperBits()
+	table := &unpackTables[w]
+	mask := archsimd.BroadcastUint64x4(uint64(1)<<w - 1)
+	first, second := &table[0], &table[1]
+	firstShuffle := archsimd.LoadInt8x32Array(&first.shuffle)
+	secondShuffle := archsimd.LoadInt8x32Array(&second.shuffle)
+	firstShifts := archsimd.LoadUint64x4Array(&first.shifts)
+	secondShifts := archsimd.LoadUint64x4Array(&second.shifts)
+	var empty archsimd.Uint8x32
+	done, at := 0, 0
+	// The furthest load starts before the group's last byte and reads
+	// sixteen, so a group is safe while its w bytes and sixteen more are there.
+	for done+8 <= len(dst) && at+w+16 <= len(buf) {
+		pairs := empty.SetLo(archsimd.LoadUint8x16(buf[at+first.lo:])).
+			SetHi(archsimd.LoadUint8x16(buf[at+first.hi:]))
+		pairs.PermuteOrZeroGrouped(firstShuffle).AsUint64x4().
+			ShiftRight(firstShifts).And(mask).Store(dst[done:])
+		pairs = empty.SetLo(archsimd.LoadUint8x16(buf[at+second.lo:])).
+			SetHi(archsimd.LoadUint8x16(buf[at+second.hi:]))
+		pairs.PermuteOrZeroGrouped(secondShuffle).AsUint64x4().
+			ShiftRight(secondShifts).And(mask).Store(dst[done+4:])
+		done += 8
+		at += w
+	}
+	return done
+}
+
+// unpackHalf is how unpackSIMD reads four of a group's eight values: the
+// bytes, from the group's first, its two loads start at; the shuffle that
+// moves each value's bytes into its lane; and each lane's shift.
+type unpackHalf struct {
+	lo, hi  int
+	shuffle [32]int8
+	shifts  [4]uint64
+}
+
+// unpackTables is every width's two halves.
+var unpackTables = func() (tables [wideWidth + 1][2]unpackHalf) {
+	for w := 1; w <= wideWidth; w++ {
+		for half := range 2 {
+			table := &tables[w][half]
+			// The half's values are k, k+1 from the low load and k+2, k+3
+			// from the high one.
+			k := 4 * half
+			table.lo, table.hi = k*w/8, (k+2)*w/8
+			for lane := range 4 {
+				value := k + lane
+				load := table.lo
+				if lane >= 2 {
+					load = table.hi
+				}
+				// Within its 128-bit half the shuffle indexes the half's
+				// own sixteen bytes, which start at load.
+				from := value*w/8 - load
+				for b := range 8 {
+					table.shuffle[lane*8+b] = int8(from + b)
+				}
+				table.shifts[lane] = uint64(value * w % 8)
+			}
+		}
+	}
+	return tables
+}()
+
 // orSIMD ORs a block of residuals together, which is widthOf's scan.
 func orSIMD(block []uint64) uint64 {
 	defer archsimd.ClearAVXUpperBits()

@@ -15,6 +15,8 @@ func blockedCostsSIMD(vals []int64, base int64, zz, delta bool) (int, int, int) 
 	return blockedCosts(vals, base, zz, delta)
 }
 
+func unpackSIMD(buf []byte, dst []uint64, w int) int { return 0 }
+
 func orSIMD(block []uint64) uint64 {
 	var set uint64
 	for _, residual := range block {

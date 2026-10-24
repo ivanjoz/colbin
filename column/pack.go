@@ -157,6 +157,15 @@ func unpackRun(buf []byte, dst []uint64, w int) {
 		unpackWide(buf, dst, w)
 		return
 	}
+	if useSIMD {
+		// Eight values at w bits are w whole bytes, so whatever the kernel
+		// read, the rest starts on a byte.
+		done := unpackSIMD(buf, dst, w)
+		buf, dst = buf[done/8*w:], dst[done:]
+		if len(dst) == 0 {
+			return
+		}
+	}
 	mask := uint64(1)<<w - 1
 	if len(buf) < blockBytes(len(dst), w)+8 {
 		unpackTail(buf, dst, w, mask)

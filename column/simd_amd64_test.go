@@ -8,6 +8,47 @@ import (
 	"testing"
 )
 
+// unpackSIMD must read back what packRun wrote at every width, for every
+// run length around a group and a block, whether the buffer ends at the run or
+// carries more after it — which decides how far the kernel may go before
+// leaving the rest to the scalar read.
+func TestSIMDUnpackReadsWhatPackWrote(t *testing.T) {
+	if !useSIMD {
+		t.Skip("this CPU has no AVX2")
+	}
+	random := rand.New(rand.NewPCG(5, 6))
+	for w := 1; w <= 64; w++ {
+		mask := uint64(1)<<(w-1)<<1 - 1
+		for _, n := range []int{1, 7, 8, 9, 15, 16, 17, 31, 64, 100, 127, 128} {
+			want := make([]uint64, n)
+			for index := range want {
+				want[index] = random.Uint64() & mask
+			}
+			packed := packRun(nil, want, w)
+			for _, slack := range []int{0, 3, 8, 40} {
+				buf := append(append([]byte(nil), packed...), make([]byte, slack)...)
+				got := make([]uint64, n)
+				unpackRun(buf, got, w)
+				for index := range want {
+					if got[index] != want[index] {
+						t.Fatalf("w=%d n=%d slack=%d: value %d is %x, want %x",
+							w, n, slack, index, got[index], want[index])
+					}
+				}
+			}
+		}
+		// And the kernel is what read them, rather than the scalar read
+		// after it: all of a full block with room after it.
+		if w <= wideWidth {
+			block := make([]uint64, blockSize)
+			buf := append(packRun(nil, block, w), make([]byte, 16)...)
+			if done := unpackSIMD(buf, block, w); done != blockSize {
+				t.Fatalf("w=%d: the kernel read %d of a block's %d values", w, done, blockSize)
+			}
+		}
+	}
+}
+
 // The kernels must answer exactly what the scalar loops do, or a SIMD build
 // would choose a different transform or width and write different bytes. Every
 // length around a vector and a block, over values that make each transform
