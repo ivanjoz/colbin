@@ -203,19 +203,28 @@ func packSIMD(out []byte, block []uint64, w int) []byte {
 	groups := len(block) / 8
 	start := len(out)
 	out = slices.Grow(out, groups*w+16)[:start+groups*w+16]
-	var shifts [8]uint64
-	for lane := range shifts {
-		// A whole group in one word below nine, so the high four go on
-		// from 4w; past that each half starts its own word at zero.
-		position := lane
-		if w > 8 {
-			position = lane % 4
-		}
-		shifts[lane] = uint64(position * w)
-	}
-	packSmallAVX2(&block[0], groups, w, &shifts, &out[start])
+	packSmallAVX2(&block[0], groups, w, &packShifts[w], &out[start])
 	return out
 }
+
+// packShifts is each width's lane counts for packSmallAVX2, made once. Built
+// per call they were eight 8-byte stores the kernel at once read back as two
+// 32-byte loads, which the CPU cannot forward from the stores: a stall that was
+// a quarter of a short column's encode.
+var packShifts = func() (table [packVectorWidth + 1][8]uint64) {
+	for w := range table {
+		for lane := range table[w] {
+			// A whole group in one word below nine, so the high four go on
+			// from 4w; past that each half starts its own word at zero.
+			position := lane
+			if w > 8 {
+				position = lane % 4
+			}
+			table[w][lane] = uint64(position * w)
+		}
+	}
+	return table
+}()
 
 // unpackSIMD reads nothing in this build; unpackRun does it all.
 func unpackSIMD(buf []byte, dst []uint64, w int) int { return 0 }
