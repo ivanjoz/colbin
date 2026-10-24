@@ -84,6 +84,25 @@ import (
 		}
 		out.WriteString("default:\nreturn false\n}\nreturn true\n}\n")
 
+		// The nesting walk: the value arms inline beside the composite ones,
+		// so that a scalar field of a nested plan costs one switch, as it does
+		// in a flat one, rather than a switch, a call and a second switch.
+		walker, composites := "writePlan", narrowComposites
+		if width.suffix != "" {
+			walker, composites = "appendWide", wideComposites
+		}
+		fmt.Fprintf(&out, "\n// writeFields%s is %s's walk over the fields: every value op inline, and the\n// composites by call.\n", width.suffix, walker)
+		fmt.Fprintf(&out, "func writeFields%s(writer *%s, plan *typePlan, record unsafe.Pointer, buf *scratch) {\n", width.suffix, width.writer)
+		out.WriteString("packed := Packed5()\nfor index := range plan.fields {\nfield := &plan.fields[index]\nat := unsafe.Add(record, field.offset)\n")
+		out.WriteString("if field.indirect {\nif at = *(*unsafe.Pointer)(at); at == nil {\ncontinue\n}\n}\nswitch field.op {\n")
+		for _, row := range valueOps {
+			writeArm(&out, row, "field.key")
+		}
+		for _, arm := range composites {
+			fmt.Fprintf(&out, "case %s:\n%s\n", arm[0], arm[1])
+		}
+		out.WriteString("default:\nbuf.fail(errNotValueOp(field.op))\n}\n}\n}\n")
+
 		// An unknown key is stepped over at either width: the narrow nibble sizes
 		// a field as the wide descriptor does.
 		fmt.Fprintf(&out, "\n// readScalars%s reads a simple plan. See scalars.go.\n", width.suffix)
@@ -114,6 +133,26 @@ import (
 	}
 	return format.Source(out.Bytes())
 }
+
+// The composite arms of each width's nesting walk: the op, and the call.
+var (
+	narrowComposites = [][2]string{
+		{"opStruct", "appendNarrowStruct(writer, field, at, buf)"},
+		{"opStructs", "appendNarrowStructs(writer, field, at, buf)"},
+		{"opMap", "appendNarrowMap(writer, field, at, buf)"},
+		{"opPointer", "appendPointer(writer, field, at, packed)"},
+		{"opPointerStruct", "appendNarrowPointerStruct(writer, field, at, buf)"},
+	}
+	wideComposites = [][2]string{
+		{"opStruct", "appendStructField(writer, field, at, buf)"},
+		{"opStructs", "appendStructsField(writer, field, at, buf)"},
+		{"opMap", "appendMapField(writer, field, at, buf)"},
+		{"opPointer", "appendPointerWide(writer, field, at, packed)"},
+		{"opPointerStruct", "appendPointerStructField(writer, field, at, buf)"},
+		{"opAny", "appendAnyField(writer, field, at, buf)"},
+		{"opAnys", "appendAnysField(writer, field, at, buf)"},
+	}
+)
 
 func writeArm(out *bytes.Buffer, row valueOp, key string) {
 	value := fmt.Sprintf("*(*%s)(at)", goTypeName(row))

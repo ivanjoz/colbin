@@ -53,36 +53,7 @@ func appendWide(writer *wire.Writer8, plan *typePlan, record unsafe.Pointer, buf
 		return
 	}
 	defer buf.leave()
-	packed := Packed5()
-	for index := range plan.fields {
-		field := &plan.fields[index]
-		at := unsafe.Add(record, field.offset)
-		if field.indirect {
-			if at = *(*unsafe.Pointer)(at); at == nil {
-				continue
-			}
-		}
-		switch field.op {
-		case opStruct:
-			appendStructField(writer, field, at, buf)
-		case opStructs:
-			appendStructsField(writer, field, at, buf)
-		case opMap:
-			appendMapField(writer, field, at, buf)
-		case opPointer:
-			appendPointerWide(writer, field, at, packed)
-		case opPointerStruct:
-			appendPointerStructField(writer, field, at, buf)
-		case opAny:
-			appendAnyField(writer, field, at, buf)
-		case opAnys:
-			appendAnysField(writer, field, at, buf)
-		default:
-			if !writeValueWide(writer, field.key, field.op, at, packed) {
-				buf.fail(errNotValueOp(field.op))
-			}
-		}
-	}
+	writeFieldsWide(writer, plan, record, buf)
 }
 
 // readWideField is readField for the wide key width.

@@ -122,6 +122,81 @@ func writeValue(writer *wire.Writer, key uint8, op fieldOp, at unsafe.Pointer, p
 	return true
 }
 
+// writeFields is writePlan's walk over the fields: every value op inline, and the
+// composites by call.
+func writeFields(writer *wire.Writer, plan *typePlan, record unsafe.Pointer, buf *scratch) {
+	packed := Packed5()
+	for index := range plan.fields {
+		field := &plan.fields[index]
+		at := unsafe.Add(record, field.offset)
+		if field.indirect {
+			if at = *(*unsafe.Pointer)(at); at == nil {
+				continue
+			}
+		}
+		switch field.op {
+		case opBool:
+			writer.Bool(field.key, *(*bool)(at))
+		case opInt8:
+			writer.Int(field.key, int64(*(*int8)(at)))
+		case opInt16:
+			writer.Int(field.key, int64(*(*int16)(at)))
+		case opInt32:
+			writer.I32(field.key, *(*int32)(at))
+		case opInt64:
+			writer.Int(field.key, *(*int64)(at))
+		case opUint8:
+			writer.U16(field.key, uint16(*(*uint8)(at)))
+		case opUint16:
+			writer.U16(field.key, *(*uint16)(at))
+		case opUint32:
+			writer.U32(field.key, *(*uint32)(at))
+		case opUint64:
+			writer.Uint(field.key, *(*uint64)(at))
+		case opFloat32:
+			writer.F32(field.key, *(*float32)(at))
+		case opFloat64:
+			writer.F64(field.key, *(*float64)(at))
+		case opString:
+			if packed {
+				writer.PackedString(field.key, *(*string)(at))
+			} else {
+				writer.String(field.key, *(*string)(at))
+			}
+		case opBytes:
+			writer.Bytes(field.key, *(*[]byte)(at))
+		case opInt8s:
+			writer.Int8s(field.key, *(*[]int8)(at))
+		case opInt16s:
+			writer.Int16s(field.key, *(*[]int16)(at))
+		case opInt32s:
+			writer.Int32s(field.key, *(*[]int32)(at))
+		case opInt64s:
+			writer.Ints(field.key, *(*[]int64)(at))
+		case opUint16s:
+			writer.Uint16s(field.key, *(*[]uint16)(at))
+		case opUint32s:
+			writer.Uint32s(field.key, *(*[]uint32)(at))
+		case opUint64s:
+			writer.Uint64s(field.key, *(*[]uint64)(at))
+		case opStrings:
+			writer.Strings(field.key, *(*[]string)(at))
+		case opStruct:
+			appendNarrowStruct(writer, field, at, buf)
+		case opStructs:
+			appendNarrowStructs(writer, field, at, buf)
+		case opMap:
+			appendNarrowMap(writer, field, at, buf)
+		case opPointer:
+			appendPointer(writer, field, at, packed)
+		case opPointerStruct:
+			appendNarrowPointerStruct(writer, field, at, buf)
+		default:
+			buf.fail(errNotValueOp(field.op))
+		}
+	}
+}
+
 // readScalars reads a simple plan. See scalars.go.
 func readScalars(reader *wire.Reader, plan *typePlan, record unsafe.Pointer) {
 	for reader.More() {
@@ -395,6 +470,85 @@ func writeValueWide(writer *wire.Writer8, key uint8, op fieldOp, at unsafe.Point
 		return false
 	}
 	return true
+}
+
+// writeFieldsWide is appendWide's walk over the fields: every value op inline, and the
+// composites by call.
+func writeFieldsWide(writer *wire.Writer8, plan *typePlan, record unsafe.Pointer, buf *scratch) {
+	packed := Packed5()
+	for index := range plan.fields {
+		field := &plan.fields[index]
+		at := unsafe.Add(record, field.offset)
+		if field.indirect {
+			if at = *(*unsafe.Pointer)(at); at == nil {
+				continue
+			}
+		}
+		switch field.op {
+		case opBool:
+			writer.Bool(field.key, *(*bool)(at))
+		case opInt8:
+			writer.Int(field.key, int64(*(*int8)(at)))
+		case opInt16:
+			writer.Int(field.key, int64(*(*int16)(at)))
+		case opInt32:
+			writer.I32(field.key, *(*int32)(at))
+		case opInt64:
+			writer.Int(field.key, *(*int64)(at))
+		case opUint8:
+			writer.U16(field.key, uint16(*(*uint8)(at)))
+		case opUint16:
+			writer.U16(field.key, *(*uint16)(at))
+		case opUint32:
+			writer.U32(field.key, *(*uint32)(at))
+		case opUint64:
+			writer.Uint(field.key, *(*uint64)(at))
+		case opFloat32:
+			writer.F32(field.key, *(*float32)(at))
+		case opFloat64:
+			writer.F64(field.key, *(*float64)(at))
+		case opString:
+			if packed {
+				writer.PackedString(field.key, *(*string)(at))
+			} else {
+				writer.String(field.key, *(*string)(at))
+			}
+		case opBytes:
+			writer.Bytes(field.key, *(*[]byte)(at))
+		case opInt8s:
+			writer.Int8s(field.key, *(*[]int8)(at))
+		case opInt16s:
+			writer.Int16s(field.key, *(*[]int16)(at))
+		case opInt32s:
+			writer.Int32s(field.key, *(*[]int32)(at))
+		case opInt64s:
+			writer.Ints(field.key, *(*[]int64)(at))
+		case opUint16s:
+			writer.Uint16s(field.key, *(*[]uint16)(at))
+		case opUint32s:
+			writer.Uint32s(field.key, *(*[]uint32)(at))
+		case opUint64s:
+			writer.Uint64s(field.key, *(*[]uint64)(at))
+		case opStrings:
+			writer.Strings(field.key, *(*[]string)(at))
+		case opStruct:
+			appendStructField(writer, field, at, buf)
+		case opStructs:
+			appendStructsField(writer, field, at, buf)
+		case opMap:
+			appendMapField(writer, field, at, buf)
+		case opPointer:
+			appendPointerWide(writer, field, at, packed)
+		case opPointerStruct:
+			appendPointerStructField(writer, field, at, buf)
+		case opAny:
+			appendAnyField(writer, field, at, buf)
+		case opAnys:
+			appendAnysField(writer, field, at, buf)
+		default:
+			buf.fail(errNotValueOp(field.op))
+		}
+	}
 }
 
 // readScalarsWide reads a simple plan. See scalars.go.

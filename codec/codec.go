@@ -648,9 +648,11 @@ func appendPlan(dst []byte, plan *typePlan, record unsafe.Pointer) []byte {
 	return writer.Buffer
 }
 
-// writePlan is the narrow-key encoder for a plan that nests: the composite arms
-// here, and every value op through writeValue (ops_gen.go). A zero-valued field
-// writes nothing, which the writer decides.
+// writePlan is the narrow-key encoder for a plan that nests. The walk itself is
+// writeFields (ops_gen.go): every value op inline beside the composite arms, so
+// a scalar field costs one switch whether or not its plan nests. A zero-valued
+// field writes nothing, which the writer decides. A dynamic value fails there:
+// a plan holding one is wide, so that is a plan that disagrees with itself.
 //
 // It is a separate function from appendWide rather than one with a width flag,
 // for the reason wire keeps the two widths in separate types: a width the
@@ -660,34 +662,7 @@ func writePlan(writer *wire.Writer, plan *typePlan, record unsafe.Pointer, buf *
 		return
 	}
 	defer buf.leave()
-	packed := Packed5()
-	for index := range plan.fields {
-		field := &plan.fields[index]
-		at := unsafe.Add(record, field.offset)
-		if field.indirect {
-			if at = *(*unsafe.Pointer)(at); at == nil {
-				continue
-			}
-		}
-		switch field.op {
-		case opStruct:
-			appendNarrowStruct(writer, field, at, buf)
-		case opStructs:
-			appendNarrowStructs(writer, field, at, buf)
-		case opMap:
-			appendNarrowMap(writer, field, at, buf)
-		case opPointer:
-			appendPointer(writer, field, at, packed)
-		case opPointerStruct:
-			appendNarrowPointerStruct(writer, field, at, buf)
-		default:
-			if !writeValue(writer, field.key, field.op, at, packed) {
-				// A dynamic value: a plan holding one is wide, so this is a plan
-				// that disagrees with itself.
-				buf.fail(errNotValueOp(field.op))
-			}
-		}
-	}
+	writeFields(writer, plan, record, buf)
 }
 
 // errNotValueOp is a switch over value ops meeting one that is not, which only a
