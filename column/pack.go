@@ -96,6 +96,9 @@ func blockBytes(count, w int) int { return (count*w + 7) / 8 }
 // with no rounding. OR-ing them together and taking one bit length is the same
 // answer as a running maximum, without the compare.
 func widthOf(block []uint64) int {
+	if useSIMD {
+		return bits.Len64(orSIMD(block))
+	}
 	var set uint64
 	for _, residual := range block {
 		set |= residual

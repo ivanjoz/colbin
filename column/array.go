@@ -51,6 +51,29 @@ func residualsUnder(transform uint8, n int) int {
 	return n
 }
 
+// stats is the one pass everything the transforms are scored on needs: the
+// minimum for the frame of reference, and so whether anything is negative;
+// whether every value is the same; and whether a delta could overflow. vals is
+// not empty.
+func stats[T Signed](vals []T) (minimum int64, constant, deltaOverflows bool) {
+	minimum, constant = int64(vals[0]), true
+	for index, value := range vals {
+		x := int64(value)
+		if x < minimum {
+			minimum = x
+		}
+		if x != int64(vals[0]) {
+			constant = false
+		}
+		// A delta overflows int64 only across a span above 2^63, which only
+		// int64 input can have.
+		if index > 0 && subOverflows(x, int64(vals[index-1])) {
+			deltaOverflows = true
+		}
+	}
+	return minimum, constant, deltaOverflows
+}
+
 // blockedCosts is the payload size raw, frame of reference and, when delta is
 // set, delta would produce, block widths and all — which is what a transform
 // has to be scored against. Scoring it by the column's widest residual instead
@@ -108,25 +131,12 @@ func AppendArray[T Signed](out []byte, vals []T) []byte {
 		return append(out, trRaw)
 	}
 
-	// One pass for everything the transforms need to be scored: the minimum for
-	// the frame of reference, whether anything is negative, whether every value
-	// is the same, and whether a delta could overflow.
-	minimum := int64(vals[0])
-	constant := true
-	deltaOverflows := false
-	for index, value := range vals {
-		x := int64(value)
-		if x < minimum {
-			minimum = x
-		}
-		if x != int64(vals[0]) {
-			constant = false
-		}
-		// A delta overflows int64 only across a span above 2^63, which only
-		// int64 input can have.
-		if index > 0 && subOverflows(x, int64(vals[index-1])) {
-			deltaOverflows = true
-		}
+	var minimum int64
+	var constant, deltaOverflows bool
+	if wide, ok := any(vals).([]int64); ok && useSIMD {
+		minimum, constant, deltaOverflows = statsSIMD(wide)
+	} else {
+		minimum, constant, deltaOverflows = stats(vals)
 	}
 	// Raw is zigzagged whenever the column has a negative, which is what keeps
 	// -1 from becoming a 64-bit residual.
@@ -136,7 +146,12 @@ func AppendArray[T Signed](out []byte, vals []T) []byte {
 	}
 	transform, zigzagged := trRaw, zz
 	withDelta := !deltaOverflows && len(vals) > 1
-	best, frame, steps := blockedCosts(vals, minimum, zz, withDelta)
+	var best, frame, steps int
+	if wide, ok := any(vals).([]int64); ok && useSIMD {
+		best, frame, steps = blockedCostsSIMD(wide, minimum, zz, withDelta)
+	} else {
+		best, frame, steps = blockedCosts(vals, minimum, zz, withDelta)
+	}
 	if frame < best {
 		transform, zigzagged, best = trFOR, false, frame
 	}
