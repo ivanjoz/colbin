@@ -52,37 +52,39 @@ import (
 	"errors"
 	"math"
 	"math/bits"
+
+	"github.com/ivanjoz/colbin/internal/wirefmt"
 )
 
 // MaxFields is what four key bits buy: keys 0..15.
 const MaxFields = 16
 
-// The nibble.
+// The nibble. The values are internal/wirefmt's, where the field writers are.
 const (
 	// nibbleSized is the first nibble with a payload, which is nibble−sizedBias
 	// bytes long, up to maxSized at nibble 11.
-	nibbleSized = 4
-	sizedBias   = 3
-	maxSized    = 8
+	nibbleSized = wirefmt.NibbleSized
+	sizedBias   = wirefmt.SizedBias
+	maxSized    = wirefmt.MaxSized
 	// nibbleLength is the length form, 0b11xx. Its low two bits are flags whose
 	// meaning is the type's: they never change the size.
-	nibbleLength uint8 = 0b1100
+	nibbleLength       = wirefmt.NibbleLength
 	flagBits     uint8 = 0b11
 
 	// An unsigned field's nibbles 0..3 are the values 1..4. A signed field's
 	// are 1, 2 and 3, and then −1 — the one negative common enough to deserve a
 	// byte of its own, which every other negative pays for by riding the length
 	// form.
-	inlineValues   = 4
-	signedInline   = 3
-	signedMinusOne = 3
+	inlineValues   = wirefmt.InlineValues
+	signedInline   = wirefmt.SignedInline
+	signedMinusOne = wirefmt.SignedMinusOne
 
 	// A length: one byte up to 253, and two escapes above it. The escapes name
 	// the width of the length that follows rather than continuing it, so a
 	// length is a branch and a load, never a loop whose trip count is data.
-	inlineLength = 0xFD
-	length16     = 0xFE
-	length32     = 0xFF
+	inlineLength = wirefmt.InlineLength
+	length16     = wirefmt.Length16
+	length32     = wirefmt.Length32
 
 	// maxInt is what a size is read into, and therefore the ceiling a declared
 	// size is checked against before it is used.
@@ -93,7 +95,7 @@ const (
 // an encoding in, so a packed string names itself here, together with the one
 // bit packed5 needs and the schema cannot know: the case its stream opens in.
 const (
-	flagRaw         uint8 = 0b00
+	flagRaw               = wirefmt.FlagRaw
 	flagPackedLower uint8 = 0b01
 	flagPackedUpper uint8 = 0b10
 )
@@ -169,7 +171,7 @@ var (
 	// errFieldTooLarge is a writer's one refusal, and a panic rather than an
 	// error: a narrow length is at most four bytes, and a payload past that is a
 	// wide field's job.
-	errFieldTooLarge = errors.New("wire: a narrow field holds at most 2^32-1 bytes")
+	errFieldTooLarge = wirefmt.ErrFieldTooLarge
 )
 
 // Writer appends fields to a buffer the caller owns. Build one per message over
@@ -209,42 +211,6 @@ func sizeCodeFor(magnitude uint64) (code uint8, width int) {
 	return uint8(width), width
 }
 
-// appendMagnitude writes a magnitude's low width bytes, little-endian.
-//
-// It stores all eight and cuts back rather than switching on the width: two
-// instructions against a jump table. Storing exactly `width` bytes through a
-// switch was tried and measured 30.5 ns against 23.0 on a six-field record — the
-// jump table costs more than the discarded stores, and the extra capacity is
-// wanted anyway on the buffer this is usually appending to.
-func appendMagnitude(buffer []byte, magnitude uint64, width int) []byte {
-	buffer = binary.LittleEndian.AppendUint64(buffer, magnitude)
-	return buffer[:len(buffer)-(8-width)]
-}
-
-// appendSized writes a header whose nibble sizes a magnitude of the fewest bytes
-// that hold it, and the magnitude. The nibble is the width plus sizedBias, so
-// the byte count is exact at every width from one to eight.
-func appendSized(buffer []byte, key uint8, value uint64) []byte {
-	width := (bits.Len64(value) + 7) / 8
-	return appendMagnitude(append(buffer, key<<4|uint8(width+sizedBias)), value, width)
-}
-
-// appendLength writes a length in the shortest of its three forms.
-//
-// A length past four bytes is a programming error rather than data: the value
-// is already in memory, and a narrow field cannot say how long it is.
-func appendLength(buffer []byte, length int) []byte {
-	switch {
-	case length <= inlineLength:
-		return append(buffer, uint8(length))
-	case length <= 0xFFFF:
-		return append(buffer, length16, uint8(length), uint8(length>>8))
-	case uint64(length) <= math.MaxUint32:
-		return binary.LittleEndian.AppendUint32(append(buffer, length32), uint32(length))
-	}
-	panic(errFieldTooLarge)
-}
-
 // lengthBytes is what appendLength spends on a length.
 func lengthBytes(length int) int {
 	switch {
@@ -258,20 +224,11 @@ func lengthBytes(length int) int {
 
 // Uint writes an unsigned integer, and writes nothing at all when it is zero.
 //
-// The field that fits its own nibble is inline and everything else is a call,
-// deliberately: a value of one to four is what a flag, a small count or a bool
-// holds, and keeping that path inside the inliner is worth more than the branch
-// it costs the rest.
+// It is wirefmt.AppendUint's hot half spelled again over the writer, rather
+// than a call to it: forwarding costs the nodes that take Uint past the
+// inliner's budget, and a Uint that does not inline puts every field of a
+// record through a call. See wirefmt.AppendUint for the shape.
 func (w *Writer) Uint(key uint8, value uint64) {
-	// One compare covers both the inline range and the omit-zero rule, because
-	// zero wraps: decremented, it is not below four, so a zero field falls
-	// through to uintWide and is dropped there. The decrement is spelled in
-	// place, rather than as `value-1` in the compare and again in the append,
-	// because the inliner charges for each: that spelling costs 82 against a
-	// budget of 80, and a Uint that does not inline puts *every* field of the
-	// record through a call rather than only the wide ones. Sending a ten-field
-	// record's writes out of line that way measured 18.9 ns against 7.0 on the
-	// wide key's equivalent.
 	if value--; value < inlineValues {
 		w.Buffer = append(w.Buffer, key<<4|uint8(value))
 	} else {
@@ -279,69 +236,29 @@ func (w *Writer) Uint(key uint8, value uint64) {
 	}
 }
 
-// uintWide is not inlined on purpose: it is the cold half of Uint, and letting
-// it fold back in is what would push Uint itself out of the budget. It takes the
-// value Uint decremented, which saves Uint the node that would undo it.
+// uintWide is Uint's cold half, which takes the decremented value.
 //
 //go:noinline
 func (w *Writer) uintWide(key uint8, less uint64) {
-	if value := less + 1; value != 0 {
-		w.Buffer = appendSized(w.Buffer, key, value)
-	}
+	w.Buffer = wirefmt.AppendUintWide(w.Buffer, key, less)
 }
 
 // Int writes a signed integer: a positive value as an unsigned one would be
 // written, past the three that fit the nibble, and a negative one as its
 // magnitude in the length form — except −1, which has a nibble of its own.
-//
-// It does not fit the inliner whichever way it is spelled — the signed range
-// test costs a conversion the unsigned one does not — so it is one call that
-// keeps every value up to 255 inside it, rather than an inline nibble case in
-// front of a second call. The one-byte magnitude is tested first: it is the
-// commonest value a signed field holds that is not zero, and putting it ahead
-// of the nibble case measured a third of a nanosecond a field.
 func (w *Writer) Int(key uint8, value int64) {
-	if value > signedInline && value <= 0xFF {
-		w.Buffer = append(w.Buffer, key<<4|nibbleSized, uint8(value))
-		return
-	}
-	if uint64(value)-1 < signedInline {
-		w.Buffer = append(w.Buffer, key<<4|uint8(value-1))
-		return
-	}
-	// A zero is the commonest value a field holds, and it is dropped here
-	// rather than one call further in.
-	if value != 0 {
-		w.intWide(key, value)
-	}
-}
-
-func (w *Writer) intWide(key uint8, value int64) {
-	switch {
-	case value > 0:
-		w.Buffer = appendSized(w.Buffer, key, uint64(value))
-	case value == -1:
-		w.Buffer = append(w.Buffer, key<<4|signedMinusOne)
-	case value < 0:
-		// Negating through uint64 rather than int64 keeps math.MinInt64, whose
-		// positive counterpart does not exist as an int64.
-		magnitude := -uint64(value)
-		width := (bits.Len64(magnitude) + 7) / 8
-		w.Buffer = appendMagnitude(
-			append(w.Buffer, key<<4|nibbleLength, uint8(width)), magnitude, width)
-	}
+	w.Buffer = wirefmt.AppendInt(w.Buffer, key, value)
 }
 
 // Bool writes one byte when true and nothing when false.
 func (w *Writer) Bool(key uint8, value bool) {
-	if !value {
-		return
-	}
-	// True is the unsigned value 1, nibble 0, which is a whole field in one byte.
-	w.Buffer = append(w.Buffer, key<<4)
+	w.Buffer = wirefmt.AppendBool(w.Buffer, key, value)
 }
 
 // Bytes writes a blob, and nothing when it is empty.
+//
+// It and String are an append and a call, as wirefmt's are, with the call a
+// method so that both stay inside the inliner's budget over the writer.
 func (w *Writer) Bytes(key uint8, value []byte) {
 	if len(value) == 0 {
 		return
@@ -359,19 +276,11 @@ func (w *Writer) String(key uint8, value string) {
 	w.Buffer = append(w.Buffer, value...)
 }
 
-// blobHeader writes a raw string's header: the nibble alone for one to eight
-// bytes — a code, a short name, a currency — and the length form past that.
-//
-// It is kept out of line so that String and Bytes stay inside the inliner's
-// budget themselves: an append and a call is what fits.
+// blobHeader writes a raw string's or blob's header.
 //
 //go:noinline
 func (w *Writer) blobHeader(key uint8, size int) {
-	if size <= maxSized {
-		w.Buffer = append(w.Buffer, key<<4|uint8(size+sizedBias))
-		return
-	}
-	w.Buffer = appendLength(append(w.Buffer, key<<4|nibbleLength|flagRaw), size)
+	w.Buffer = wirefmt.AppendBlobHeader(w.Buffer, key, size)
 }
 
 // Array writers, one concrete method per element type.
@@ -458,7 +367,7 @@ func (w *Writer) Uint64s(key uint8, values []uint64) {
 // and a reader that does not know the key steps over the field like any other.
 func appendArrayField[T Integer](buffer []byte, key uint8, values []T) []byte {
 	width, code := narrowArrayWidth(values)
-	buffer = appendLength(append(buffer, key<<4|nibbleLength|code), len(values)*width)
+	buffer = wirefmt.AppendLength(append(buffer, key<<4|nibbleLength|code), len(values)*width)
 	return appendElements(buffer, values, width)
 }
 
@@ -512,7 +421,7 @@ func (w *Writer) Strings(key uint8, values []string) {
 	for _, value := range values {
 		payload += elementSizeBytes(len(value)) + len(value)
 	}
-	w.Buffer = appendLength(append(w.Buffer, key<<4|nibbleLength), payload)
+	w.Buffer = wirefmt.AppendLength(append(w.Buffer, key<<4|nibbleLength), payload)
 	w.Buffer = appendStringElements(w.Buffer, values, payload)
 }
 
@@ -940,24 +849,11 @@ func (r *Reader) appendStrings(dst []string, count int) ([]string, bool) {
 
 // U16 writes a field whose type cannot exceed two bytes.
 func (w *Writer) U16(key uint8, value uint16) {
-	if value == 0 {
-		return
-	}
-	if value <= inlineValues {
-		w.Buffer = append(w.Buffer, key<<4|uint8(value-1))
-		return
-	}
-	if value <= 0xFF {
-		w.Buffer = append(w.Buffer, key<<4|nibbleSized, uint8(value))
-		return
-	}
-	w.Buffer = append(w.Buffer, key<<4|nibbleSized+1, uint8(value), uint8(value>>8))
+	w.Buffer = wirefmt.AppendU16(w.Buffer, key, value)
 }
 
-// U32 writes a field whose type cannot exceed four bytes.
-//
-// It is shaped like Uint and for the same reason: one compare, one append and
-// one call is all the inliner's budget holds.
+// U32 writes a field whose type cannot exceed four bytes. It is spelled out
+// over the writer for the reason Uint is.
 func (w *Writer) U32(key uint8, value uint32) {
 	if value--; value < inlineValues {
 		w.Buffer = append(w.Buffer, key<<4|uint8(value))
@@ -966,42 +862,16 @@ func (w *Writer) U32(key uint8, value uint32) {
 	}
 }
 
-// u32Wide takes the value U32 decremented, as uintWide takes Uint's.
+// u32Wide is U32's cold half, which takes the decremented value.
 //
 //go:noinline
 func (w *Writer) u32Wide(key uint8, less uint32) {
-	switch value := less + 1; {
-	case value == 0:
-	case value <= 0xFF:
-		w.Buffer = append(w.Buffer, key<<4|nibbleSized, uint8(value))
-	case value <= 0xFFFF:
-		w.Buffer = append(w.Buffer, key<<4|nibbleSized+1,
-			uint8(value), uint8(value>>8))
-	case value <= 0xFF_FFFF:
-		w.Buffer = append(w.Buffer, key<<4|nibbleSized+2,
-			uint8(value), uint8(value>>8), uint8(value>>16))
-	default:
-		w.Buffer = append(w.Buffer, key<<4|nibbleSized+3,
-			uint8(value), uint8(value>>8), uint8(value>>16), uint8(value>>24))
-	}
+	w.Buffer = wirefmt.AppendU32Wide(w.Buffer, key, less)
 }
 
-// I32 writes a signed field no wider than four bytes, as Int does. It is Int
-// spelled again at 32 bits rather than Int behind a widening, which inlined and
-// still measured slower: the same one call, with the comparisons at the width
-// the field already has.
+// I32 writes a signed field no wider than four bytes, as Int does.
 func (w *Writer) I32(key uint8, value int32) {
-	if value > signedInline && value <= 0xFF {
-		w.Buffer = append(w.Buffer, key<<4|nibbleSized, uint8(value))
-		return
-	}
-	if uint32(value)-1 < signedInline {
-		w.Buffer = append(w.Buffer, key<<4|uint8(value-1))
-		return
-	}
-	if value != 0 {
-		w.intWide(key, int64(value))
-	}
+	w.Buffer = wirefmt.AppendI32(w.Buffer, key, value)
 }
 
 // Width-typed readers, the mirror of the writers above.
@@ -1128,12 +998,12 @@ func (r *Reader) I32() int32 {
 
 // F32 writes a float32 as its reversed bit pattern.
 func (w *Writer) F32(key uint8, value float32) {
-	w.Uint(key, uint64(bits.ReverseBytes32(math.Float32bits(value))))
+	w.Buffer = wirefmt.AppendF32(w.Buffer, key, value)
 }
 
 // F64 writes a float64 as its reversed bit pattern.
 func (w *Writer) F64(key uint8, value float64) {
-	w.Uint(key, bits.ReverseBytes64(math.Float64bits(value)))
+	w.Buffer = wirefmt.AppendF64(w.Buffer, key, value)
 }
 
 // F32 reads a field written by F32.

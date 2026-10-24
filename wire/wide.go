@@ -45,6 +45,8 @@ import (
 	"errors"
 	"math"
 	"math/bits"
+
+	"github.com/ivanjoz/colbin/internal/wirefmt"
 )
 
 // MaxWideFields is what eight key bits buy: keys 0..255.
@@ -243,7 +245,7 @@ func (w *Writer8) uintWide(key uint8, value uint64) {
 		w.Buffer = appendVarint(w.Buffer, key, value)
 		return
 	}
-	w.Buffer = appendMagnitude(
+	w.Buffer = wirefmt.AppendMagnitude(
 		append(w.Buffer, key, descriptor(classInt, intPositiveFlag|code)), value, width)
 }
 
@@ -273,7 +275,7 @@ func (w *Writer8) Int(key uint8, value int64) {
 		w.Buffer = appendVarint(w.Buffer, key, folded)
 		return
 	}
-	w.Buffer = appendMagnitude(
+	w.Buffer = wirefmt.AppendMagnitude(
 		append(w.Buffer, key, descriptor(classInt, uint8(detail)|code)), magnitude, width)
 }
 
@@ -389,7 +391,7 @@ func (w *Writer8) String(key uint8, value string) {
 
 func (w *Writer8) blobHeader(key uint8, size int) {
 	code, width := lengthCodeFor(uint64(size))
-	w.Buffer = appendMagnitude(
+	w.Buffer = wirefmt.AppendMagnitude(
 		append(w.Buffer, key, descriptor(classBlob, code)), uint64(size), width)
 }
 
@@ -431,7 +433,7 @@ func appendVec[T Integer](buffer []byte, key uint8, values []T) []byte {
 	if allPositive {
 		detail |= 0b10
 	}
-	buffer = appendMagnitude(
+	buffer = wirefmt.AppendMagnitude(
 		append(buffer, key, descriptor(classVec, detail)), uint64(byteLength), lengthBytes)
 	return appendElements(buffer, values, width)
 }
@@ -522,7 +524,7 @@ func (w *Writer8) Strings(key uint8, values []string) {
 	code, width := lengthCodeFor(uint64(counted))
 	w.Buffer = append(w.Buffer, key, descriptor(classList, listHomogeneous))
 	w.Buffer[len(w.Buffer)-1] |= code
-	w.Buffer = appendMagnitude(w.Buffer, uint64(counted), width)
+	w.Buffer = wirefmt.AppendMagnitude(w.Buffer, uint64(counted), width)
 	w.Buffer = appendCount(w.Buffer, len(values))
 	w.Buffer = appendStringElements(w.Buffer, values, payload)
 }

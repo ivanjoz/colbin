@@ -25,6 +25,8 @@ import (
 	"math/bits"
 
 	"github.com/ivanjoz/colbin/column"
+
+	"github.com/ivanjoz/colbin/internal/wirefmt"
 )
 
 // The composites' flag bit f0.
@@ -203,7 +205,7 @@ func (w *Writer) ElementUint(value uint64) {
 		return
 	}
 	width := (bits.Len64(value) + 7) / 8
-	w.Buffer = appendMagnitude(
+	w.Buffer = wirefmt.AppendMagnitude(
 		append(w.Buffer, elementWidthBase+uint8(width)-1), value, width)
 }
 
@@ -220,17 +222,17 @@ func (w *Writer) ElementInt(value int64) {
 			return
 		}
 		code, width := sizeCodeFor(magnitude)
-		w.Buffer = appendMagnitude(append(w.Buffer, intPositiveFlag|code), magnitude, width)
+		w.Buffer = wirefmt.AppendMagnitude(append(w.Buffer, intPositiveFlag|code), magnitude, width)
 		return
 	}
 	magnitude := -uint64(value)
 	code, width := sizeCodeFor(magnitude)
-	w.Buffer = appendMagnitude(append(w.Buffer, code), magnitude, width)
+	w.Buffer = wirefmt.AppendMagnitude(append(w.Buffer, code), magnitude, width)
 }
 
 func (w *Writer) ElementString(value string) {
 	code, width := lengthCodeFor(uint64(len(value)))
-	w.Buffer = appendMagnitude(append(w.Buffer, code), uint64(len(value)), width)
+	w.Buffer = wirefmt.AppendMagnitude(append(w.Buffer, code), uint64(len(value)), width)
 	w.Buffer = append(w.Buffer, value...)
 }
 

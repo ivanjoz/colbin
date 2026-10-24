@@ -6,64 +6,85 @@ package codec
 import (
 	"unsafe"
 
+	"github.com/ivanjoz/colbin/internal/wirefmt"
 	"github.com/ivanjoz/colbin/wire"
 )
 
 // appendScalars writes a simple plan. See scalars.go.
 func appendScalars(writer *wire.Writer, plan *typePlan, record unsafe.Pointer) {
 	packed := Packed5()
+	buffer := writer.Buffer
 	for index := range plan.fields {
 		field := &plan.fields[index]
 		at := unsafe.Add(record, field.offset)
 		switch field.op {
 		case opBool:
-			writer.Bool(field.key, *(*bool)(at))
+			buffer = wirefmt.AppendBool(buffer, field.key, *(*bool)(at))
 		case opInt8:
-			writer.Int(field.key, int64(*(*int8)(at)))
+			buffer = wirefmt.AppendInt(buffer, field.key, int64(*(*int8)(at)))
 		case opInt16:
-			writer.Int(field.key, int64(*(*int16)(at)))
+			buffer = wirefmt.AppendInt(buffer, field.key, int64(*(*int16)(at)))
 		case opInt32:
-			writer.I32(field.key, *(*int32)(at))
+			buffer = wirefmt.AppendI32(buffer, field.key, *(*int32)(at))
 		case opInt64:
-			writer.Int(field.key, *(*int64)(at))
+			buffer = wirefmt.AppendInt(buffer, field.key, *(*int64)(at))
 		case opUint8:
-			writer.U16(field.key, uint16(*(*uint8)(at)))
+			buffer = wirefmt.AppendU16(buffer, field.key, uint16(*(*uint8)(at)))
 		case opUint16:
-			writer.U16(field.key, *(*uint16)(at))
+			buffer = wirefmt.AppendU16(buffer, field.key, *(*uint16)(at))
 		case opUint32:
-			writer.U32(field.key, *(*uint32)(at))
+			buffer = wirefmt.AppendU32(buffer, field.key, *(*uint32)(at))
 		case opUint64:
-			writer.Uint(field.key, *(*uint64)(at))
+			buffer = wirefmt.AppendUint(buffer, field.key, *(*uint64)(at))
 		case opFloat32:
-			writer.F32(field.key, *(*float32)(at))
+			buffer = wirefmt.AppendF32(buffer, field.key, *(*float32)(at))
 		case opFloat64:
-			writer.F64(field.key, *(*float64)(at))
+			buffer = wirefmt.AppendF64(buffer, field.key, *(*float64)(at))
 		case opString:
 			if packed {
+				writer.Buffer = buffer
 				writer.PackedString(field.key, *(*string)(at))
+				buffer = writer.Buffer
 			} else {
-				writer.String(field.key, *(*string)(at))
+				buffer = wirefmt.AppendString(buffer, field.key, *(*string)(at))
 			}
 		case opBytes:
-			writer.Bytes(field.key, *(*[]byte)(at))
+			buffer = wirefmt.AppendBytes(buffer, field.key, *(*[]byte)(at))
 		case opInt8s:
+			writer.Buffer = buffer
 			writer.Int8s(field.key, *(*[]int8)(at))
+			buffer = writer.Buffer
 		case opInt16s:
+			writer.Buffer = buffer
 			writer.Int16s(field.key, *(*[]int16)(at))
+			buffer = writer.Buffer
 		case opInt32s:
+			writer.Buffer = buffer
 			writer.Int32s(field.key, *(*[]int32)(at))
+			buffer = writer.Buffer
 		case opInt64s:
+			writer.Buffer = buffer
 			writer.Ints(field.key, *(*[]int64)(at))
+			buffer = writer.Buffer
 		case opUint16s:
+			writer.Buffer = buffer
 			writer.Uint16s(field.key, *(*[]uint16)(at))
+			buffer = writer.Buffer
 		case opUint32s:
+			writer.Buffer = buffer
 			writer.Uint32s(field.key, *(*[]uint32)(at))
+			buffer = writer.Buffer
 		case opUint64s:
+			writer.Buffer = buffer
 			writer.Uint64s(field.key, *(*[]uint64)(at))
+			buffer = writer.Buffer
 		case opStrings:
+			writer.Buffer = buffer
 			writer.Strings(field.key, *(*[]string)(at))
+			buffer = writer.Buffer
 		}
 	}
+	writer.Buffer = buffer
 }
 
 // writeValue writes one value op, and reports false for an op that is not
@@ -126,6 +147,7 @@ func writeValue(writer *wire.Writer, key uint8, op fieldOp, at unsafe.Pointer, p
 // composites by call.
 func writeFields(writer *wire.Writer, plan *typePlan, record unsafe.Pointer, buf *scratch) {
 	packed := Packed5()
+	buffer := writer.Buffer
 	for index := range plan.fields {
 		field := &plan.fields[index]
 		at := unsafe.Add(record, field.offset)
@@ -136,65 +158,94 @@ func writeFields(writer *wire.Writer, plan *typePlan, record unsafe.Pointer, buf
 		}
 		switch field.op {
 		case opBool:
-			writer.Bool(field.key, *(*bool)(at))
+			buffer = wirefmt.AppendBool(buffer, field.key, *(*bool)(at))
 		case opInt8:
-			writer.Int(field.key, int64(*(*int8)(at)))
+			buffer = wirefmt.AppendInt(buffer, field.key, int64(*(*int8)(at)))
 		case opInt16:
-			writer.Int(field.key, int64(*(*int16)(at)))
+			buffer = wirefmt.AppendInt(buffer, field.key, int64(*(*int16)(at)))
 		case opInt32:
-			writer.I32(field.key, *(*int32)(at))
+			buffer = wirefmt.AppendI32(buffer, field.key, *(*int32)(at))
 		case opInt64:
-			writer.Int(field.key, *(*int64)(at))
+			buffer = wirefmt.AppendInt(buffer, field.key, *(*int64)(at))
 		case opUint8:
-			writer.U16(field.key, uint16(*(*uint8)(at)))
+			buffer = wirefmt.AppendU16(buffer, field.key, uint16(*(*uint8)(at)))
 		case opUint16:
-			writer.U16(field.key, *(*uint16)(at))
+			buffer = wirefmt.AppendU16(buffer, field.key, *(*uint16)(at))
 		case opUint32:
-			writer.U32(field.key, *(*uint32)(at))
+			buffer = wirefmt.AppendU32(buffer, field.key, *(*uint32)(at))
 		case opUint64:
-			writer.Uint(field.key, *(*uint64)(at))
+			buffer = wirefmt.AppendUint(buffer, field.key, *(*uint64)(at))
 		case opFloat32:
-			writer.F32(field.key, *(*float32)(at))
+			buffer = wirefmt.AppendF32(buffer, field.key, *(*float32)(at))
 		case opFloat64:
-			writer.F64(field.key, *(*float64)(at))
+			buffer = wirefmt.AppendF64(buffer, field.key, *(*float64)(at))
 		case opString:
 			if packed {
+				writer.Buffer = buffer
 				writer.PackedString(field.key, *(*string)(at))
+				buffer = writer.Buffer
 			} else {
-				writer.String(field.key, *(*string)(at))
+				buffer = wirefmt.AppendString(buffer, field.key, *(*string)(at))
 			}
 		case opBytes:
-			writer.Bytes(field.key, *(*[]byte)(at))
+			buffer = wirefmt.AppendBytes(buffer, field.key, *(*[]byte)(at))
 		case opInt8s:
+			writer.Buffer = buffer
 			writer.Int8s(field.key, *(*[]int8)(at))
+			buffer = writer.Buffer
 		case opInt16s:
+			writer.Buffer = buffer
 			writer.Int16s(field.key, *(*[]int16)(at))
+			buffer = writer.Buffer
 		case opInt32s:
+			writer.Buffer = buffer
 			writer.Int32s(field.key, *(*[]int32)(at))
+			buffer = writer.Buffer
 		case opInt64s:
+			writer.Buffer = buffer
 			writer.Ints(field.key, *(*[]int64)(at))
+			buffer = writer.Buffer
 		case opUint16s:
+			writer.Buffer = buffer
 			writer.Uint16s(field.key, *(*[]uint16)(at))
+			buffer = writer.Buffer
 		case opUint32s:
+			writer.Buffer = buffer
 			writer.Uint32s(field.key, *(*[]uint32)(at))
+			buffer = writer.Buffer
 		case opUint64s:
+			writer.Buffer = buffer
 			writer.Uint64s(field.key, *(*[]uint64)(at))
+			buffer = writer.Buffer
 		case opStrings:
+			writer.Buffer = buffer
 			writer.Strings(field.key, *(*[]string)(at))
+			buffer = writer.Buffer
 		case opStruct:
+			writer.Buffer = buffer
 			appendNarrowStruct(writer, field, at, buf)
+			buffer = writer.Buffer
 		case opStructs:
+			writer.Buffer = buffer
 			appendNarrowStructs(writer, field, at, buf)
+			buffer = writer.Buffer
 		case opMap:
+			writer.Buffer = buffer
 			appendNarrowMap(writer, field, at, buf)
+			buffer = writer.Buffer
 		case opPointer:
+			writer.Buffer = buffer
 			appendPointer(writer, field, at, packed)
+			buffer = writer.Buffer
 		case opPointerStruct:
+			writer.Buffer = buffer
 			appendNarrowPointerStruct(writer, field, at, buf)
+			buffer = writer.Buffer
 		default:
 			buf.fail(errNotValueOp(field.op))
 		}
 	}
+	writer.Buffer = buffer
 }
 
 // readScalars reads a simple plan. See scalars.go.

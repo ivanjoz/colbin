@@ -60,6 +60,7 @@ package codec
 import (
 	"unsafe"
 
+	"github.com/ivanjoz/colbin/internal/wirefmt"
 	"github.com/ivanjoz/colbin/wire"
 )
 `)
@@ -71,11 +72,27 @@ import (
 		// switch needs no default.
 		fmt.Fprintf(&out, "\n// appendScalars%s writes a simple plan. See scalars.go.\n", width.suffix)
 		fmt.Fprintf(&out, "func appendScalars%s(writer *%s, plan *typePlan, record unsafe.Pointer) {\n", width.suffix, width.writer)
-		out.WriteString("packed := Packed5()\nfor index := range plan.fields {\nfield := &plan.fields[index]\nat := unsafe.Add(record, field.offset)\nswitch field.op {\n")
-		for _, row := range valueOps {
-			writeArm(&out, row, "field.key")
+		// The narrow walks keep the buffer in a local, written through
+		// internal/wirefmt, and hand it to the writer only around a call that
+		// takes one. See localArm.
+		narrow := width.suffix == ""
+		out.WriteString("packed := Packed5()\n")
+		if narrow {
+			out.WriteString("buffer := writer.Buffer\n")
 		}
-		out.WriteString("}\n}\n}\n")
+		out.WriteString("for index := range plan.fields {\nfield := &plan.fields[index]\nat := unsafe.Add(record, field.offset)\nswitch field.op {\n")
+		for _, row := range valueOps {
+			if narrow {
+				localArm(&out, row, "field.key")
+			} else {
+				writeArm(&out, row, "field.key")
+			}
+		}
+		out.WriteString("}\n}\n")
+		if narrow {
+			out.WriteString("writer.Buffer = buffer\n")
+		}
+		out.WriteString("}\n")
 
 		fmt.Fprintf(&out, "\n// writeValue%s writes one value op, and reports false for an op that is not\n// one, which the caller handles.\n", width.suffix)
 		fmt.Fprintf(&out, "func writeValue%s(writer *%s, key uint8, op fieldOp, at unsafe.Pointer, packed bool) bool {\nswitch op {\n", width.suffix, width.writer)
@@ -93,15 +110,31 @@ import (
 		}
 		fmt.Fprintf(&out, "\n// writeFields%s is %s's walk over the fields: every value op inline, and the\n// composites by call.\n", width.suffix, walker)
 		fmt.Fprintf(&out, "func writeFields%s(writer *%s, plan *typePlan, record unsafe.Pointer, buf *scratch) {\n", width.suffix, width.writer)
-		out.WriteString("packed := Packed5()\nfor index := range plan.fields {\nfield := &plan.fields[index]\nat := unsafe.Add(record, field.offset)\n")
+		out.WriteString("packed := Packed5()\n")
+		if narrow {
+			out.WriteString("buffer := writer.Buffer\n")
+		}
+		out.WriteString("for index := range plan.fields {\nfield := &plan.fields[index]\nat := unsafe.Add(record, field.offset)\n")
 		out.WriteString("if field.indirect {\nif at = *(*unsafe.Pointer)(at); at == nil {\ncontinue\n}\n}\nswitch field.op {\n")
 		for _, row := range valueOps {
-			writeArm(&out, row, "field.key")
+			if narrow {
+				localArm(&out, row, "field.key")
+			} else {
+				writeArm(&out, row, "field.key")
+			}
 		}
 		for _, arm := range composites {
-			fmt.Fprintf(&out, "case %s:\n%s\n", arm[0], arm[1])
+			if narrow {
+				fmt.Fprintf(&out, "case %s:\n%s\n", arm[0], synced(arm[1]))
+			} else {
+				fmt.Fprintf(&out, "case %s:\n%s\n", arm[0], arm[1])
+			}
 		}
-		out.WriteString("default:\nbuf.fail(errNotValueOp(field.op))\n}\n}\n}\n")
+		if narrow {
+			out.WriteString("default:\nbuf.fail(errNotValueOp(field.op))\n}\n}\nwriter.Buffer = buffer\n}\n")
+		} else {
+			out.WriteString("default:\nbuf.fail(errNotValueOp(field.op))\n}\n}\n}\n")
+		}
 
 		// An unknown key is stepped over at either width: the narrow nibble sizes
 		// a field as the wide descriptor does.
@@ -203,6 +236,40 @@ func writeArm(out *bytes.Buffer, row valueOp, key string) {
 		return
 	}
 	fmt.Fprintf(out, "writer.%s(%s, %s)\n", row.write, key, value)
+}
+
+// slicedWrites are the writer methods internal/wirefmt has as a function over
+// the buffer, which a narrow walk calls with the buffer in a local.
+var slicedWrites = map[string]bool{
+	"Bool": true, "Int": true, "I32": true, "U16": true, "U32": true, "Uint": true,
+	"F32": true, "F64": true, "String": true, "Bytes": true,
+}
+
+// localArm is writeArm for a narrow walk that holds the buffer in a local:
+// a scalar is written through wirefmt with it in registers, and anything else
+// gets it handed to the writer for the call. Through the writer, every field
+// loaded the buffer from memory and stored it back.
+func localArm(out *bytes.Buffer, row valueOp, key string) {
+	value := fmt.Sprintf("*(*%s)(at)", goTypeName(row))
+	if row.widen != "" {
+		value = fmt.Sprintf("%s(%s)", row.widen, value)
+	}
+	fmt.Fprintf(out, "case %s:\n", opName(row.op))
+	switch {
+	case row.op == opString:
+		fmt.Fprintf(out, "if packed {\n%s\n} else {\nbuffer = wirefmt.AppendString(buffer, %s, %s)\n}\n",
+			synced(fmt.Sprintf("writer.PackedString(%s, %s)", key, value)), key, value)
+	case slicedWrites[row.write]:
+		fmt.Fprintf(out, "buffer = wirefmt.Append%s(buffer, %s, %s)\n", row.write, key, value)
+	default:
+		fmt.Fprintf(out, "%s\n", synced(fmt.Sprintf("writer.%s(%s, %s)", row.write, key, value)))
+	}
+}
+
+// synced wraps a call that writes through the writer, for a walk holding the
+// buffer in a local.
+func synced(call string) string {
+	return "writer.Buffer = buffer\n" + call + "\nbuffer = writer.Buffer"
 }
 
 func readArm(out *bytes.Buffer, row valueOp) {

@@ -896,7 +896,7 @@ descriptor doing the job it was specified for.
 
 ### A negative result: the exact-width store
 
-`appendMagnitude` stores eight bytes and cuts back rather than storing exactly
+`wirefmt.AppendMagnitude` stores eight bytes and cuts back rather than storing exactly
 `width` through a switch. The over-store looked like the thing to fix when the
 allocation profile pointed at it, so it was replaced with a switch — and a
 six-field encode went from 23.0 ns to 30.5. The jump table costs more than the

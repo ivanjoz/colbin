@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"testing"
+
+	"github.com/ivanjoz/colbin/internal/wirefmt"
 )
 
 type tableRow struct {
@@ -234,7 +236,7 @@ func TestASizedLengthIsTheShortestForm(t *testing.T) {
 				mark := open.narrow(&narrow, count)
 				narrow.Buffer = append(narrow.Buffer, filler...)
 				narrow.Close(mark)
-				want := append(appendLength([]byte{0xAA, 3<<4 | nibbleLength | open.flags}, len(body)), body...)
+				want := append(wirefmt.AppendLength([]byte{0xAA, 3<<4 | nibbleLength | open.flags}, len(body)), body...)
 				if !bytes.Equal(narrow.Buffer, want) {
 					t.Fatalf("narrow %s of %d, %d-byte body: the framing differs", open.name, count, size)
 				}

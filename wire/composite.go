@@ -24,7 +24,11 @@ package wire
 // every nested value on every message, to save a rare copy. This way the common
 // composite is one reserved byte and one store.
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+
+	"github.com/ivanjoz/colbin/internal/wirefmt"
+)
 
 // Mark records where a composite's length placeholder sits, so Close can patch
 // it. It is a value, so nesting costs no allocation.
@@ -196,7 +200,7 @@ func (w *Writer8) ElementUint(value uint64) {
 		return
 	}
 	code, width := sizeCodeFor(value)
-	w.Buffer = appendMagnitude(
+	w.Buffer = wirefmt.AppendMagnitude(
 		append(w.Buffer, descriptor(classInt, intPositiveFlag|code)), value, width)
 }
 
@@ -208,14 +212,14 @@ func (w *Writer8) ElementInt(value int64) {
 	}
 	magnitude := -uint64(value)
 	code, width := sizeCodeFor(magnitude)
-	w.Buffer = appendMagnitude(
+	w.Buffer = wirefmt.AppendMagnitude(
 		append(w.Buffer, descriptor(classInt, code)), magnitude, width)
 }
 
 // ElementString writes a string element.
 func (w *Writer8) ElementString(value string) {
 	code, width := lengthCodeFor(uint64(len(value)))
-	w.Buffer = appendMagnitude(
+	w.Buffer = wirefmt.AppendMagnitude(
 		append(w.Buffer, descriptor(classBlob, code)), uint64(len(value)), width)
 	w.Buffer = append(w.Buffer, value...)
 }

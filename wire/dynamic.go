@@ -58,6 +58,8 @@ package wire
 import (
 	"math"
 	"math/bits"
+
+	"github.com/ivanjoz/colbin/internal/wirefmt"
 )
 
 // The SPECIAL details this file assigns. Details 0..2 are null, true and false;
@@ -160,7 +162,7 @@ func (w *Writer8) ElementFloat32(value float32) {
 func (w *Writer8) ElementBytes(value []byte) {
 	w.Buffer = append(w.Buffer, descriptor(classSpecial, specialBytes))
 	code, width := lengthCodeFor(uint64(len(value)))
-	w.Buffer = appendMagnitude(
+	w.Buffer = wirefmt.AppendMagnitude(
 		append(w.Buffer, descriptor(classBlob, code)), uint64(len(value)), width)
 	w.Buffer = append(w.Buffer, value...)
 }
