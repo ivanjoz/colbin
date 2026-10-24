@@ -47,7 +47,11 @@ import (
 // four-field row it crosses at three; the value here is deliberately above that,
 // because the table also costs a transposition pass and a scratch buffer, and
 // those are worth paying only once there are rows enough to amortise them.
-const tableThreshold = 8
+//
+// It is declared in threshold.go, as a constant, and in threshold_ablation.go,
+// as a variable the colbin-benchmarks ablation moves. The wire does not depend
+// on it: a reader dispatches on the descriptor it finds, so a message written
+// under any threshold decodes under any other.
 
 // columnable reports whether a field's op is one the column codec carries.
 // Floats travel as their bit patterns, which no transform helps but raw blocks

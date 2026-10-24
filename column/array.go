@@ -125,6 +125,9 @@ func AppendArray[T Signed](out []byte, vals []T) []byte {
 	// Raw is zigzagged whenever the column has a negative, which is what keeps
 	// -1 from becoming a 64-bit residual.
 	zz := minimum < 0
+	if forced := forcedTransform; forced >= 0 {
+		return appendForced(out, vals, uint8(forced), minimum, zz, deltaOverflows)
+	}
 	transform, zigzagged := trRaw, zz
 	best := blockedCost(vals, trRaw, 0, zz)
 	if cost := blockedCost(vals, trFOR, minimum, false); cost < best {

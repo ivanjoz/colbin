@@ -112,6 +112,9 @@ jobs:
       # The one full run of the Go suite in this job, so it is the race one: the
       # codecs keep package-level caches that every caller's goroutines share.
       - run: go test -race ./...
+      # The ablation hooks colbin-benchmarks reaches through go:linkname exist
+      # only under this tag, so it has to keep building and passing too.
+      - run: go vet -tags colbin_ablation ./codec ./column && go test -tags colbin_ablation ./codec ./column
 
       # The Rust crate (rust/) and the wasm module (rust/wasm). The corpus is
       # generated from the Go codecs that just passed, so regenerating it here
