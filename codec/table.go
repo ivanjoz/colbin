@@ -117,6 +117,7 @@ type scratch struct {
 type columnBuffers struct {
 	ints    []int64
 	strings []string
+	decoded []decodedColumn
 }
 
 var columnPool sync.Pool // *columnBuffers
@@ -225,17 +226,6 @@ func (buf *scratch) reserveTable(ints, strings int) *columnBuffers {
 		columns.strings = make([]string, 0, strings)
 	}
 	return columns
-}
-
-// hasStringColumn says a row type has a string field, which is what needs the
-// strings half of the transposition buffer.
-func (plan *typePlan) hasStringColumn() bool {
-	for index := range plan.fields {
-		if plan.fields[index].op == opString {
-			return true
-		}
-	}
-	return false
 }
 
 // appendTableField writes a slice of structs transposed: one keyed column per
@@ -396,29 +386,148 @@ func readColumns(columns *wire.Reader8, field *planField, at unsafe.Pointer, row
 		columns.Fail(err)
 		return
 	}
-	scratchColumns := buf.reserve(rows, field.sub.hasStringColumn())
 	newSlice(field, at, rows)
-	data := (*sliceHeader)(at).data
+	table := startTable(field, (*sliceHeader)(at).data, rows, buf)
 	for columns.More() {
 		column := field.sub.find(columns.Key())
 		if column == nil {
-			columns.Skip()
+			if !columns.Skip() {
+				break
+			}
 			continue
 		}
 		if column.op == opString {
-			scratchColumns.strings = columns.Strings(scratchColumns.strings[:0])
-			if columns.Err() == nil && len(scratchColumns.strings) != rows {
-				columns.Fail(errColumnLength)
+			got := columns.Strings(table.stringSlot())
+			if len(got) != rows {
+				if columns.Err() == nil {
+					columns.Fail(errColumnLength)
+				}
+				continue
 			}
-			scatterStrings(scratchColumns.strings, data, field.stride, column.offset, rows)
+			table.decoded(column)
 			continue
 		}
-		scratchColumns.ints = columns.Column(rows, scratchColumns.ints[:0])
-		scatterInts(scratchColumns.ints, data, field.stride, column, rows)
+		if got := columns.Column(rows, table.intSlot()); len(got) == rows {
+			table.decoded(column)
+		}
 	}
+	table.finish()
 }
 
 var errColumnLength = errors.New("colbin: a table column holds a different number of values than the table has rows")
+
+// tableDecode is a table being decoded: every column is decoded first, into
+// the transposition buffer, and only then scattered into the rows, a chunk of
+// rows at a time — gatherTable run backwards, for the same reason. Scattering
+// each column as it was decoded wrote across every row of the slice once per
+// column, and that was most of a large table's decode.
+//
+// A table whose rows fit in cache is written from cache either way, and there
+// deferring only costs a pass: its columns are scattered as they are decoded,
+// through one column's worth of buffer.
+//
+// The loop over the columns stays with each key width's reader, so that the
+// reader is a concrete type and stays on the stack; this is the bookkeeping
+// both share.
+type tableDecode struct {
+	buffers         *columnBuffers
+	ints            []int64
+	strings         []string
+	pending         []decodedColumn
+	intAt, stringAt int
+	slotIsString    bool
+	direct          bool
+	data            unsafe.Pointer
+	stride          uintptr
+	rows            int
+}
+
+// decodedColumn is a column waiting to be scattered: its field, and where its
+// rows start in the buffer's ints or strings.
+type decodedColumn struct {
+	column *planField
+	at     int
+}
+
+// cachedTableBytes is the size of slice below which a table's rows are taken
+// to stay in cache through a column-at-a-time scatter: a core's share of L2.
+const cachedTableBytes = 256 << 10
+
+func startTable(field *planField, data unsafe.Pointer, rows int, buf *scratch) tableDecode {
+	table := tableDecode{data: data, stride: field.stride, rows: rows,
+		direct: uintptr(rows)*field.stride <= cachedTableBytes}
+	intColumns, stringColumns := 1, 1
+	if !table.direct {
+		intColumns, stringColumns = field.sub.columnCounts()
+	}
+	table.buffers = buf.reserveTable(rows*intColumns, rows*stringColumns)
+	table.ints = table.buffers.ints[:rows*intColumns]
+	table.strings = table.buffers.strings[:rows*stringColumns]
+	table.pending = table.buffers.decoded[:0]
+	return table
+}
+
+// intSlot is where the next integer column decodes to: rows values, with no
+// capacity past them, so that a column longer than the table cannot run into
+// the next one's.
+func (t *tableDecode) intSlot() []int64 {
+	if t.intAt == len(t.ints) {
+		t.flush()
+	}
+	t.slotIsString = false
+	return t.ints[t.intAt : t.intAt : t.intAt+t.rows]
+}
+
+func (t *tableDecode) stringSlot() []string {
+	if t.stringAt == len(t.strings) {
+		t.flush()
+	}
+	t.slotIsString = true
+	return t.strings[t.stringAt : t.stringAt : t.stringAt+t.rows]
+}
+
+// decoded keeps the column just decoded into the last slot handed out.
+func (t *tableDecode) decoded(column *planField) {
+	if t.direct {
+		if t.slotIsString {
+			scatterStrings(t.strings, t.data, t.stride, column.offset, t.rows)
+		} else {
+			scatterInts(t.ints, t.data, t.stride, column, t.rows)
+		}
+		return
+	}
+	if t.slotIsString {
+		t.pending = append(t.pending, decodedColumn{column, t.stringAt})
+		t.stringAt += t.rows
+		return
+	}
+	t.pending = append(t.pending, decodedColumn{column, t.intAt})
+	t.intAt += t.rows
+}
+
+// flush scatters what has been decoded so far. It runs early only for a column
+// sent twice, which finds no room left: the first copy goes into the rows now,
+// and the later one lands over it after, as it would have column by column.
+func (t *tableDecode) flush() {
+	for start := 0; start < t.rows; start += gatherChunk {
+		end := min(start+gatherChunk, t.rows)
+		chunk := unsafe.Add(t.data, uintptr(start)*t.stride)
+		for _, entry := range t.pending {
+			column := entry.column
+			if column.op == opString {
+				scatterStrings(t.strings[entry.at+start:entry.at+end], chunk, t.stride, column.offset, end-start)
+				continue
+			}
+			scatterInts(t.ints[entry.at+start:entry.at+end], chunk, t.stride, column, end-start)
+		}
+	}
+	t.pending, t.intAt, t.stringAt = t.pending[:0], 0, 0
+}
+
+func (t *tableDecode) finish() {
+	t.flush()
+	t.buffers.decoded = t.pending
+}
 
 func scatterInts(values []int64, data unsafe.Pointer, stride uintptr, column *planField, rows int) {
 	if len(values) < rows {

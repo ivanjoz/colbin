@@ -258,9 +258,8 @@ func readNarrowTable(reader *wire.Reader, field *planField, at unsafe.Pointer, b
 		reader.Fail(err)
 		return
 	}
-	scratchColumns := buf.reserve(rows, field.sub.hasStringColumn())
 	newSlice(field, at, rows)
-	data := (*sliceHeader)(at).data
+	table := startTable(field, (*sliceHeader)(at).data, rows, buf)
 	columns := wire.NewReader(body)
 	for columns.More() {
 		column := field.sub.find(columns.Key())
@@ -273,16 +272,21 @@ func readNarrowTable(reader *wire.Reader, field *planField, at unsafe.Pointer, b
 			continue
 		}
 		if column.op == opString {
-			scratchColumns.strings = columns.Strings(scratchColumns.strings[:0])
-			if columns.Err() == nil && len(scratchColumns.strings) != rows {
-				columns.Fail(errColumnLength)
+			got := columns.Strings(table.stringSlot())
+			if len(got) != rows {
+				if columns.Err() == nil {
+					columns.Fail(errColumnLength)
+				}
+				continue
 			}
-			scatterStrings(scratchColumns.strings, data, field.stride, column.offset, rows)
+			table.decoded(column)
 			continue
 		}
-		scratchColumns.ints = columns.Column(rows, scratchColumns.ints[:0])
-		scatterInts(scratchColumns.ints, data, field.stride, column, rows)
+		if got := columns.Column(rows, table.intSlot()); len(got) == rows {
+			table.decoded(column)
+		}
 	}
+	table.finish()
 	reader.Fail(columns.Err())
 }
 

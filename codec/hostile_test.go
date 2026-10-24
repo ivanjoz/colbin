@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/ivanjoz/colbin/wire"
 )
@@ -100,6 +101,96 @@ func TestANarrowTableOfWideRowsRoundTrips(t *testing.T) {
 		}
 		if !bytes.Contains(text, []byte(`"Y":900`)) {
 			t.Fatalf("n=%d: ToJSON lost the wide column: %s", n, text)
+		}
+	}
+}
+
+// A table too big for cache has its columns decoded whole before any is
+// scattered into the rows. Rows at both key widths, past cachedTableBytes.
+func TestALargeTableRoundTrips(t *testing.T) {
+	type narrow struct {
+		A int64   `cb:"1"`
+		S string  `cb:"2"`
+		F float64 `cb:"3"`
+		B bool    `cb:"4"`
+		I int32   `cb:"5"`
+	}
+	type wide struct {
+		A int64  `cb:"1"`
+		S string `cb:"18"`
+		U uint16 `cb:"19"`
+	}
+	type holder struct {
+		Narrow []narrow `cb:"1"`
+		Wide   []wide   `cb:"2"`
+	}
+	const rows = 20000
+	var value holder
+	for index := range rows {
+		value.Narrow = append(value.Narrow, narrow{A: int64(index) * 7, S: string(rune('a' + index%26)),
+			F: float64(index) / 3, B: index%3 == 0, I: int32(-index)})
+		value.Wide = append(value.Wide, wide{A: int64(index), S: string(rune('A' + index%26)), U: uint16(index)})
+	}
+	if size := uintptr(rows) * unsafe.Sizeof(wide{}); size <= cachedTableBytes {
+		t.Fatalf("a table of %d bytes is scattered as decoded, so this tests nothing", size)
+	}
+	message, err := Marshal(&value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back holder
+	if err := Unmarshal(message, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(back, value) {
+		t.Fatal("a large table did not round-trip")
+	}
+}
+
+// A column sent twice finds no room left in a deferred table's buffer. The
+// later copy wins, as it did when each column was scattered as it came.
+func TestALargeTableColumnSentTwiceLastWins(t *testing.T) {
+	type row struct {
+		A int64  `cb:"1"`
+		B int64  `cb:"2"`
+		S string `cb:"3"`
+	}
+	type holder struct {
+		Rows []row `cb:"1"`
+	}
+	const rows = 20000
+	ints := func(base int64) []int64 {
+		out := make([]int64, rows)
+		for index := range out {
+			out[index] = base + int64(index)
+		}
+		return out
+	}
+	texts := func(text string) []string {
+		out := make([]string, rows)
+		for index := range out {
+			out[index] = text
+		}
+		return out
+	}
+	writer := wire.Writer{Buffer: []byte{rootStructNarrow}}
+	table := writer.OpenTable(0, rows)
+	writer.Column(0, ints(0))
+	writer.StringColumn(2, texts("first"))
+	writer.Column(1, ints(500))
+	writer.Column(0, ints(1000))
+	writer.StringColumn(2, texts("second"))
+	writer.Close(table)
+	var back holder
+	if err := Unmarshal(writer.Buffer, &back); err != nil {
+		t.Fatal(err)
+	}
+	if len(back.Rows) != rows {
+		t.Fatalf("decoded %d rows", len(back.Rows))
+	}
+	for index, got := range back.Rows {
+		if want := (row{A: 1000 + int64(index), B: 500 + int64(index), S: "second"}); got != want {
+			t.Fatalf("row %d: got %+v, want %+v", index, got, want)
 		}
 	}
 }
