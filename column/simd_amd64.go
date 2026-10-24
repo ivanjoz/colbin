@@ -23,6 +23,10 @@ import (
 // useSIMD is whether this CPU runs the kernels, decided once.
 var useSIMD = archsimd.X86.AVX2()
 
+// unpackVectorised says unpackSIMD reads blocks in this build; the assembly
+// build leaves them to the scalar read.
+const unpackVectorised = true
+
 // statsSIMD is stats for []int64.
 func statsSIMD(vals []int64) (minimum int64, constant, deltaOverflows bool) {
 	defer archsimd.ClearAVXUpperBits()

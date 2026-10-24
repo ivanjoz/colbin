@@ -1,11 +1,14 @@
-//go:build !(goexperiment.simd && amd64) || purego
+//go:build !amd64 || purego
 
 package column
 
-// useSIMD: see simd_amd64.go. Without the SIMD experiment, off amd64, or
-// under the purego tag it is a constant false, so every branch on it is dead
-// code and the scalar loops are all that is compiled in.
+// useSIMD: see asm_amd64.go and simd_amd64.go. Off amd64, or under the purego
+// tag, it is a constant false, so every branch on it is dead code and the
+// scalar loops are all that is compiled in.
 const useSIMD = false
+
+// unpackVectorised says unpackSIMD reads anything; see simd_amd64.go.
+const unpackVectorised = false
 
 // The kernels' scalar twins, never called: they keep the dispatch compiling.
 

@@ -1,4 +1,4 @@
-//go:build goexperiment.simd && amd64 && !purego
+//go:build amd64 && !purego
 
 package column
 
@@ -39,7 +39,7 @@ func TestSIMDUnpackReadsWhatPackWrote(t *testing.T) {
 		}
 		// And the kernel is what read them, rather than the scalar read
 		// after it: all of a full block with room after it.
-		if w <= wideWidth {
+		if w <= wideWidth && unpackVectorised {
 			block := make([]uint64, blockSize)
 			buf := append(packRun(nil, block, w), make([]byte, 16)...)
 			if done := unpackSIMD(buf, block, w); done != blockSize {
