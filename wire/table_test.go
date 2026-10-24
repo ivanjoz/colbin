@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/ivanjoz/colbin/internal/wirefmt"
@@ -255,5 +256,32 @@ func TestASizedLengthIsTheShortestForm(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// A column is read with the rest of the message after it, for the codec's
+// one-load read, but may not take any of it: one read for more rows than it
+// holds fails, as it did when it had only its own bytes, rather than decoding
+// the next field as its tail.
+func TestAColumnStopsAtItsSize(t *testing.T) {
+	values := []int64{5, 900, 17, 33, 2, 41, 600, 7}
+	var narrow Writer
+	narrow.Column(1, values)
+	narrow.String(2, string(make([]byte, 64)))
+	reader := NewReader(narrow.Buffer)
+	if reader.Column(len(values)+8, nil); reader.Err() == nil {
+		t.Fatal("narrow: a column read for more rows than it holds succeeded")
+	}
+	reader = NewReader(narrow.Buffer)
+	if got := reader.Column(len(values), nil); reader.Err() != nil || !slices.Equal(got, values) {
+		t.Fatal("narrow:", got, reader.Err())
+	}
+
+	var wide Writer8
+	wide.Column(1, values)
+	wide.String(2, string(make([]byte, 64)))
+	reader8 := NewReader8(wide.Buffer)
+	if reader8.Column(len(values)+8, nil); reader8.Err() == nil {
+		t.Fatal("wide: a column read for more rows than it holds succeeded")
 	}
 }

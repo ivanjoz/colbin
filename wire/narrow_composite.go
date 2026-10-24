@@ -458,7 +458,7 @@ func (r *Reader) Column(rows int, dst []int64) []int64 {
 	if !ok {
 		return dst
 	}
-	dst, err := decodeColumn(body, rows, dst)
+	dst, err := decodeColumn(r.buffer[r.at-len(body):], len(body), rows, dst)
 	r.Fail(err)
 	return dst
 }

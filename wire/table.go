@@ -120,18 +120,32 @@ func (r *Reader8) Column(rows int, dst []int64) []int64 {
 	if !ok {
 		return dst
 	}
-	dst, err := decodeColumn(body, rows, dst)
+	dst, err := decodeColumn(r.buffer[r.at-len(body):], len(body), rows, dst)
 	r.Fail(err)
 	return dst
 }
 
-// decodeColumn decodes one column's body into dst, reusing its capacity.
-func decodeColumn(body []byte, rows int, dst []int64) ([]int64, error) {
+// decodeColumn decodes the column of size bytes that rest opens with into dst,
+// reusing its capacity.
+//
+// It is handed the rest of the message rather than the column alone because
+// the column codec reads a value with one eight-byte load wherever eight bytes
+// follow it, and gathers the bytes one at a time where they do not. A table's
+// columns are short more often than not, so cut at their end every one of them
+// took the slow read throughout: a third of a 16-row column's decode. What
+// follows the column is only ever loaded and masked off, never decoded, and a
+// column that claims more than its size is refused here, as it was by the
+// codec when it had only its own bytes.
+func decodeColumn(rest []byte, size, rows int, dst []int64) ([]int64, error) {
 	if cap(dst) < rows {
 		dst = make([]int64, rows)
 	}
 	dst = dst[:rows]
-	if _, err := column.DecodeArray(body, rows, dst); err != nil {
+	used, err := column.DecodeArray(rest, rows, dst)
+	if err == nil && used > size {
+		err = ErrTruncated
+	}
+	if err != nil {
 		return nil, err
 	}
 	return dst, nil
