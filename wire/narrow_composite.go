@@ -43,6 +43,18 @@ func (w *Writer) openNarrowComposite(key, flags uint8) Mark {
 	return Mark{at: len(w.Buffer) - 1}
 }
 
+// openNarrowSized is openNarrowComposite with the placeholder already the length
+// form a body of expect bytes takes. See Writer8.openSized.
+func (w *Writer) openNarrowSized(key, flags uint8, expect int) Mark {
+	extra := lengthBytes(expect) - 1
+	if extra == 0 {
+		return w.openNarrowComposite(key, flags)
+	}
+	w.Buffer = append(w.Buffer, key<<4|nibbleLength|flags, 0, 0, 0, 0, 0)
+	w.Buffer = w.Buffer[:len(w.Buffer)-4+extra]
+	return Mark{at: len(w.Buffer) - 1 - extra, extra: extra}
+}
+
 // OpenStruct begins a nested key run under key, at four key bits inside.
 func (w *Writer) OpenStruct(key uint8) Mark {
 	return w.openNarrowComposite(key, 0)
@@ -58,14 +70,16 @@ func (w *Writer) OpenStructWide(key uint8) Mark {
 // with OpenElement, because a narrow element carries a length and no descriptor
 // — its shape is the schema's to know.
 func (w *Writer) OpenList(key uint8, count int) Mark {
-	mark := w.openNarrowComposite(key, 0)
+	// Every element spends at least its length byte, so the count is a floor
+	// under the body and the guess is never too long.
+	mark := w.openNarrowSized(key, 0, count)
 	w.Buffer = appendCount(w.Buffer, count)
 	return mark
 }
 
 // OpenMap begins a map of count entries under key.
 func (w *Writer) OpenMap(key uint8, count int) Mark {
-	mark := w.openNarrowComposite(key, 0)
+	mark := w.openNarrowSized(key, 0, count)
 	w.Buffer = appendCount(w.Buffer, count)
 	return mark
 }
@@ -74,7 +88,8 @@ func (w *Writer) OpenMap(key uint8, count int) Mark {
 // type's key width: Column for four bits, or a Writer8 over the same buffer for
 // eight. Close it with Close.
 func (w *Writer) OpenTable(key uint8, rows int) Mark {
-	mark := w.openNarrowComposite(key, narrowTable)
+	// A row is at least a byte of some column, near enough to size the length.
+	mark := w.openNarrowSized(key, narrowTable, rows)
 	w.Buffer = appendCount(w.Buffer, rows)
 	return mark
 }
@@ -104,8 +119,8 @@ func (w *Writer) OpenElement() Mark {
 // size, one byte up to 254 or 0xFF and a u32, and CloseElement is the one to
 // call — see the comment there.
 func (w *Writer) Close(mark Mark) {
-	body := len(w.Buffer) - (mark.at + 1)
-	if body <= inlineLength {
+	body := len(w.Buffer) - (mark.at + 1 + mark.extra)
+	if body <= inlineLength && mark.extra == 0 {
 		w.Buffer[mark.at] = uint8(body)
 		return
 	}
@@ -140,23 +155,32 @@ func (w *Writer) CloseElement(mark Mark) {
 	binary.LittleEndian.PutUint32(w.Buffer[mark.at+1:], uint32(body))
 }
 
-// widenLength turns a one-byte length placeholder into three or five bytes,
-// shifting the body up to make room. Out of line because it is the rare path.
+// widenLength rewrites a length placeholder as the form the body needs — three
+// or five bytes where one was reserved, or whatever openNarrowSized's guess got
+// wrong — shifting the body to fit. Out of line because it is the rare path.
 func (w *Writer) widenLength(mark Mark, body int) {
-	if body <= 0xFFFF {
-		w.Buffer = append(w.Buffer, 0, 0)
-		copy(w.Buffer[mark.at+3:], w.Buffer[mark.at+1:len(w.Buffer)-2])
-		w.Buffer[mark.at] = length16
-		binary.LittleEndian.PutUint16(w.Buffer[mark.at+1:], uint16(body))
-		return
-	}
 	if uint64(body) > math.MaxUint32 {
 		panic(errFieldTooLarge)
 	}
-	w.Buffer = append(w.Buffer, 0, 0, 0, 0)
-	copy(w.Buffer[mark.at+5:], w.Buffer[mark.at+1:len(w.Buffer)-4])
-	w.Buffer[mark.at] = length32
-	binary.LittleEndian.PutUint32(w.Buffer[mark.at+1:], uint32(body))
+	extra := lengthBytes(body) - 1
+	if shift := extra - mark.extra; shift != 0 {
+		start, end := mark.at+1+mark.extra, len(w.Buffer)
+		if shift > 0 {
+			w.Buffer = append(w.Buffer, 0, 0, 0, 0)
+		}
+		copy(w.Buffer[start+shift:], w.Buffer[start:end])
+		w.Buffer = w.Buffer[:end+shift]
+	}
+	switch extra {
+	case 0:
+		w.Buffer[mark.at] = uint8(body)
+	case 2:
+		w.Buffer[mark.at] = length16
+		binary.LittleEndian.PutUint16(w.Buffer[mark.at+1:], uint16(body))
+	default:
+		w.Buffer[mark.at] = length32
+		binary.LittleEndian.PutUint32(w.Buffer[mark.at+1:], uint32(body))
+	}
 }
 
 // Element writers, the key-less values a narrow map's entries are made of. A
@@ -410,7 +434,7 @@ func (w *Writer) Column(key uint8, values []int64) {
 	if allZero(values) {
 		return
 	}
-	mark := w.openNarrowComposite(key, 0)
+	mark := w.openNarrowSized(key, 0, len(values))
 	w.Buffer = column.AppendArray(w.Buffer, values)
 	w.Close(mark)
 }

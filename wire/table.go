@@ -30,7 +30,8 @@ const tableFlag uint8 = 0b1000
 // OpenTable begins a table of rows rows under key. Write one column per field
 // with the column writers below, then Close.
 func (w *Writer8) OpenTable(key uint8, rows int) Mark {
-	mark := w.openComposite(key, classMap, tableFlag)
+	// A row is at least a byte of some column, near enough to size the length.
+	mark := w.openSized(key, classMap, tableFlag, rows)
 	w.Buffer = appendCount(w.Buffer, rows)
 	return mark
 }
@@ -45,7 +46,7 @@ func (w *Writer8) Column(key uint8, values []int64) {
 	if allZero(values) {
 		return
 	}
-	mark := w.openComposite(key, classCol, 0)
+	mark := w.openSized(key, classCol, 0, len(values))
 	w.Buffer = column.AppendArray(w.Buffer, values)
 	w.Close(mark)
 }

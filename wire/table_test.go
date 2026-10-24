@@ -1,6 +1,8 @@
 package wire
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"testing"
 )
@@ -197,4 +199,59 @@ func BenchmarkRowWiseWrite(b *testing.B) {
 		buffer = writeRowWise(buffer[:0], rows)
 	}
 	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*len(rows)), "ns/row")
+}
+
+// A table's, a list's and a map's length is reserved by a guess at their size,
+// and the guess must never show in the bytes: whatever was reserved, the length
+// comes out in the shortest form, as a one-byte placeholder widened would
+// write it.
+func TestASizedLengthIsTheShortestForm(t *testing.T) {
+	sizes := []int{0, 1, 200, 253, 254, 255, 256, 300, 65535, 65536, 70000}
+	opens := []struct {
+		name   string
+		narrow func(*Writer, int) Mark
+		flags  uint8
+		wide   func(*Writer8, int) Mark
+		desc   uint8
+	}{
+		{"table", func(w *Writer, n int) Mark { return w.OpenTable(3, n) }, narrowTable,
+			func(w *Writer8, n int) Mark { return w.OpenTable(3, n) }, descriptor(classMap, tableFlag)},
+		{"list", func(w *Writer, n int) Mark { return w.OpenList(3, n) }, 0,
+			func(w *Writer8, n int) Mark { return w.OpenList(3, n) }, descriptor(classList, 0)},
+		{"map", func(w *Writer, n int) Mark { return w.OpenMap(3, n) }, 0,
+			func(w *Writer8, n int) Mark { return w.OpenMap(3, n) }, descriptor(classMap, 0)},
+	}
+	for _, open := range opens {
+		for _, count := range sizes {
+			for _, size := range sizes {
+				filler := make([]byte, size)
+				for index := range filler {
+					filler[index] = byte(index)
+				}
+				body := append(appendCount(nil, count), filler...)
+
+				narrow := Writer{Buffer: []byte{0xAA}}
+				mark := open.narrow(&narrow, count)
+				narrow.Buffer = append(narrow.Buffer, filler...)
+				narrow.Close(mark)
+				want := append(appendLength([]byte{0xAA, 3<<4 | nibbleLength | open.flags}, len(body)), body...)
+				if !bytes.Equal(narrow.Buffer, want) {
+					t.Fatalf("narrow %s of %d, %d-byte body: the framing differs", open.name, count, size)
+				}
+
+				wide := Writer8{Buffer: []byte{0xAA}}
+				mark = open.wide(&wide, count)
+				wide.Buffer = append(wide.Buffer, filler...)
+				wide.Close(mark)
+				want = []byte{0xAA, 3, open.desc, byte(len(body))}
+				if len(body) >= inlineCompositeLength {
+					want = binary.LittleEndian.AppendUint32([]byte{0xAA, 3, open.desc | 2}, uint32(len(body)))
+				}
+				want = append(want, body...)
+				if !bytes.Equal(wide.Buffer, want) {
+					t.Fatalf("wide %s of %d, %d-byte body: the framing differs", open.name, count, size)
+				}
+			}
+		}
+	}
 }

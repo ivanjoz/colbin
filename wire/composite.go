@@ -28,7 +28,12 @@ import "encoding/binary"
 
 // Mark records where a composite's length placeholder sits, so Close can patch
 // it. It is a value, so nesting costs no allocation.
-type Mark struct{ at int }
+type Mark struct {
+	at int
+	// extra is how many bytes the placeholder holds past its first, for a
+	// composite opened with room for a long length. See openSized.
+	extra int
+}
 
 // inlineCompositeLength is what the reserved byte holds before the body grows
 // past it.
@@ -72,7 +77,9 @@ func (w *Writer8) OpenElementStructWide() Mark {
 // bare descriptor and payload — OpenElementStruct for a struct, or one of the
 // element writers below.
 func (w *Writer8) OpenList(key uint8, count int) Mark {
-	mark := w.openComposite(key, classList, 0)
+	// Every element spends at least its descriptor, so the count is a floor
+	// under the body and the guess is never too long.
+	mark := w.openSized(key, classList, 0, count)
 	w.Buffer = appendCount(w.Buffer, count)
 	return mark
 }
@@ -80,7 +87,7 @@ func (w *Writer8) OpenList(key uint8, count int) Mark {
 // OpenMap begins a map of count entries under key. Each entry is a key value
 // then a value value, both written as a bare descriptor and payload.
 func (w *Writer8) OpenMap(key uint8, count int) Mark {
-	mark := w.openComposite(key, classMap, 0)
+	mark := w.openSized(key, classMap, 0, count)
 	w.Buffer = appendCount(w.Buffer, count)
 	return mark
 }
@@ -116,11 +123,26 @@ func AppendLength(buffer []byte, value int) []byte { return appendCount(buffer, 
 // occupied.
 func ReadLength(buffer []byte) (value, width int, ok bool) { return readCount(buffer) }
 
+// openSized is openComposite for a body expected to run to about expect bytes:
+// past what one byte says, the placeholder is the four-byte length from the
+// start. A table or a column of many rows is megabytes, and widening a one-byte
+// placeholder under one moved all of it. A wrong guess moves the body down
+// instead, which costs what the widening did; the bytes come out the same
+// either way.
+func (w *Writer8) openSized(key, class, detail uint8, expect int) Mark {
+	if expect < inlineCompositeLength {
+		return w.openComposite(key, class, detail)
+	}
+	// lw code 2 is a four-byte length, in the descriptor's low two bits.
+	w.Buffer = append(w.Buffer, key, descriptor(class, detail)|2, 0, 0, 0, 0)
+	return Mark{at: len(w.Buffer) - 4, extra: 3}
+}
+
 // Close patches a composite's length. Every Open must have exactly one Close,
 // and they must nest.
 func (w *Writer8) Close(mark Mark) {
-	body := len(w.Buffer) - (mark.at + 1)
-	if body < inlineCompositeLength {
+	body := len(w.Buffer) - (mark.at + 1 + mark.extra)
+	if body < inlineCompositeLength && mark.extra == 0 {
 		w.Buffer[mark.at] = uint8(body)
 		return
 	}
@@ -130,7 +152,7 @@ func (w *Writer8) Close(mark Mark) {
 // CloseNonEmpty is Close for a composite that is not written at all when nothing
 // went into it: an empty one is removed, key and descriptor with it.
 func (w *Writer8) CloseNonEmpty(mark Mark) {
-	if len(w.Buffer) == mark.at+1 {
+	if len(w.Buffer) == mark.at+1+mark.extra {
 		w.Buffer = w.Buffer[:mark.at-2]
 		return
 	}
@@ -138,11 +160,21 @@ func (w *Writer8) CloseNonEmpty(mark Mark) {
 }
 
 // widenLength turns a one-byte length placeholder into four, shifting the body
-// up to make room. Out of line because it is the rare path and inlining it would
-// cost every composite the code size.
+// up to make room — or, for a four-byte one openSized reserved for a body that
+// came out short, back into one, shifting it down. Out of line because it is
+// the rare path and inlining it would cost every composite the code size.
 func (w *Writer8) widenLength(mark Mark, body int) {
-	w.Buffer = append(w.Buffer, 0, 0, 0)
-	copy(w.Buffer[mark.at+4:], w.Buffer[mark.at+1:len(w.Buffer)-3])
+	if body < inlineCompositeLength {
+		copy(w.Buffer[mark.at+1:], w.Buffer[mark.at+4:])
+		w.Buffer = w.Buffer[:len(w.Buffer)-3]
+		w.Buffer[mark.at] = uint8(body)
+		w.Buffer[mark.at-1] &^= 2
+		return
+	}
+	if mark.extra == 0 {
+		w.Buffer = append(w.Buffer, 0, 0, 0)
+		copy(w.Buffer[mark.at+4:], w.Buffer[mark.at+1:len(w.Buffer)-3])
+	}
 	binary.LittleEndian.PutUint32(w.Buffer[mark.at:], uint32(body))
 	// lw code 2 is a four-byte length, in the descriptor's low two bits.
 	w.Buffer[mark.at-1] |= 2
