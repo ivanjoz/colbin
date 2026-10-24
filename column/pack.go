@@ -116,6 +116,17 @@ func packRun(out []byte, block []uint64, w int) []byte {
 	if w == 0 {
 		return out
 	}
+	if w <= packVectorWidth && len(block) >= 8 && useSIMD {
+		// Whole groups of eight in the kernel, which are w bytes each, so
+		// what is left starts on a byte. See asm_amd64.go.
+		groups := len(block) / 8
+		start := len(out)
+		out = packSIMD(out, block[:groups*8], w)
+		out = out[:start+groups*w]
+		if block = block[groups*8:]; len(block) == 0 {
+			return out
+		}
+	}
 	var accumulator uint64
 	accumulated := 0
 	for _, residual := range block {

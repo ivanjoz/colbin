@@ -27,6 +27,11 @@ var useSIMD = archsimd.X86.AVX2()
 // build leaves them to the scalar read.
 const unpackVectorised = true
 
+// packVectorWidth: the block write is the assembly build's only.
+const packVectorWidth = 0
+
+func packSIMD(out []byte, block []uint64, w int) []byte { return out }
+
 // statsSIMD is stats for []int64.
 func statsSIMD(vals []int64) (minimum int64, constant, deltaOverflows bool) {
 	defer archsimd.ClearAVXUpperBits()

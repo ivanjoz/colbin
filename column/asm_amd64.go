@@ -12,7 +12,10 @@ package column
 // lanes and does the values left over. Each function returns exactly what its
 // scalar twin does, which the tests hold them to, so the bytes do not change.
 
-import "math/bits"
+import (
+	"math/bits"
+	"slices"
+)
 
 // useSIMD is whether this CPU runs the kernels: AVX2, and an operating system
 // that saves the YMM registers, decided once.
@@ -175,6 +178,43 @@ func orSIMD(block []uint64) uint64 {
 		set |= residual
 	}
 	return set
+}
+
+// packVectorWidth is the widest w packSIMD writes.
+const packVectorWidth = 16
+
+// packSmallAVX2 packs groups of eight residuals at w bits, w at most 16, onto
+// out: each value shifted by its lane's count in shifts, the first four from
+// the low four counts and the last four from the high, ORed together.
+//
+//go:noescape
+func packSmallAVX2(block *uint64, groups, w int, shifts *[8]uint64, out *byte)
+
+// packSIMD appends block, whole groups of eight at w bits, to out, and
+// returns it with sixteen bytes of room past the run that the kernel's
+// stores may have written into.
+//
+// Eight values at w bits are w bytes, so a group is a byte run of its own. At
+// w up to eight a group is one word: every value shifted to its place by its
+// lane's count, the lanes ORed together, and the word stored eight bytes wide
+// with the next group's store landing w bytes on, over its top. Up to sixteen
+// it is two halves of four, each a word, joined at bit 4w into sixteen bytes.
+func packSIMD(out []byte, block []uint64, w int) []byte {
+	groups := len(block) / 8
+	start := len(out)
+	out = slices.Grow(out, groups*w+16)[:start+groups*w+16]
+	var shifts [8]uint64
+	for lane := range shifts {
+		// A whole group in one word below nine, so the high four go on
+		// from 4w; past that each half starts its own word at zero.
+		position := lane
+		if w > 8 {
+			position = lane % 4
+		}
+		shifts[lane] = uint64(position * w)
+	}
+	packSmallAVX2(&block[0], groups, w, &shifts, &out[start])
+	return out
 }
 
 // unpackSIMD reads nothing in this build; unpackRun does it all.

@@ -97,6 +97,24 @@ func TestWidthOfIsTheWidestResidual(t *testing.T) {
 	}
 }
 
+// BenchmarkPackRun writes one block at a few widths onto a buffer with room.
+func BenchmarkPackRun(b *testing.B) {
+	for _, w := range []int{3, 12, 25, 40} {
+		b.Run(fmt.Sprintf("w=%d", w), func(b *testing.B) {
+			random := rand.New(rand.NewPCG(7, 8))
+			block := make([]uint64, blockSize)
+			for index := range block {
+				block[index] = random.Uint64() & (uint64(1)<<w - 1)
+			}
+			out := make([]byte, 0, blockBytes(blockSize, w)+64)
+			b.SetBytes(int64(blockSize * 8))
+			for b.Loop() {
+				out = packRun(out[:0], block, w)
+			}
+		})
+	}
+}
+
 // BenchmarkUnpackRun reads one block at a few widths, from a buffer with room
 // after it as every block but a column's last has: the read alone, which is
 // what a SIMD build is compared on against a purego one.

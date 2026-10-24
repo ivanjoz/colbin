@@ -211,6 +211,84 @@ residualsDone:
 	VZEROUPPER
 	RET
 
+// func packSmallAVX2(block *uint64, groups, w int, shifts *[8]uint64, out *byte)
+//
+// Y2 the first four values' shift counts, Y3 the last four's. A group's eight
+// values are shifted into place and ORed down to a word, or a word per half;
+// the stores are eight or sixteen bytes wide and advance w, so each lands over
+// the zero top of the one before.
+TEXT ·packSmallAVX2(SB), NOSPLIT, $0-40
+	MOVQ    block+0(FP), SI
+	MOVQ    groups+8(FP), BX
+	MOVQ    w+16(FP), R10
+	MOVQ    shifts+24(FP), AX
+	MOVQ    out+32(FP), DI
+	VMOVDQU (AX), Y2
+	VMOVDQU 32(AX), Y3
+	CMPQ    R10, $8
+	JGT     packHalves
+
+packWord:
+	VMOVDQU      (SI), Y4
+	VMOVDQU      32(SI), Y5
+	VPSLLVQ      Y2, Y4, Y4
+	VPSLLVQ      Y3, Y5, Y5
+	VPOR         Y5, Y4, Y4
+	VEXTRACTI128 $1, Y4, X5
+	VPOR         X5, X4, X4
+	VPSHUFD      $0x4E, X4, X5
+	VPOR         X5, X4, X4
+	VMOVQ        X4, (DI)
+	ADDQ         $64, SI
+	ADDQ         R10, DI
+	DECQ         BX
+	JNZ          packWord
+	JMP          packDone
+
+packHalves:
+	MOVQ R10, CX
+	SHLQ $2, CX                 // the second half starts at bit 4w
+
+packHalvesLoop:
+	VMOVDQU      (SI), Y4
+	VMOVDQU      32(SI), Y5
+	VPSLLVQ      Y2, Y4, Y4
+	VPSLLVQ      Y3, Y5, Y5
+	VEXTRACTI128 $1, Y4, X6
+	VPOR         X6, X4, X4
+	VPSHUFD      $0x4E, X4, X6
+	VPOR         X6, X4, X4
+	VMOVQ        X4, AX         // the first half's word
+	VEXTRACTI128 $1, Y5, X6
+	VPOR         X6, X5, X5
+	VPSHUFD      $0x4E, X5, X6
+	VPOR         X6, X5, X5
+	VMOVQ        X5, DX         // the second half's word
+	CMPQ         CX, $64
+	JEQ          packSixteen
+	MOVQ         DX, R8
+	SHLQ         CX, R8         // its low bits, over the first half's top
+	ORQ          R8, AX
+	XORQ         R11, R11
+	SHLQ         CX, DX, R11    // and its high bits: DX >> (64 - 4w)
+	MOVQ         AX, (DI)
+	MOVQ         R11, 8(DI)
+	JMP          packHalvesNext
+
+packSixteen:
+	MOVQ AX, (DI)               // at w 16 the halves are whole words
+	MOVQ DX, 8(DI)
+
+packHalvesNext:
+	ADDQ $64, SI
+	ADDQ R10, DI
+	DECQ BX
+	JNZ  packHalvesLoop
+
+packDone:
+	VZEROUPPER
+	RET
+
 // func stepsAVX2(values *int64, n int, out *[4]uint64)
 //
 // Y0 the OR of the zigzagged steps, Y3 zero.

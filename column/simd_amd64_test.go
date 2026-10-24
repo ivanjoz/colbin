@@ -49,6 +49,44 @@ func TestSIMDUnpackReadsWhatPackWrote(t *testing.T) {
 	}
 }
 
+// packRun must write the same bytes whether its groups of eight go through
+// packSIMD or not, at every width the kernel takes, for every run length
+// around a group and a block, and after whatever out already holds. The
+// reference sets the bits one at a time.
+func TestSIMDPackWritesWhatTheScalarDoes(t *testing.T) {
+	if !useSIMD {
+		t.Skip("this CPU has no AVX2")
+	}
+	random := rand.New(rand.NewPCG(7, 8))
+	for w := 1; w <= 20; w++ {
+		mask := uint64(1)<<w - 1
+		for _, n := range []int{1, 7, 8, 9, 15, 16, 17, 63, 64, 100, 127, 128} {
+			block := make([]uint64, n)
+			for index := range block {
+				block[index] = random.Uint64() & mask
+				if index%5 == 0 {
+					block[index] = mask // every bit, which a wrong shift spills
+				}
+			}
+			prefix := []byte{0xAA, 0xBB, 0xCC}
+			want := append([]byte(nil), prefix...)
+			want = append(want, make([]byte, blockBytes(n, w))...)
+			for index, residual := range block {
+				for bit := range w {
+					if residual>>bit&1 != 0 {
+						at := index*w + bit
+						want[len(prefix)+at/8] |= 1 << (at % 8)
+					}
+				}
+			}
+			got := packRun(append([]byte(nil), prefix...), block, w)
+			if string(got) != string(want) {
+				t.Fatalf("w=%d n=%d: packed\n% x\nwant\n% x", w, n, got, want)
+			}
+		}
+	}
+}
+
 // residualsSIMD must write each transform's residuals and their OR exactly
 // as residualAt makes them, at every block length around a vector.
 func TestSIMDResidualsAgreeWithScalar(t *testing.T) {

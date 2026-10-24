@@ -10,6 +10,11 @@ const useSIMD = false
 // unpackVectorised says unpackSIMD reads anything; see simd_amd64.go.
 const unpackVectorised = false
 
+// packVectorWidth is the widest w packSIMD writes; see asm_amd64.go.
+const packVectorWidth = 0
+
+func packSIMD(out []byte, block []uint64, w int) []byte { return out }
+
 // The kernels' scalar twins, never called: they keep the dispatch compiling.
 
 func statsSIMD(vals []int64) (int64, bool, bool) { return stats(vals) }
