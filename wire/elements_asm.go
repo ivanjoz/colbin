@@ -1,16 +1,16 @@
-//go:build amd64 && !purego
+//go:build (amd64 || arm64) && !purego
 
 package wire
 
 import "slices"
 
-// The element copy in assembly (elements_amd64.s). A string column is mostly
+// The element copy in assembly (elements_amd64.s, elements_arm64.s). A string column is mostly
 // short values, and where a loader cut them from lines each one is its own
 // cache miss at an address no prefetcher can guess; append pays a memmove call
 // and a capacity check per value on top. The kernel copies a value with a
 // couple of moves picked by its size, and asks for the bytes of the value a
 // few places ahead before it needs them, which Go has no way to say.
-// Baseline amd64 only: no AVX, so no CPU check.
+// Baseline amd64 and arm64 only: no AVX, so no CPU check.
 const useStringElementsKernel = true
 
 // elementsChunk bounds one call, which the scheduler cannot preempt.

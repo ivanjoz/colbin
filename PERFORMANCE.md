@@ -75,7 +75,8 @@ follows it under "The second pass".
   accepted.
 - **`9e95c08`, `31d129b` AVX2 through `simd/archsimd`** (GOEXPERIMENT=simd): the
   encoder's scans, and an unpack with byte shuffles. The unpack was −37% on its
-  micro-benchmark and marginal end to end.
+  micro-benchmark and marginal end to end. Since removed: the assembly below
+  does the scans in every build, and colbin depends on no GOEXPERIMENT.
 - **`eabe647` The same scans in Go assembly**, for every amd64 build: `orAVX2`,
   `statsAVX2`, `blockSetsAVX2`, `stepsAVX2`, with CPUID/XGETBV detection and the
   tails in Go. Encode scans −7 to −31% against purego and −2 to −14% against

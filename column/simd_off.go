@@ -1,16 +1,13 @@
-//go:build !amd64 || purego
+//go:build !(amd64 || arm64) || purego
 
 package column
 
-// useSIMD: see asm_amd64.go and simd_amd64.go. Off amd64, or under the purego
-// tag, it is a constant false, so every branch on it is dead code and the
-// scalar loops are all that is compiled in.
+// useSIMD: see vec.go. Off amd64 and arm64, or under the
+// purego tag, it is a constant false, so every branch on it is dead code and
+// the scalar loops are all that is compiled in.
 const useSIMD = false
 
-// unpackVectorised says unpackSIMD reads anything; see simd_amd64.go.
-const unpackVectorised = false
-
-// packVectorWidth is the widest w packSIMD writes; see asm_amd64.go.
+// packVectorWidth is the widest w packSIMD writes; see vec.go.
 const packVectorWidth = 0
 
 func packSIMD(out []byte, block []uint64, w int) []byte { return out }
@@ -22,8 +19,6 @@ func statsSIMD(vals []int64) (int64, bool, bool) { return stats(vals) }
 func blockedCostsSIMD(vals []int64, base int64, zz, delta bool) (int, int, int) {
 	return blockedCosts(vals, base, zz, delta)
 }
-
-func unpackSIMD(buf []byte, dst []uint64, w int) int { return 0 }
 
 func residualsSIMD(vals []int64, transform uint8, base int64, zz bool, block []uint64) uint64 {
 	var set uint64

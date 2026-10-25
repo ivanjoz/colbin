@@ -1,28 +1,18 @@
-//go:build amd64 && !purego && !goexperiment.simd
+//go:build amd64 && !purego
 
 package column
 
-// AVX2 kernels for the encoder's scans, in assembly (asm_amd64.s), for every
-// amd64 build that is not purego. They are the scans simd_amd64.go writes
-// with the experimental simd/archsimd package, which a build with
-// GOEXPERIMENT=simd uses instead; this is the same work for everyone else.
-//
-// The assembly does only the vector loops: it runs over a whole number of
-// four-value vectors and stores its accumulators, and the Go here folds their
-// lanes and does the values left over. Each function returns exactly what its
-// scalar twin does, which the tests hold them to, so the bytes do not change.
-
 import (
+	"math"
 	"math/bits"
-	"slices"
 )
+
+// AVX2 kernels for the encoder's scans, in assembly (asm_amd64.s), for every
+// amd64 build that is not purego. Their Go side, shared with arm64's NEON, is vec.go.
 
 // useSIMD is whether this CPU runs the kernels: AVX2, and an operating system
 // that saves the YMM registers, decided once.
 var useSIMD = hasAVX2()
-
-// unpackVectorised: the block read is not in assembly. See simd_amd64.go.
-const unpackVectorised = false
 
 func hasAVX2() bool {
 	maxLeaf, _, _, _ := cpuid(0, 0)
@@ -42,189 +32,106 @@ func hasAVX2() bool {
 	return extended&(1<<5) != 0
 }
 
+// scanVec is scanSIMD's pass over blocks runs of size values, size a positive
+// multiple of four: each run's minimum, maximum and OR of zigzagged steps to
+// out, three words a run. values holds blocks*size+1.
+//
+//go:noescape
+func scanVec(values *int64, blocks, size int, out *int64)
+
+// scanChunk is how many blocks one scanVec call summarises.
+const scanChunk = 32
+
+// scanSIMD is statsSIMD and then blockedCostsSIMD, with the costs scored as
+// appendLong would, in one read of the column rather than two.
+//
+// It needs no OR of a block's raw or frame residuals: the width of an OR is the
+// bit length of its largest member, and the largest raw or frame residual is
+// the one of the block's maximum or minimum, as appendShort has it. So the
+// pass takes each block's extremes and the OR of its steps, which have no
+// such shortcut, and the costs are worked out from those. Frame's need the
+// column's minimum, which is only known at the end, so each block's maximum is
+// kept for them.
+//
+// Nor does it test every step for overflow: a step is at most the column's
+// range, so none can overflow unless the range does, and only then, which
+// takes values more than 2^63 apart, are the steps tested one by one.
+func scanSIMD(vals []int64) (minimum int64, constant, deltaOverflows bool, raw, frame, steps int) {
+	n := len(vals)
+	blocks := (n + blockSize - 1) / blockSize
+	var spare [512]int64
+	highs := spare[:0]
+	if blocks > len(spare) {
+		highs = make([]int64, 0, blocks)
+	}
+	minimum = vals[0]
+	maximum := minimum
+	var plain, zigzagged, stepsCost int // raw unzigzagged and zigzagged, and delta's blocks
+	add := func(low, high int64, stepSet uint64, count, stepCount int) {
+		minimum, maximum = min(minimum, low), max(maximum, high)
+		plain += 1 + blockBytes(count, bits.Len64(uint64(high)))
+		zigzagged += 1 + blockBytes(count, bits.Len64(max(zigzag(low), zigzag(high))))
+		if stepCount > 0 {
+			stepsCost += 1 + blockBytes(stepCount, bits.Len64(stepSet))
+		}
+		highs = append(highs, high)
+	}
+
+	// Every block but the last has a value after it, so its steps are whole
+	// and the kernel's.
+	var summaries [scanChunk][3]int64
+	whole := (n - 1) / blockSize
+	for block := 0; block < whole; {
+		count := min(scanChunk, whole-block)
+		scanVec(&vals[block*blockSize], count, blockSize, &summaries[0][0])
+		for _, summary := range summaries[:count] {
+			add(summary[0], summary[1], uint64(summary[2]), blockSize, blockSize)
+		}
+		block += count
+	}
+
+	// The last block: the kernel as far as its steps run to whole vectors,
+	// and the rest one value at a time.
+	start := whole * blockSize
+	low, high := vals[start], vals[start]
+	var stepSet uint64
+	at := start
+	if size := (n - 1 - start) &^ 3; size > 0 {
+		scanVec(&vals[start], 1, size, &summaries[0][0])
+		low, high, stepSet = summaries[0][0], summaries[0][1], uint64(summaries[0][2])
+		at += size
+	}
+	for ; at < n; at++ {
+		value := vals[at]
+		low, high = min(low, value), max(high, value)
+		if at+1 < n {
+			next := vals[at+1]
+			stepSet |= zigzag(next - value)
+		}
+	}
+	add(low, high, stepSet, n-start, n-1-start)
+
+	if uint64(maximum)-uint64(minimum) > math.MaxInt64 {
+		for index := 1; index < n && !deltaOverflows; index++ {
+			deltaOverflows = subOverflows(vals[index], vals[index-1])
+		}
+	}
+	constant = minimum == maximum
+	raw = plain
+	if minimum < 0 {
+		raw = zigzagged
+	}
+	frame, steps = 8, 8 // the base, in the clear
+	for block, high := range highs {
+		count := min(blockSize, n-block*blockSize)
+		frame += 1 + blockBytes(count, bits.Len64(uint64(high)-uint64(minimum)))
+	}
+	if !deltaOverflows && n > 1 {
+		steps += stepsCost
+	}
+	return minimum, constant, deltaOverflows, raw, frame, steps
+}
+
 func cpuid(leaf, subleaf uint32) (eax, ebx, ecx, edx uint32)
 
 func xgetbv() uint32
-
-// The vector loops. n is a positive multiple of four.
-
-// orAVX2 ORs n values into out's four lanes.
-//
-//go:noescape
-func orAVX2(values *uint64, n int, out *[4]uint64)
-
-// statsAVX2 stores into out the lanes of the minimum, of the OR of every
-// value XOR the first, and of subOverflows' sign word for every value from
-// the fifth on against the one before it.
-//
-//go:noescape
-func statsAVX2(values *int64, n int, out *[12]int64)
-
-// blockSetsAVX2 stores into out the lanes of the OR of the raw residuals,
-// zigzagged when zz, and then of the frame-of-reference ones against base.
-//
-//go:noescape
-func blockSetsAVX2(values *int64, n int, base int64, zz bool, out *[8]uint64)
-
-// stepsAVX2 stores into out the lanes of the OR of zigzag(values[i+1] -
-// values[i]) for i below n, so values holds n+1.
-//
-//go:noescape
-func stepsAVX2(values *int64, n int, out *[4]uint64)
-
-// residualsAVX2 stores the residuals of n values under mode (residualMode)
-// into dst, and the lanes of their OR into out. For delta, values holds n+1.
-//
-//go:noescape
-func residualsAVX2(values *int64, n int, base int64, mode int, dst *uint64, out *[4]uint64)
-
-// residualsSIMD fills block with the residuals of vals' first len(block)
-// values, and returns their OR, which is the block's width.
-func residualsSIMD(vals []int64, transform uint8, base int64, zz bool, block []uint64) uint64 {
-	var set uint64
-	full := len(block) &^ 3
-	if full > 0 {
-		var lanes [4]uint64
-		residualsAVX2(&vals[0], full, base, residualMode(transform, zz), &block[0], &lanes)
-		set = lanes[0] | lanes[1] | lanes[2] | lanes[3]
-	}
-	for index := full; index < len(block); index++ {
-		block[index] = residualAt(vals, index, transform, base, zz)
-		set |= block[index]
-	}
-	return set
-}
-
-// statsSIMD is stats for []int64.
-func statsSIMD(vals []int64) (minimum int64, constant, deltaOverflows bool) {
-	n := len(vals)
-	full := n &^ 3
-	minimum = vals[0]
-	var spread int64
-	if full > 0 {
-		var lanes [12]int64
-		statsAVX2(&vals[0], full, &lanes)
-		minimum = min(lanes[0], lanes[1], lanes[2], lanes[3])
-		spread = lanes[4] | lanes[5] | lanes[6] | lanes[7]
-		deltaOverflows = lanes[8]|lanes[9]|lanes[10]|lanes[11] < 0
-	}
-	// The first vector's differences, which have no value before the
-	// vector to be loaded from, and the tail.
-	for at := 1; at < min(4, n); at++ {
-		deltaOverflows = deltaOverflows || subOverflows(vals[at], vals[at-1])
-	}
-	for index := full; index < n; index++ {
-		value := vals[index]
-		minimum = min(minimum, value)
-		spread |= value ^ vals[0]
-		if index >= 4 {
-			deltaOverflows = deltaOverflows || subOverflows(value, vals[index-1])
-		}
-	}
-	return minimum, spread == 0, deltaOverflows
-}
-
-// blockedCostsSIMD is blockedCosts for []int64.
-func blockedCostsSIMD(vals []int64, base int64, zz, delta bool) (raw, frame, steps int) {
-	n := len(vals)
-	frame, steps = 8, 8 // the base, in the clear
-	for start := 0; start < n; start += blockSize {
-		end := min(start+blockSize, n)
-		var rawSet, frameSet uint64
-		index := start
-		if full := (end - start) &^ 3; full > 0 {
-			var lanes [8]uint64
-			blockSetsAVX2(&vals[start], full, base, zz, &lanes)
-			rawSet = lanes[0] | lanes[1] | lanes[2] | lanes[3]
-			frameSet = lanes[4] | lanes[5] | lanes[6] | lanes[7]
-			index += full
-		}
-		for ; index < end; index++ {
-			value := vals[index]
-			rawSet |= encode(value, zz)
-			frameSet |= uint64(value) - uint64(base)
-		}
-		raw += 1 + blockBytes(end-start, bits.Len64(rawSet))
-		frame += 1 + blockBytes(end-start, bits.Len64(frameSet))
-		// Delta has one residual fewer, so its blocks end one value early.
-		if stepsEnd := min(start+blockSize, n-1); delta && start < stepsEnd {
-			var stepsSet uint64
-			index := start
-			if full := (stepsEnd - start) &^ 3; full > 0 {
-				var lanes [4]uint64
-				stepsAVX2(&vals[start], full, &lanes)
-				stepsSet = lanes[0] | lanes[1] | lanes[2] | lanes[3]
-				index += full
-			}
-			for ; index < stepsEnd; index++ {
-				stepsSet |= zigzag(vals[index+1] - vals[index])
-			}
-			steps += 1 + blockBytes(stepsEnd-start, bits.Len64(stepsSet))
-		}
-	}
-	return raw, frame, steps
-}
-
-// orSIMD ORs a block of residuals together, which is widthOf's scan.
-func orSIMD(block []uint64) uint64 {
-	var set uint64
-	full := len(block) &^ 3
-	if full > 0 {
-		var lanes [4]uint64
-		orAVX2(&block[0], full, &lanes)
-		set = lanes[0] | lanes[1] | lanes[2] | lanes[3]
-	}
-	for _, residual := range block[full:] {
-		set |= residual
-	}
-	return set
-}
-
-// packVectorWidth is the widest w packSIMD writes.
-const packVectorWidth = 16
-
-// packSmallAVX2 packs groups of eight residuals at w bits, w at most 16, onto
-// out: each value shifted by its lane's count in shifts, the first four from
-// the low four counts and the last four from the high, ORed together.
-//
-//go:noescape
-func packSmallAVX2(block *uint64, groups, w int, shifts *[8]uint64, out *byte)
-
-// packSIMD appends block, whole groups of eight at w bits, to out, and
-// returns it with sixteen bytes of room past the run that the kernel's
-// stores may have written into.
-//
-// Eight values at w bits are w bytes, so a group is a byte run of its own. At
-// w up to eight a group is one word: every value shifted to its place by its
-// lane's count, the lanes ORed together, and the word stored eight bytes wide
-// with the next group's store landing w bytes on, over its top. Up to sixteen
-// it is two halves of four, each a word, joined at bit 4w into sixteen bytes.
-func packSIMD(out []byte, block []uint64, w int) []byte {
-	groups := len(block) / 8
-	start := len(out)
-	out = slices.Grow(out, groups*w+16)[:start+groups*w+16]
-	packSmallAVX2(&block[0], groups, w, &packShifts[w], &out[start])
-	return out
-}
-
-// packShifts is each width's lane counts for packSmallAVX2, made once. Built
-// per call they were eight 8-byte stores the kernel at once read back as two
-// 32-byte loads, which the CPU cannot forward from the stores: a stall that was
-// a quarter of a short column's encode.
-var packShifts = func() (table [packVectorWidth + 1][8]uint64) {
-	for w := range table {
-		for lane := range table[w] {
-			// A whole group in one word below nine, so the high four go on
-			// from 4w; past that each half starts its own word at zero.
-			position := lane
-			if w > 8 {
-				position = lane % 4
-			}
-			table[w][lane] = uint64(position * w)
-		}
-	}
-	return table
-}()
-
-// unpackSIMD reads nothing in this build; unpackRun does it all.
-func unpackSIMD(buf []byte, dst []uint64, w int) int { return 0 }

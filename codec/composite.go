@@ -102,6 +102,31 @@ func appendStructsField(writer *wire.Writer8, field *planField, at unsafe.Pointe
 		return
 	}
 	list := writer.OpenList(field.key, slice.len)
+	if program := field.sub.rows; program != nil && useRowPrograms && !Packed5() {
+		// What the loop below does, with the depth appendWide or writePlan
+		// takes for each element taken once for them all.
+		if !buf.enter() {
+			writer.Close(list)
+			return
+		}
+		for index := range slice.len {
+			at := unsafe.Add(slice.data, uintptr(index)*field.stride)
+			if program.wide {
+				element := writer.OpenElementStructWide()
+				program.writeWide(writer, at, buf)
+				writer.Close(element)
+				continue
+			}
+			element := writer.OpenElementStruct()
+			narrow := wire.Writer{Buffer: writer.Buffer}
+			program.write(&narrow, at, buf)
+			writer.Buffer = narrow.Buffer
+			writer.Close(element)
+		}
+		buf.leave()
+		writer.Close(list)
+		return
+	}
 	for index := range slice.len {
 		at := unsafe.Add(slice.data, uintptr(index)*field.stride)
 		if field.sub.isWide {
@@ -129,6 +154,10 @@ func readStructField(reader *wire.Reader8, field *planField, at unsafe.Pointer, 
 // readBody fills a record from a nested run at whichever key width its
 // descriptor declared.
 func readBody(parent *wire.Reader8, body []byte, wideKeys bool, plan *typePlan, at unsafe.Pointer, buf *scratch) {
+	if readsByProgram(plan, wideKeys) {
+		parent.Fail(readByProgram(body, plan, at, buf))
+		return
+	}
 	if wideKeys {
 		sub := wire.NewReader8(body)
 		readRun(&sub, plan, at, buf)
@@ -210,6 +239,11 @@ func readRun(reader *wire.Reader8, plan *typePlan, record unsafe.Pointer, buf *s
 		return
 	}
 	defer buf.leave()
+	readWideFields(reader, plan, record, buf)
+}
+
+// readWideFields is readRun's loop, at the depth the caller has taken.
+func readWideFields(reader *wire.Reader8, plan *typePlan, record unsafe.Pointer, buf *scratch) {
 	// The field after the last one first, as in readNarrowRun.
 	fields := plan.fields
 	next := 0

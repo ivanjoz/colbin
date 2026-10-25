@@ -69,6 +69,29 @@ func appendNarrowStructs(writer *wire.Writer, field *planField, at unsafe.Pointe
 		return
 	}
 	list := writer.OpenList(field.key, slice.len)
+	if program := field.sub.rows; program != nil && useRowPrograms && !Packed5() {
+		// What appendNarrowElement and writePlan do for each element, with the
+		// depth taken once for them all: it is the same depth for every one.
+		if !buf.enter() {
+			writer.Close(list)
+			return
+		}
+		for index := range slice.len {
+			at := unsafe.Add(slice.data, uintptr(index)*field.stride)
+			element := writer.OpenElement()
+			if program.wide {
+				wide := wire.Writer8{Buffer: writer.Buffer}
+				program.writeWide(&wide, at, buf)
+				writer.Buffer = wide.Buffer
+			} else {
+				program.write(writer, at, buf)
+			}
+			writer.CloseElement(element)
+		}
+		buf.leave()
+		writer.Close(list)
+		return
+	}
 	for index := range slice.len {
 		appendNarrowElement(writer, field.sub, unsafe.Add(slice.data, uintptr(index)*field.stride), buf)
 	}
@@ -184,6 +207,10 @@ func readNarrowPointerStruct(reader *wire.Reader, field *planField, at unsafe.Po
 
 // readNarrowBody fills a record from a nested run at whichever width it declared.
 func readNarrowBody(parent *wire.Reader, body []byte, wideKeys bool, plan *typePlan, at unsafe.Pointer, buf *scratch) {
+	if readsByProgram(plan, wideKeys) {
+		parent.Fail(readByProgram(body, plan, at, buf))
+		return
+	}
 	if wideKeys {
 		sub := wire.NewReader8(body)
 		readRun(&sub, plan, at, buf)
@@ -203,6 +230,30 @@ func readNarrowRun(reader *wire.Reader, plan *typePlan, record unsafe.Pointer, b
 		return
 	}
 	defer buf.leave()
+	readNarrowFields(reader, plan, record, buf)
+}
+
+// readsByProgram is whether a body of plan's, at the key width wideKeys says,
+// is read by its program: one compiled for that width.
+func readsByProgram(plan *typePlan, wideKeys bool) bool {
+	return plan.rows != nil && plan.rows.wide == wideKeys && useRowPrograms
+}
+
+// readByProgram is readNarrowRun or readRun through the plan's program,
+// returning the error the run would have failed its reader with.
+func readByProgram(body []byte, plan *typePlan, record unsafe.Pointer, buf *scratch) error {
+	if !buf.enter() {
+		return buf.err
+	}
+	defer buf.leave()
+	if plan.rows.wide {
+		return plan.rows.readWide(body, record, buf)
+	}
+	return plan.rows.read(body, record, buf)
+}
+
+// readNarrowFields is readNarrowRun's loop, at the depth the caller has taken.
+func readNarrowFields(reader *wire.Reader, plan *typePlan, record unsafe.Pointer, buf *scratch) {
 	// A writer emits fields in the plan's order, omitting the zero ones, so the
 	// field after the last one read is checked before the table: one compare
 	// against a key the field read is about to load anyway.

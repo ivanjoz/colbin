@@ -166,6 +166,8 @@ type typePlan struct {
 	// type's keys no longer say on their own. See pages.go.
 	page bool
 	ids  []uint16
+	// rows is the plan compiled for writePlan, or nil. See rows.go.
+	rows *rowProgram
 }
 
 var planCache sync.Map // reflect.Type -> *typePlan or error
@@ -368,6 +370,7 @@ func (plan *typePlan) finish() {
 			plan.structSlices = append(plan.structSlices, int32(index))
 		}
 	}
+	plan.rows = compileRows(plan)
 }
 
 // sizeFor is a starting capacity for encoding record: sizeHint, plus, for each
@@ -399,7 +402,10 @@ func (plan *typePlan) reserve(record unsafe.Pointer) (need, estimate int) {
 	}
 	estimate = plan.sizeFor(record)
 	if ratio := plan.sizeRatio.Load(); ratio != 0 {
-		return estimate*int(ratio)>>sizeRatioShift + plan.sizeHint, estimate
+		// In 64 bits: a type whose messages ran far past their estimate has a
+		// ratio that overflows a 32-bit int times any estimate.
+		scaled := min(uint64(estimate)*uint64(ratio)>>sizeRatioShift, math.MaxInt32)
+		return int(scaled) + plan.sizeHint, estimate
 	}
 	return estimate, estimate
 }
@@ -755,6 +761,10 @@ func writePlan(writer *wire.Writer, plan *typePlan, record unsafe.Pointer, buf *
 		return
 	}
 	defer buf.leave()
+	if program := plan.rows; program != nil && !program.wide && useRowPrograms && !Packed5() {
+		program.write(writer, record, buf)
+		return
+	}
 	writeFields(writer, plan, record, buf)
 }
 
@@ -870,16 +880,19 @@ func unmarshalNarrow(body []byte, plan *typePlan, record unsafe.Pointer) error {
 		readScalars(&reader, plan, record)
 		return reader.Err()
 	}
-	return unmarshalNarrowRun(&reader, len(body), plan, record)
+	return unmarshalNarrowRun(&reader, body, plan, record)
 }
 
 // unmarshalNarrowRun is unmarshalNarrow for a plan that nests. It is out of line
 // so the flat path does not pay for its scratch and deferred release, which
 // measured 11 ns on a ten-field record that decodes in 28.
-func unmarshalNarrowRun(reader *wire.Reader, size int, plan *typePlan, record unsafe.Pointer) error {
-	buf := scratch{rowsLeft: rowBudget(size)}
-	buf.strings.Reset(size)
+func unmarshalNarrowRun(reader *wire.Reader, body []byte, plan *typePlan, record unsafe.Pointer) error {
+	buf := scratch{rowsLeft: rowBudget(len(body))}
+	buf.strings.Reset(len(body))
 	defer buf.release()
+	if readsByProgram(plan, false) {
+		return readByProgram(body, plan, record, &buf)
+	}
 	readNarrowRun(reader, plan, record, &buf)
 	return reader.Err()
 }

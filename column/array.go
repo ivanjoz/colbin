@@ -242,9 +242,16 @@ func appendShort[T Signed](out []byte, vals []T) []byte {
 func appendLong[T Signed](out []byte, vals []T) []byte {
 	var minimum int64
 	var constant, deltaOverflows bool
-	if wide, ok := any(vals).([]int64); ok && useSIMD {
+	var best, frame, steps int
+	wide, isWide := any(vals).([]int64)
+	scanned := isWide && useSIMD && forcedTransform < 0
+	switch {
+	case scanned:
+		// Both scans in one; see scanSIMD.
+		minimum, constant, deltaOverflows, best, frame, steps = scanSIMD(wide)
+	case isWide && useSIMD:
 		minimum, constant, deltaOverflows = statsSIMD(wide)
-	} else {
+	default:
 		minimum, constant, deltaOverflows = stats(vals)
 	}
 	// Raw is zigzagged whenever the column has a negative, which is what keeps
@@ -255,10 +262,7 @@ func appendLong[T Signed](out []byte, vals []T) []byte {
 	}
 	transform, zigzagged := trRaw, zz
 	withDelta := !deltaOverflows && len(vals) > 1
-	var best, frame, steps int
-	if wide, ok := any(vals).([]int64); ok && useSIMD {
-		best, frame, steps = blockedCostsSIMD(wide, minimum, zz, withDelta)
-	} else {
+	if !scanned {
 		best, frame, steps = blockedCosts(vals, minimum, zz, withDelta)
 	}
 	if frame < best {
@@ -402,7 +406,7 @@ func DecodeArray[T Signed](buf []byte, n int, out []T) (int, error) {
 		if len(buf)-position < bytes {
 			return 0, errTruncated
 		}
-		if !unpackVectorised && w <= wideWidth && len(buf)-position >= bytes+8 {
+		if w <= wideWidth && len(buf)-position >= bytes+8 {
 			// Eight bytes past the block: every value is one load, so it is
 			// read and transformed in one go, with no scratch between.
 			spill := readFused(buf[position:], target[start:end], w, transform, zz, base, &accumulator)

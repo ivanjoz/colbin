@@ -1,4 +1,4 @@
-//go:build amd64 && !purego
+//go:build (amd64 || arm64) && !purego
 
 package column
 
@@ -8,13 +8,12 @@ import (
 	"testing"
 )
 
-// unpackSIMD must read back what packRun wrote at every width, for every
-// run length around a group and a block, whether the buffer ends at the run or
-// carries more after it — which decides how far the kernel may go before
-// leaving the rest to the scalar read.
+// unpackRun must read back what packRun, with its kernel, wrote at every
+// width, for every run length around a group and a block, whether the buffer
+// ends at the run or carries more after it.
 func TestSIMDUnpackReadsWhatPackWrote(t *testing.T) {
 	if !useSIMD {
-		t.Skip("this CPU has no AVX2")
+		t.Skip("this CPU runs no vector kernels")
 	}
 	random := rand.New(rand.NewPCG(5, 6))
 	for w := 1; w <= 64; w++ {
@@ -37,15 +36,6 @@ func TestSIMDUnpackReadsWhatPackWrote(t *testing.T) {
 				}
 			}
 		}
-		// And the kernel is what read them, rather than the scalar read
-		// after it: all of a full block with room after it.
-		if w <= wideWidth && unpackVectorised {
-			block := make([]uint64, blockSize)
-			buf := append(packRun(nil, block, w), make([]byte, 16)...)
-			if done := unpackSIMD(buf, block, w); done != blockSize {
-				t.Fatalf("w=%d: the kernel read %d of a block's %d values", w, done, blockSize)
-			}
-		}
 	}
 }
 
@@ -55,7 +45,7 @@ func TestSIMDUnpackReadsWhatPackWrote(t *testing.T) {
 // reference sets the bits one at a time.
 func TestSIMDPackWritesWhatTheScalarDoes(t *testing.T) {
 	if !useSIMD {
-		t.Skip("this CPU has no AVX2")
+		t.Skip("this CPU runs no vector kernels")
 	}
 	random := rand.New(rand.NewPCG(7, 8))
 	for w := 1; w <= 20; w++ {
@@ -91,7 +81,7 @@ func TestSIMDPackWritesWhatTheScalarDoes(t *testing.T) {
 // as residualAt makes them, at every block length around a vector.
 func TestSIMDResidualsAgreeWithScalar(t *testing.T) {
 	if !useSIMD {
-		t.Skip("this CPU has no AVX2")
+		t.Skip("this CPU runs no vector kernels")
 	}
 	random := rand.New(rand.NewPCG(9, 10))
 	for trial := range 6 {
@@ -134,7 +124,7 @@ func TestSIMDResidualsAgreeWithScalar(t *testing.T) {
 // zigzag, a delta that overflows.
 func TestSIMDKernelsAgreeWithScalar(t *testing.T) {
 	if !useSIMD {
-		t.Skip("this CPU has no AVX2")
+		t.Skip("this CPU runs no vector kernels")
 	}
 	random := rand.New(rand.NewPCG(3, 4))
 	shapes := map[string]func(index int) int64{
@@ -143,17 +133,36 @@ func TestSIMDKernelsAgreeWithScalar(t *testing.T) {
 		"positive": func(int) int64 { return random.Int64N(1 << 20) },
 		"run":      func(index int) int64 { return 1000 + int64(index)*7 },
 		"constant": func(int) int64 { return -42 },
+		// More than 2^63 from end to end with no step that overflows, up to
+		// 1024 values, and then a step that wraps.
+		"ramp": func(index int) int64 { return math.MinInt64 + int64(index)<<54 },
 		"extremes": func(index int) int64 {
 			return []int64{math.MinInt64, math.MaxInt64, 0, -1, 1}[random.IntN(5)]
 		},
 	}
+	// And lengths around scanSIMD's chunk of blocks.
+	lengths := []int{383, 384, 385, 1000, 1024, 1025, 4095, 4096, 4097, 4224, 4225, 8193, 12345}
+	for n := 1; n <= 300; n++ {
+		lengths = append(lengths, n)
+	}
 	for name, shape := range shapes {
-		for n := 1; n <= 300; n++ {
+		for _, n := range lengths {
 			vals := make([]int64, n)
 			for index := range vals {
 				vals[index] = shape(index)
 			}
 			minimum, constant, overflows := stats(vals)
+			{
+				zz, delta := minimum < 0, n > 1 && !overflows
+				raw, frame, steps := blockedCosts(vals, minimum, zz, delta)
+				gotMinimum, gotConstant, gotOverflows, gotRaw, gotFrame, gotSteps := scanSIMD(vals)
+				if gotMinimum != minimum || gotConstant != constant || gotOverflows != overflows ||
+					gotRaw != raw || gotFrame != frame || gotSteps != steps {
+					t.Fatalf("%s n=%d: scan (%d %v %v %d %d %d), want (%d %v %v %d %d %d)", name, n,
+						gotMinimum, gotConstant, gotOverflows, gotRaw, gotFrame, gotSteps,
+						minimum, constant, overflows, raw, frame, steps)
+				}
+			}
 			gotMinimum, gotConstant, gotOverflows := statsSIMD(vals)
 			if gotMinimum != minimum || gotConstant != constant || gotOverflows != overflows {
 				t.Fatalf("%s n=%d: stats (%d %v %v), want (%d %v %v)", name, n,

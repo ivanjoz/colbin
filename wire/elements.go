@@ -4,7 +4,7 @@ import "encoding/binary"
 
 // appendStringElements appends values as a list's elements, each behind its size,
 // payload bytes in all, which the caller has already added up. Where there is
-// a kernel (elements_amd64.go) it does the copying; this loop is the
+// a kernel (elements_asm.go) it does the copying; this loop is the
 // reference it is held to.
 func appendStringElements(buffer []byte, values []string, payload int) []byte {
 	if useStringElementsKernel {

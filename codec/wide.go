@@ -53,6 +53,10 @@ func appendWide(writer *wire.Writer8, plan *typePlan, record unsafe.Pointer, buf
 		return
 	}
 	defer buf.leave()
+	if program := plan.rows; program != nil && program.wide && useRowPrograms && !Packed5() {
+		program.writeWide(writer, record, buf)
+		return
+	}
 	writeFieldsWide(writer, plan, record, buf)
 }
 
@@ -76,10 +80,13 @@ func unmarshalWide(body, section []byte, plan *typePlan, record unsafe.Pointer) 
 // unmarshalWideRun is unmarshalWide for a plan that nests, out of line for the
 // reason unmarshalNarrowRun is.
 func unmarshalWideRun(body, section []byte, plan *typePlan, record unsafe.Pointer) error {
-	reader := wire.NewReader8(body)
 	buf := scratch{rawSection: section, rowsLeft: rowBudget(len(body))}
 	buf.strings.Reset(len(body))
 	defer buf.release()
+	if readsByProgram(plan, true) {
+		return readByProgram(body, plan, record, &buf)
+	}
+	reader := wire.NewReader8(body)
 	readRun(&reader, plan, record, &buf)
 	return reader.Err()
 }
