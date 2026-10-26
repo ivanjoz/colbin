@@ -42,7 +42,12 @@ var ErrBadGroup = errors.New("wire: a grouped table's groups do not match its ro
 // OpenGroupedTable begins a table of rows rows in groups of groupRows. Write
 // each group between OpenGroup and CloseGroup, then Close.
 func (w *Writer) OpenGroupedTable(key uint8, rows, groupRows int) Mark {
-	mark := w.openNarrowSized(key, narrowTable|narrowGrouped, rows)
+	// A table long enough to be grouped is past 64 KiB as good as always, so
+	// its length is reserved at four bytes rather than guessed from the rows:
+	// a guess one form short moves the whole table up by two bytes when it
+	// closes, which on Rentabilidad's 8.7 MB was a fifth of the encode. One
+	// that turns out small moves back a body that is small.
+	mark := w.openNarrowSized(key, narrowTable|narrowGrouped, 1<<16)
 	w.Buffer = appendCount(appendCount(w.Buffer, rows), groupRows)
 	return mark
 }
