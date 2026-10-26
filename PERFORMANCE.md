@@ -552,7 +552,60 @@ files.
 - **Unpack in assembly.** Less to win than before: the fused read no longer
   goes through scratch.
 
-## Where it stands at `74f2c8d`
+## Where it stands at v0.7.0
+
+`colbinbench` on Lambda (4 GB, `provided.al2023`), v0.7.0 against msgpack and
+vtprotobuf, the three formats of a case in the same invocation; 4 invocations ×
+`-count 3 -sample 1s`, median of the 12. Time of the other format over
+colbin's, so above 1× colbin is faster.
+
+The cases:
+- **TPC-H SF 0.1**, `orders` and `lineitem` from dbgen 2.17.3 (150 000 orders,
+  ~600 000 lines), the neutral corpus. **normalized** is the two tables flat,
+  lineitem past 4 096 rows and so written in row groups; **nested** is each
+  order with its lines inside it, mostly short lists.
+- **synthetic**, colbin's own `corpus` at `Seed`, Medium scale, shaped to
+  exercise its layouts: **sales** is 10 000 sales of up to 32 integer lines,
+  either side of the table threshold; **dataset** is all seven tables in one
+  message; **reading** is `OneReading`, one 26-byte record.
+
+| case | op | colbin x86 | vs msgpack | vs vtprotobuf | colbin arm64 | vs msgpack | vs vtprotobuf |
+|---|---|---:|---:|---:|---:|---:|---:|
+| TPC-H normalized | encode | 66.3 ms | 1.39× | 2.15× | 54.6 ms | 1.18× | 1.50× |
+| | decode fresh | 140.3 ms | 1.86× | 1.85× | 100.6 ms | 1.72× | 2.04× |
+| | decode reuse | 127.8 ms | 1.93× | 1.98× | 74.9 ms | 2.27× | 2.37× |
+| TPC-H nested | encode | 89.3 ms | 1.07× | 1.57× | 104.7 ms | 1.12× | 1.14× |
+| | decode fresh | 201.6 ms | 1.31× | 1.41× | 226.7 ms | 1.49× | 1.57× |
+| | decode reuse | 193.2 ms | 1.24× | 1.35× | 222.7 ms | 1.33× | 1.53× |
+| dataset | encode | 5.93 ms | **0.92×** | 1.75× | 7.27 ms | **0.98×** | 1.25× |
+| | decode fresh | 16.2 ms | 1.16× | 1.91× | 18.3 ms | 1.18× | 1.90× |
+| | decode reuse | 11.5 ms | 1.17× | 2.65× | 13.3 ms | 1.22× | 2.60× |
+| sales | encode | 2.53 ms | **0.88×** | 1.42× | 3.89 ms | **0.87×** | 1.00× |
+| | decode fresh | 5.60 ms | 1.02× | 1.63× | 9.67 ms | 1.00× | 1.34× |
+| | decode reuse | 3.97 ms | 1.11× | 2.26× | 7.12 ms | 1.06× | 1.80× |
+| reading | encode | 84 ns | 1.06× | 1.32× | 99 ns | 1.07× | 1.24× |
+| | decode fresh | 250 ns | 1.16× | 1.04× | 394 ns | 1.09× | **0.95×** |
+| | decode reuse | 103 ns | 1.52× | 1.92× | 130 ns | 1.35× | 1.80× |
+
+| bytes | msgpack | vtprotobuf | colbin |
+|---|---:|---:|---:|
+| TPC-H normalized | 170 784 938 | 68 195 583 | **50 698 458** |
+| TPC-H nested | 162 291 941 | 65 356 713 | **61 832 463** |
+| dataset | 9 067 871 | 3 314 429 | **1 910 514** |
+| sales | 5 218 334 | 1 281 634 | **1 025 906** |
+| reading | 76 | 32 | **26** |
+
+x86 is "Intel Xeon Processor @ 2.50GHz" for every case but sales, which landed
+on "Intel Xeon Processor"; on the 2.50 GHz host sales encode is 0.70× (see
+"Sales encode on Lambda's 2.50 GHz Xeon"). arm64 is Graviton2.
+
+colbin is the smallest on every case and faster on every TPC-H cell. What it
+still loses: encode into a reused buffer on the two synthetic many-table cases
+against msgpack (sales 0.87–0.88×, dataset 0.92–0.98×), and reading's
+decode-fresh against vtprotobuf on arm64 (0.95×, about 20 ns). sales
+decode-fresh is level with msgpack.
+
+## Where it stood at `74f2c8d`
 
 Same harness and cases as the table below it. Bytes are unchanged.
 

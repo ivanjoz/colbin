@@ -440,6 +440,18 @@ records under Node 24 (`bun run bench` in `js/`):
 | JSON + `JSON.parse` | 106 670 B | 12 124 B | 0.32 ms |
 | colbin + `codec.unmarshal` | 30 413 B | 3 182 B | 0.16 ms |
 
+### Against msgpack and vtprotobuf
+
+On AWS Lambda, x86 and Graviton2, with TPC-H SF 0.1 as the neutral corpus.
+colbin is the smallest on every case: 50.7 MB on TPC-H normalized against
+vtprotobuf's 68.2 MB and msgpack's 170.8 MB. It is faster on every TPC-H
+operation:
+- encode is 1.07–1.39× msgpack and 1.14–2.15× vtprotobuf;
+- decode is 1.24–2.27× msgpack and 1.35–2.37× vtprotobuf.
+
+It still loses encode to msgpack on the synthetic sales and dataset cases
+(0.87–0.98×). Every number is in [PERFORMANCE.md](PERFORMANCE.md#where-it-stands-at-v070).
+
 ### Reproducing
 
 ```sh
