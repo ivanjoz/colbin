@@ -28,8 +28,8 @@ use crate::plan::{
     OP_INT64, OP_MAP, OP_POINTER, OP_STRING, OP_STRINGS, OP_STRUCT, OP_STRUCTS, OP_UINT8,
     OP_UINT16, OP_UINT32, OP_UINT64, Plan, PlanField,
 };
-use crate::section::Schema;
-use crate::wire::{Kind, Reader, Reader8, Runs};
+use crate::section::{self, Schema};
+use crate::wire::{self, Kind, Reader, Reader8, Runs};
 
 /// Whether a map kind is one the format accepts as a key.
 ///
@@ -63,6 +63,56 @@ pub fn to_json(schema: &Schema, message: &[u8], wide: bool) -> Result<Vec<u8>, E
     walker.root(0, message, wide)?;
     Ok(walker.to.finish())
 }
+
+/// Renders a whole message — root byte, section and body — as JSON, the way Go's
+/// `ToJSON` does: the message's own section takes precedence over `held`, and a
+/// dynamic document needs neither unless a TYPED value names a struct.
+///
+/// # Errors
+///
+/// Any malformed message, a root this version does not read (a dictionary
+/// section among them), and [`Error::NoSchema`] for a typed message with no
+/// section anywhere.
+pub fn message_to_json(held: Option<&Schema>, message: &[u8]) -> Result<Vec<u8>, Error> {
+    let first = message
+        .first()
+        .copied()
+        .filter(|&byte| wire::root::is_root(byte));
+    let Some(root) = first else {
+        // A typed narrow message, which has no root byte.
+        let schema = held.ok_or(Error::NoSchema)?;
+        return to_json(schema, message, false);
+    };
+    let (root_bits, has_section) = (root & !ROOT_SCHEMA, root & ROOT_SCHEMA != 0);
+    let (parsed, body) = if has_section {
+        let parsed = section::parse(&message[1..])?;
+        let body = message[1..].get(parsed.size..).ok_or(Error::Truncated)?;
+        (Some(parsed), body)
+    } else {
+        (None, &message[1..])
+    };
+    let schema = parsed.as_ref().or(held);
+    match root_bits {
+        ROOT_NARROW | ROOT_WIDE => {
+            let schema = schema.ok_or(Error::NoSchema)?;
+            to_json(schema, body, root_bits == ROOT_WIDE)
+        }
+        ROOT_DYNAMIC_MAP | ROOT_DYNAMIC_LIST => {
+            let none = Schema::default();
+            let mut walker = Walker::new(schema.unwrap_or(&none), message.len());
+            walker.dynamic_root(body, root_bits == ROOT_DYNAMIC_LIST)?;
+            Ok(walker.to.finish())
+        }
+        _ => Err(Error::BadRoot(root)),
+    }
+}
+
+/// The root bytes this module dispatches on, without the schema bit.
+const ROOT_NARROW: u8 = 0xD0;
+const ROOT_WIDE: u8 = 0xD8;
+const ROOT_SCHEMA: u8 = 0x04;
+const ROOT_DYNAMIC_MAP: u8 = 0xD1;
+const ROOT_DYNAMIC_LIST: u8 = 0xD3;
 
 /// The walk, and the one buffer it renders into.
 pub struct Walker<'s> {
@@ -524,6 +574,13 @@ impl<'s> Walker<'s> {
         if !map_key_is_renderable(field.key_kind) {
             return Err(Error::UnwalkableOp(field.op));
         }
+        if field.value_kind == MAP_ANY {
+            // The entries of a `map[string]any`, which say what they are one at a
+            // time rather than once in the schema: a dynamic container, compact
+            // inside. See `wire/compact.rs`.
+            self.compact_entries(&mut entries, count)?;
+            return entries.err();
+        }
         self.enter()?;
         self.to.begin_object();
         for _ in 0..count {
@@ -575,9 +632,6 @@ impl<'s> Walker<'s> {
                 }
             }
             MAP_BOOL => self.to.boolean(entries.element_uint() == 1),
-            // The entries of a `map[string]any`, which say what they are one at a
-            // time rather than once in the schema.
-            MAP_ANY => return self.dynamic_value(entries),
             // A struct value is a list's element: a descriptor that says its key
             // width, a length and a key run.
             MAP_STRUCT => {
@@ -679,7 +733,7 @@ impl<'s> Walker<'s> {
         self.enter()?;
         self.to.begin_array();
         for _ in 0..count {
-            self.dynamic_value(&mut elements)?;
+            self.compact_value(&mut elements)?;
         }
         elements.err()?;
         self.to.end_array();
@@ -689,37 +743,7 @@ impl<'s> Walker<'s> {
 
     fn dynamic_map(&mut self, reader: &mut Reader8<'_>) -> Result<(), Error> {
         let (count, mut entries) = reader.element_map().ok_or(Error::Truncated)?;
-        self.enter()?;
-        self.to.begin_object();
-        for _ in 0..count {
-            self.dynamic_key(&mut entries)?;
-            self.dynamic_value(&mut entries)?;
-        }
-        entries.err()?;
-        self.to.end_object();
-        self.leave();
-        Ok(())
-    }
-
-    /// An entry's key, which has to be a name.
-    fn dynamic_key(&mut self, entries: &mut Reader8<'_>) -> Result<(), Error> {
-        match entries.element_kind() {
-            Kind::String => {
-                let name = entries.element_blob();
-                entries.err()?;
-                self.to.key_bytes(name);
-            }
-            Kind::Int => {
-                if entries.element_negative() {
-                    let value = entries.element_int();
-                    self.number_key(value, true);
-                } else {
-                    let value = entries.element_uint();
-                    self.number_key(value as i64, false);
-                }
-            }
-            _ => return Err(Error::BadDescriptor),
-        }
+        self.compact_entries(&mut entries, count)?;
         entries.err()
     }
 
@@ -727,6 +751,11 @@ impl<'s> Walker<'s> {
     /// which is the shape the dynamic form exists for.
     fn dynamic_typed(&mut self, reader: &mut Reader8<'_>) -> Result<(), Error> {
         let at = reader.element_typed_index().ok_or(Error::Truncated)?;
+        self.typed_value(reader, at)
+    }
+
+    /// The record or the rows behind a type tag naming `at`.
+    fn typed_value(&mut self, reader: &mut Reader8<'_>, at: u32) -> Result<(), Error> {
         // Resolved before the value is read, so a tag naming a struct this
         // section does not hold fails as a bad section rather than as whatever
         // the bytes behind it happened to look like.
@@ -746,6 +775,134 @@ impl<'s> Walker<'s> {
             }
             _ => Err(Error::BadDescriptor),
         }
+    }
+
+    // ---- compact values -----------------------------------------------------
+
+    /// One compact value: [`Walker::dynamic_value`], inside a container.
+    fn compact_value(&mut self, reader: &mut Reader8<'_>) -> Result<(), Error> {
+        match reader.compact_kind() {
+            Kind::Null => {
+                reader.compact_null();
+                self.to.null();
+            }
+            Kind::Bool => {
+                let value = reader.compact_bool();
+                self.to.boolean(value);
+            }
+            Kind::Int => {
+                let (magnitude, negative) = reader.compact_integer();
+                if negative {
+                    self.to.signed((magnitude as i64).wrapping_neg());
+                } else if let Ok(signed) = i64::try_from(magnitude) {
+                    self.to.signed(signed);
+                } else {
+                    self.to.unsigned(magnitude);
+                }
+            }
+            Kind::Float64 | Kind::Float32 => {
+                let (value, width) = reader.compact_float();
+                if !self.to.float(value, width) {
+                    return Err(Error::NotJson);
+                }
+            }
+            Kind::String => {
+                let text = reader.compact_string();
+                reader.err()?;
+                self.to.text_bytes(text);
+            }
+            Kind::Bytes => {
+                let bytes = reader.compact_bytes();
+                reader.err()?;
+                self.to.blob(bytes);
+            }
+            Kind::List => {
+                let count = reader.compact_list().ok_or(Error::Truncated)?;
+                self.enter()?;
+                self.to.begin_array();
+                for _ in 0..count {
+                    self.compact_value(reader)?;
+                }
+                self.to.end_array();
+                self.leave();
+            }
+            Kind::Map => {
+                let count = reader.compact_map().ok_or(Error::Truncated)?;
+                self.compact_entries(reader, count)?;
+            }
+            Kind::Typed => {
+                let at = reader.compact_typed().ok_or(Error::Truncated)?;
+                self.typed_value(reader, at)?;
+            }
+            _ => {
+                reader.err()?;
+                return Err(Error::BadDescriptor);
+            }
+        }
+        reader.err()
+    }
+
+    /// `count` compact entries, as an object.
+    fn compact_entries(&mut self, reader: &mut Reader8<'_>, count: usize) -> Result<(), Error> {
+        self.enter()?;
+        self.to.begin_object();
+        for _ in 0..count {
+            self.compact_key(reader)?;
+            self.compact_value(reader)?;
+        }
+        self.to.end_object();
+        self.leave();
+        Ok(())
+    }
+
+    /// An entry's key, which has to be a name.
+    fn compact_key(&mut self, reader: &mut Reader8<'_>) -> Result<(), Error> {
+        match reader.compact_kind() {
+            Kind::String => {
+                let name = reader.compact_string();
+                reader.err()?;
+                self.to.key_bytes(name);
+            }
+            Kind::Int => {
+                let (magnitude, negative) = reader.compact_integer();
+                if negative {
+                    self.number_key((magnitude as i64).wrapping_neg(), true);
+                } else {
+                    self.number_key(magnitude as i64, false);
+                }
+            }
+            _ => {
+                reader.err()?;
+                return Err(Error::BadDescriptor);
+            }
+        }
+        reader.err()
+    }
+
+    /// A message whose root is a dynamic document: a `map[string]any`'s entries
+    /// to the end of the message, or one compact value for a `[]any`.
+    ///
+    /// # Errors
+    ///
+    /// Any malformed message.
+    pub fn dynamic_root(&mut self, body: &[u8], list: bool) -> Result<(), Error> {
+        let mut reader = Reader8::new(body);
+        if list {
+            self.compact_value(&mut reader)?;
+            if reader.compact_more() {
+                return Err(Error::Trailing);
+            }
+            return Ok(());
+        }
+        self.enter()?;
+        self.to.begin_object();
+        while reader.compact_more() {
+            self.compact_key(&mut reader)?;
+            self.compact_value(&mut reader)?;
+        }
+        self.to.end_object();
+        self.leave();
+        Ok(())
     }
 
     // ---- arrays -------------------------------------------------------------

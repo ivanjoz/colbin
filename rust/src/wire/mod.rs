@@ -78,6 +78,7 @@
 use alloc::vec::Vec;
 
 mod bitmap;
+mod compact;
 mod dynamic;
 mod groups;
 mod narrow;

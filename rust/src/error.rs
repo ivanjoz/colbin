@@ -58,6 +58,8 @@ pub enum Error {
     /// out-of-band delivery sends the section once per connection, so this is
     /// what a caller sees when the first message beat it.
     NoSchema,
+    /// Bytes past the end of a dynamic document.
+    Trailing,
     /// A schema section is malformed: a declared length its bytes cannot hold, a
     /// type code this version does not assign, or a struct index outside the
     /// table it points into. One variant rather than a dozen, because a section
@@ -128,6 +130,7 @@ impl fmt::Display for Error {
             Self::NoSchema => {
                 out.write_str("colbin: the message carries no schema section and none was set")
             }
+            Self::Trailing => out.write_str("colbin: bytes past the end of the document"),
             Self::Packed5(inner) => write!(out, "colbin: packed5 {inner}"),
         }
     }

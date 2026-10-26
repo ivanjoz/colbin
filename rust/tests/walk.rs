@@ -39,14 +39,14 @@ fn documents(corpus: &serde_json::Value) -> Vec<&serde_json::Value> {
 }
 
 /// One case, unpacked into what a reader without the Go type is handed: a
-/// parsed section, the body after the root byte, and the key width.
-fn delivery(case: &serde_json::Value) -> (section::Schema, Vec<u8>, bool) {
+/// parsed section and the whole message, which has a root byte only when it is
+/// not a typed narrow one.
+fn delivery(case: &serde_json::Value) -> (section::Schema, Vec<u8>) {
     let name = case["name"].as_str().expect("name");
     let schema = section::parse(&unhex(case["section"].as_str().expect("section")))
         .unwrap_or_else(|e| panic!("{name}: {e}"));
     let message = unhex(case["message"].as_str().expect("message"));
-    let wide = case["wide"].as_bool().expect("wide");
-    (schema, message[1..].to_vec(), wide)
+    (schema, message)
 }
 
 #[test]
@@ -56,20 +56,24 @@ fn every_document_renders_the_json_go_renders() {
     assert!(cases.len() >= 40, "corpus shrank: {} cases", cases.len());
 
     let mut unsupported = Vec::new();
+    let mut failures = Vec::new();
     for case in &cases {
         let name = case["name"].as_str().expect("name");
         let want = case["json"].as_str().expect("json");
-        let (schema, body, wide) = delivery(case);
+        let (schema, body) = delivery(case);
 
-        match walk::to_json(&schema, &body, wide) {
+        match walk::message_to_json(Some(&schema), &body) {
             Ok(got) => {
                 let got = String::from_utf8(got).expect("the walk writes UTF-8");
-                assert_eq!(got, want, "{name}: the walk disagrees with Go");
+                if got != want {
+                    failures.push(format!("{name}: the walk disagrees with Go"));
+                }
             }
             Err(colbin::Error::Unsupported) => unsupported.push(name),
-            Err(e) => panic!("{name}: {e}"),
+            Err(e) => failures.push(format!("{name}: {e}")),
         }
     }
+    assert!(failures.is_empty(), "{failures:#?}");
 
     assert!(
         unsupported.is_empty(),
@@ -81,12 +85,12 @@ fn every_document_renders_the_json_go_renders() {
 fn a_truncated_message_is_refused_rather_than_panicking() {
     let corpus = corpus();
     for case in documents(&corpus) {
-        let (schema, body, wide) = delivery(case);
+        let (schema, body) = delivery(case);
         // Every prefix. A short read must become an error, never a panic and
         // never a read past the buffer — which is the property that matters when
         // the bytes came off a socket.
         for cut in 0..body.len() {
-            let _ = walk::to_json(&schema, &body[..cut], wide);
+            let _ = walk::message_to_json(Some(&schema), &body[..cut]);
         }
     }
 }
@@ -106,13 +110,13 @@ fn a_corrupted_byte_is_refused_or_renders_something_well_formed() {
             .iter()
             .find(|case| case["name"] == want)
             .unwrap_or_else(|| panic!("{want} is not in the corpus"));
-        let (schema, body, wide) = delivery(case);
+        let (schema, body) = delivery(case);
 
         for at in 0..body.len() {
             for bit in 0..8u32 {
                 let mut broken = body.clone();
                 broken[at] ^= 1 << bit;
-                if let Ok(text) = walk::to_json(&schema, &broken, wide) {
+                if let Ok(text) = walk::message_to_json(Some(&schema), &broken) {
                     // Whatever it decoded to, it must still be JSON: a decoder
                     // that emits a half-written document on bad input is worse
                     // than one that refuses.

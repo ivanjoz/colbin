@@ -49,21 +49,6 @@ fn walks(corpus: &serde_json::Value) -> Vec<&serde_json::Value> {
         .collect()
 }
 
-/// Splits a self-describing message: the root byte, then a length-prefixed
-/// section, then the body. `Schema::size` is what the section occupied.
-fn split_standalone(message: &[u8]) -> (section::Schema, &[u8], bool) {
-    let root = message[0];
-    assert_eq!(root & 0xF0, 0xD0, "not a colbin root byte: {root:#04x}");
-    assert_ne!(
-        root & 0x04,
-        0,
-        "the root byte carries no section: {root:#04x}"
-    );
-    let schema = section::parse(&message[1..]).expect("the message's own section");
-    let body = &message[1 + schema.size..];
-    (schema, body, root & 0x08 != 0)
-}
-
 fn same_document(got: &[u8], want: &str) -> bool {
     let Ok(left) = serde_json::from_slice::<serde_json::Value>(got) else {
         return false;
@@ -83,13 +68,12 @@ fn every_dynamic_case_renders_what_go_renders() {
     for case in &cases {
         let name = case["name"].as_str().expect("name");
         let want = case["json"].as_str().expect("json");
-        let wide = case["wide"].as_bool().expect("wide");
 
         // The out-of-band delivery.
         let section_bytes = unhex(case["section"].as_str().expect("section"));
         let message = unhex(case["message"].as_str().expect("message"));
         let schema = section::parse(&section_bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
-        let got = walk::to_json(&schema, &message[1..], wide)
+        let got = walk::message_to_json(Some(&schema), &message)
             .unwrap_or_else(|e| panic!("{name}: out of band: {e}"));
         assert!(
             same_document(&got, want),
@@ -100,8 +84,7 @@ fn every_dynamic_case_renders_what_go_renders() {
         // And the standalone one, whose section can name a struct the type
         // never mentions.
         let standalone = unhex(case["selfDescribing"].as_str().expect("selfDescribing"));
-        let (schema, body, wide) = split_standalone(&standalone);
-        let got = walk::to_json(&schema, body, wide)
+        let got = walk::message_to_json(None, &standalone)
             .unwrap_or_else(|e| panic!("{name}: self-describing: {e}"));
         assert!(
             same_document(&got, want),
@@ -139,9 +122,8 @@ fn a_truncated_dynamic_message_is_refused_rather_than_panicking() {
     let corpus = corpus();
     for case in walks(&corpus) {
         let standalone = unhex(case["selfDescribing"].as_str().unwrap());
-        let (schema, body, wide) = split_standalone(&standalone);
-        for cut in 0..body.len() {
-            let _ = walk::to_json(&schema, &body[..cut], wide);
+        for cut in 0..standalone.len() {
+            let _ = walk::message_to_json(None, &standalone[..cut]);
         }
     }
 }
@@ -156,14 +138,13 @@ fn a_corrupted_dynamic_byte_is_refused_or_renders_well_formed_json() {
         .find(|case| case["name"] == "dynamic.scalars")
         .expect("dynamic.scalars");
     let standalone = unhex(case["selfDescribing"].as_str().unwrap());
-    let (schema, body, wide) = split_standalone(&standalone);
 
     let mut seen = 0;
-    for at in 0..body.len() {
+    for at in 0..standalone.len() {
         for bit in 0..8u32 {
-            let mut broken = body.to_vec();
+            let mut broken = standalone.clone();
             broken[at] ^= 1 << bit;
-            if let Ok(text) = walk::to_json(&schema, &broken, wide) {
+            if let Ok(text) = walk::message_to_json(None, &broken) {
                 serde_json::from_slice::<serde_json::Value>(&text)
                     .expect("a successful decode must produce valid JSON");
             }
