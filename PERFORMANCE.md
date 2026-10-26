@@ -431,7 +431,21 @@ by `TestWidenedColumnsEncodeAsInt64Ones`.
 
 - **A generated encoder per type** for the row path: the only lead that
   addresses what is left of encode into a reused buffer (0.63–0.83× of msgpack),
-  and a different product decision from the rest of this list.
+  and a different product decision from the rest of this list. `Generate`
+  already covers flat records: on the reading record, alone on a P-core, its
+  `AppendColbin` is 24 ns against `Codec.Append`'s 37, and `UnmarshalColbin`
+  (reusing slices since `48a5e3f`) 42 ns against 59, same bytes. msgpack's side
+  of the benchmark is msgp's generated code. Records with tables (sales,
+  dataset) are refused today.
+- **Peak memory.** Measured per case, format and operation in a process of its
+  own (VmHWM over a baseline, after `clear_refs`), five operations, amd64:
+  colbin is lower on every fresh encode and decode, and higher where msgpack
+  allocates nothing — TPC-H normalized encode into a reused buffer (92 MB
+  against 0.1) and normalized decode-reuse (323 MB against 223), both the
+  transposition scratch, which `sync.Pool` loses at every collection inside the
+  call. Bounding it needs the table written in row groups (a format change) or
+  three passes over the rows: the transform is scored on block costs that need
+  the column's minimum first.
 - **Scratch at each column's native width**, with int32 AVX2 kernels; without
   them it costs more on the scans than it saves on the traffic.
 - **Unpack in assembly.** Less to win than before: the fused read no longer
