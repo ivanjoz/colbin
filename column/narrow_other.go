@@ -9,9 +9,6 @@ package column
 // at int64.
 const narrowKernels = false
 
-// NarrowKernels: see asm_amd64.go.
-const NarrowKernels = false
-
 func scanSIMD32(vals []int32) (int64, bool, bool, int, int, int) { return 0, false, false, 0, 0, 0 }
 
 func residualsSIMD32(vals []int32, transform uint8, base int64, zz bool, block []uint64) uint64 {

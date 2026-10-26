@@ -871,3 +871,31 @@ func TestShortColumnsEncodeAsLongOnesDo(t *testing.T) {
 		}
 	}
 }
+
+// appendWidened is arm64's route for an int32 column, and must write what the
+// same values do as int64.
+func TestWidenedColumnsEncodeAsInt64Ones(t *testing.T) {
+	r := rand.New(rand.NewPCG(32, 64))
+	for _, n := range []int{shortColumn + 1, 100, blockSize, blockSize + 1, 5000} {
+		for shape := range 4 {
+			narrow := make([]int32, n)
+			wide := make([]int64, n)
+			for i := range narrow {
+				switch shape {
+				case 0:
+					narrow[i] = int32(r.Uint32())
+				case 1:
+					narrow[i] = int32(r.IntN(100))
+				case 2:
+					narrow[i] = int32(i * 7)
+				default:
+					narrow[i] = []int32{math.MinInt32, math.MaxInt32, 0, -1}[r.IntN(4)]
+				}
+				wide[i] = int64(narrow[i])
+			}
+			if got, want := appendWidened(nil, narrow), appendLong(nil, wide); !bytes.Equal(got, want) {
+				t.Fatalf("n %d shape %d: widened %d bytes, int64 %d", n, shape, len(got), len(want))
+			}
+		}
+	}
+}

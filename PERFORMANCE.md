@@ -380,6 +380,20 @@ unchanged.
 - **Integer list elements stored into room made once** (`appendElements`):
   +5% on six elements, `slices.Grow` a call where append was not.
 
+### int32 scratch on arm64
+
+The harness collects before every sample, so `sync.Pool` has dropped a TPC-H
+table's scratch by the next encode, and each one allocates it again: 116 MB on
+arm64, where integer columns were gathered as int64, against 90 MB on amd64.
+That was most of normalized encode's 0.66× on Graviton2. arm64 now gathers an
+int32-fitting column as int32 too (`NarrowColumns`), and `appendWidened` widens
+it back into a pooled int64 buffer for the scans, so the NEON kernels stay as
+they are: one column's worth of int64 instead of the table's.
+
+Lambda Graviton2, against `da29574`: normalized encode **161 → 104 ms** (msgpack
+101 ms, 0.66× → 0.97×), 116 → 96 MB a call; the rest unchanged. Same bytes, held
+by `TestWidenedColumnsEncodeAsInt64Ones`.
+
 ## Lessons for the next pass
 
 - **Go's inliner budget (80) is load-bearing here.** Moving the writers to

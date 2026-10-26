@@ -3,6 +3,7 @@ package column
 import (
 	"encoding/binary"
 	"math/bits"
+	"sync"
 )
 
 // Array codec: the integer input is mapped to a sequence of unsigned residuals
@@ -299,9 +300,35 @@ func appendScanned[T Signed](out []byte, vals []T, scan Scan) []byte {
 	return packRun(append(out, byte(w)), block, w)
 }
 
+// widenedPool holds the one column appendWidened widens into.
+var widenedPool sync.Pool // *[]int64
+
+// appendWidened is appendLong for an int32 column where there are only int64
+// kernels: the column widened into a pooled buffer and encoded from there, to
+// the same bytes, since they depend only on the values.
+func appendWidened(out []byte, vals []int32) []byte {
+	held, _ := widenedPool.Get().(*[]int64)
+	if held == nil {
+		held = new([]int64)
+	}
+	if cap(*held) < len(vals) {
+		*held = make([]int64, len(vals))
+	}
+	wide := (*held)[:len(vals)]
+	for index, value := range vals {
+		wide[index] = int64(value)
+	}
+	out = appendLong(out, wide)
+	widenedPool.Put(held)
+	return out
+}
+
 // appendLong is AppendArray for a column past shortColumn, or under the
 // ablation's forced transform.
 func appendLong[T Signed](out []byte, vals []T) []byte {
+	if narrow, ok := any(vals).([]int32); ok && NarrowColumns && !narrowKernels && useSIMD && forcedTransform < 0 {
+		return appendWidened(out, narrow)
+	}
 	var minimum int64
 	var constant, deltaOverflows bool
 	var best, frame, steps int

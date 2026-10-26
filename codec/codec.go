@@ -42,7 +42,7 @@ type fieldOp uint8
 // fitsInt32 is whether a scalar op's values all fit an int32, so that a table
 // column of it can be gathered and encoded at that width.
 func (op fieldOp) fitsInt32() bool {
-	if !column.NarrowKernels {
+	if !column.NarrowColumns {
 		return false
 	}
 	switch op {

@@ -52,11 +52,6 @@ func residualsVec32(values *int32, n int, base int64, mode int, dst *uint64, out
 // narrowKernels is whether []int32 columns have kernels of their own.
 const narrowKernels = true
 
-// NarrowKernels is narrowKernels for the codec: a table keeps an integer column at
-// int32 only where there are kernels for it, since widening one for the int64
-// kernels costs the pass the narrow scratch saves.
-const NarrowKernels = narrowKernels
-
 // scanCall is the scan kernel for T's width.
 func scanCall[T int32 | int64](values *T, blocks, size int, out *int64) {
 	switch pointer := any(values).(type) {
