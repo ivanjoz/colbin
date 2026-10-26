@@ -428,6 +428,28 @@ reuse-aware decode (40.2 against 44.6 ns in a loop). Held by
 flipped, spliced, random bytes and another type's, each through both paths
 from a used record.
 
+### Sales encode on Lambda's 2.50 GHz Xeon
+
+Lambda places x86 functions on two hosts that differ for colbin: on "Intel
+Xeon Processor" sales encode is 0.86–0.88× msgpack, on "Intel Xeon Processor @
+2.50GHz" (AVX2, no AVX-512 exposed) 0.70–0.73×, steadily, while locally colbin
+is ahead (1.66 against 1.73 ms). A temporary function on that host ran
+colbinbench with a CPU profile and A/B'd builds in turns, each a few minutes:
+
+- **The profile has the local shape**: the kernel ~36% of colbin's time (two
+  thirds of it for lines through `writeRows`), tables 43%, `ENCODE` most of the
+  kernel. Every part is about as much slower, so no one hotspot explains it.
+- **No AVX2** (`useSIMD` off): +3.7%. Not a frequency licence effect.
+- **`ENCODE` with branches** instead of CMOVs (8 instructions against 17):
+  +1.4%.
+- **The kernel's dispatch reordered** for int64, uint64, uint32 first: −0.3%,
+  not significant.
+- **Table threshold 16 or 33** (fewer short tables): −6.3% / −9.5% on sales,
+  for +3% / +11% bytes. Still 0.77× at 33; not worth the size.
+
+What is left is the per-field cost of an interpreted walk against msgp's
+generated straight-line code, which this CPU runs relatively better.
+
 ### int32 scratch on arm64
 
 The harness collects before every sample, so `sync.Pool` has dropped a TPC-H
