@@ -627,6 +627,55 @@ impl<'a> Writer8<'a> {
         self.close(mark);
     }
 
+    /// The integer column of a pointer field in which every row holds a value,
+    /// written even when every value is zero, since its absence would mean nil.
+    pub fn column_keep(&mut self, key: u8, values: &[i64], float: bool) {
+        let mark = self.open_composite(key, CLASS_COL, 0);
+        super::append_ints(self.buf, values, float);
+        self.close(mark);
+    }
+
+    /// The integer column of a pointer field in which some rows are nil: their
+    /// presence, then the values of the rows present.
+    pub fn nullable_column(&mut self, key: u8, presence: &[u8], values: &[i64], float: bool) {
+        let mark = self.open_composite(key, CLASS_COL, super::nullable::NULLABLE_DETAIL);
+        self.buf.extend_from_slice(presence);
+        super::append_ints(self.buf, values, float);
+        self.close(mark);
+    }
+
+    /// The string column of a pointer field in which every row holds a value,
+    /// written even when every value is empty.
+    pub fn string_column_keep<S: AsRef<[u8]>>(&mut self, key: u8, values: &[S]) {
+        self.strings(key, values);
+    }
+
+    /// The string column of a pointer field in which some rows are nil: their
+    /// presence, then the strings of the rows present, each behind its size.
+    pub fn nullable_strings<S: AsRef<[u8]>>(&mut self, key: u8, presence: &[u8], values: &[S]) {
+        let mark = self.open_composite(
+            key,
+            CLASS_LIST,
+            LIST_HOMOGENEOUS | super::nullable::NULLABLE_DETAIL,
+        );
+        self.buf.extend_from_slice(presence);
+        for value in values {
+            super::append_string_element(self.buf, value.as_ref());
+        }
+        self.close(mark);
+    }
+
+    /// [`Writer8::column`] for an `f64` column held as its bit patterns: a decimal
+    /// column when its values are decimals and that is smaller.
+    pub fn float_column(&mut self, key: u8, values: &[i64]) {
+        if values.iter().all(|&value| value == 0) {
+            return;
+        }
+        let mark = self.open_composite(key, CLASS_COL, 0);
+        column::append_float64(self.buf, values);
+        self.close(mark);
+    }
+
     /// Writes a string column, which is a list of blobs under the column's key.
     ///
     /// A column of nothing but empty strings is omitted, for the same reason an
@@ -1094,7 +1143,7 @@ impl<'a> Reader8<'a> {
 
     /// Checks the class, reads the length and returns the body as a sub-slice,
     /// advancing the cursor past the whole field.
-    fn composite_body(&mut self, want: u8) -> Option<&'a [u8]> {
+    pub(super) fn composite_body(&mut self, want: u8) -> Option<&'a [u8]> {
         let (length, start) = self.length_of(want)?;
         if length > self.buf.len() - start {
             self.fail(Error::Truncated);

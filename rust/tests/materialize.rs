@@ -11,7 +11,7 @@
 //! encoded as a table) are checked here; everything else returns `Ok(None)`
 //! and is `walk.rs`'s test's responsibility.
 
-use colbin::materialize::to_buffer;
+use colbin::materialize::message_to_buffer;
 use colbin::section;
 
 fn unhex(text: &str) -> Vec<u8> {
@@ -37,13 +37,12 @@ fn documents(corpus: &serde_json::Value) -> Vec<&serde_json::Value> {
         .collect()
 }
 
-fn delivery(case: &serde_json::Value) -> (section::Schema, Vec<u8>, bool) {
+fn delivery(case: &serde_json::Value) -> (section::Schema, Vec<u8>) {
     let name = case["name"].as_str().expect("name");
     let schema = section::parse(&unhex(case["section"].as_str().expect("section")))
         .unwrap_or_else(|e| panic!("{name}: {e}"));
     let message = unhex(case["message"].as_str().expect("message"));
-    let wide = case["wide"].as_bool().expect("wide");
-    (schema, message[1..].to_vec(), wide)
+    (schema, message)
 }
 
 /// One materialized value, still carrying the kind that says how to compare
@@ -174,9 +173,9 @@ fn table_shaped_documents_materialize_to_what_go_wrote() {
     for case in &cases {
         let name = case["name"].as_str().expect("name");
         let want_text = case["json"].as_str().expect("json");
-        let (schema, body, wide) = delivery(case);
+        let (schema, body) = delivery(case);
 
-        let buf = match to_buffer(&schema, &body, wide) {
+        let buf = match message_to_buffer(Some(&schema), &body) {
             Ok(None) => continue,
             Ok(Some(buf)) => buf,
             Err(e) => panic!("{name}: {e}"),
@@ -212,12 +211,12 @@ fn table_shaped_documents_materialize_to_what_go_wrote() {
 fn a_truncated_table_message_is_refused_rather_than_panicking() {
     let corpus = corpus();
     for case in documents(&corpus) {
-        let (schema, body, wide) = delivery(case);
-        if !matches!(to_buffer(&schema, &body, wide), Ok(Some(_))) {
+        let (schema, body) = delivery(case);
+        if !matches!(message_to_buffer(Some(&schema), &body), Ok(Some(_))) {
             continue;
         }
         for cut in 0..body.len() {
-            let _ = to_buffer(&schema, &body[..cut], wide);
+            let _ = message_to_buffer(Some(&schema), &body[..cut]);
         }
     }
 }
@@ -241,11 +240,7 @@ fn a_table_column_past_2_53_is_flagged_and_exact() {
         .unwrap_or_else(|| panic!("refused to encode: {:?}", diag.encode()));
 
     let schema = section::parse(&encoded.section).expect("section parses");
-    let root = encoded.message[0];
-    let wide = root & 0x08 != 0;
-    let body = &encoded.message[1..];
-
-    let buf = to_buffer(&schema, body, wide)
+    let buf = message_to_buffer(Some(&schema), &encoded.message)
         .expect("a well-formed message")
         .expect("a bare-array root past the table threshold is this fast path's shape");
     let rows = decode_buffer(&buf);

@@ -32,7 +32,7 @@
 use crate::Error;
 use crate::walk::MAX_ROWS;
 use crate::wire::root::{finish_narrow, narrow_body};
-use crate::wire::{Reader, Reader8, Runs, Writer, Writer8};
+use crate::wire::{self, Reader, Reader8, Runs, Writer, Writer8};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -68,8 +68,19 @@ pub struct ColumnSpec {
 /// column codec takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColumnKind {
-    /// An integer, bool or float column, through the blocked column codec.
+    /// An integer, bool or `f32` column, through the blocked column codec.
     Int,
+    /// A pointer to an integer, bool or `f32`: absent when every row is `None`, the
+    /// plain column when none is, and otherwise a presence bitmap and the values
+    /// of the rows present.
+    OptInt,
+    /// [`ColumnKind::OptInt`] for an `f64`, as its bit patterns.
+    OptFloat64,
+    /// [`ColumnKind::OptInt`] for a string.
+    OptStr,
+    /// An `f64` column, as its bit patterns: a decimal column when its values
+    /// are decimals and that is smaller (`column::append_float64`).
+    Float64,
     /// A string column, which is a list of blobs under the column's key.
     Str,
 }
@@ -122,6 +133,23 @@ pub trait Colbin: Sized {
 
     /// Writes one decoded string column back into this value.
     fn colbin_set_column_str(&mut self, _column: usize, _value: String) {}
+
+    /// Reads one pointer column of this value, widened to `i64`. Only called for
+    /// a [`ColumnKind::OptInt`] or [`ColumnKind::OptFloat64`] column.
+    fn colbin_column_opt_i64(&self, _column: usize) -> Option<i64> {
+        None
+    }
+
+    /// Reads one pointer-to-string column of this value.
+    fn colbin_column_opt_str(&self, _column: usize) -> Option<&str> {
+        None
+    }
+
+    /// Writes one decoded pointer column back into this value.
+    fn colbin_set_column_opt_i64(&mut self, _column: usize, _value: Option<i64>) {}
+
+    /// Writes one decoded pointer-to-string column back into this value.
+    fn colbin_set_column_opt_str(&mut self, _column: usize, _value: Option<String>) {}
 
     /// Encodes the value onto `dst`, which may already hold other bytes.
     ///
@@ -350,22 +378,7 @@ fn write_table<T: Colbin>(w: &mut Writer<'_>, key: u8, values: &[T]) {
         w.close(mark);
         return;
     }
-    let mut ints: Vec<i64> = Vec::with_capacity(values.len());
-    let mut strings: Vec<&str> = Vec::with_capacity(values.len());
-    for (index, spec) in T::COLUMNS.iter().enumerate() {
-        match spec.kind {
-            ColumnKind::Str => {
-                strings.clear();
-                strings.extend(values.iter().map(|value| value.colbin_column_str(index)));
-                w.string_column(spec.key, &strings);
-            }
-            ColumnKind::Int => {
-                ints.clear();
-                ints.extend(values.iter().map(|value| value.colbin_column_i64(index)));
-                w.column(spec.key, &ints);
-            }
-        }
-    }
+    write_columns(w, values);
     w.close(mark);
 }
 
@@ -378,8 +391,57 @@ fn write_table8<T: Colbin>(w: &mut Writer8<'_>, key: u8, values: &[T]) {
 
 /// A table's columns under eight-bit keys.
 fn write_columns8<T: Colbin>(w: &mut Writer8<'_>, values: &[T]) {
-    let mut ints: Vec<i64> = Vec::with_capacity(values.len());
-    let mut strings: Vec<&str> = Vec::with_capacity(values.len());
+    write_columns(w, values);
+}
+
+/// The column writers both key widths have, which is all a table's columns need.
+trait ColumnWriter {
+    fn column(&mut self, key: u8, values: &[i64]);
+    fn float_column(&mut self, key: u8, values: &[i64]);
+    fn string_column(&mut self, key: u8, values: &[&str]);
+    fn column_keep(&mut self, key: u8, values: &[i64], float: bool);
+    fn nullable_column(&mut self, key: u8, presence: &[u8], values: &[i64], float: bool);
+    fn string_column_keep(&mut self, key: u8, values: &[&str]);
+    fn nullable_strings(&mut self, key: u8, presence: &[u8], values: &[&str]);
+}
+
+macro_rules! column_writer {
+    ($writer:ident) => {
+        impl ColumnWriter for $writer<'_> {
+            fn column(&mut self, key: u8, values: &[i64]) {
+                $writer::column(self, key, values);
+            }
+            fn float_column(&mut self, key: u8, values: &[i64]) {
+                $writer::float_column(self, key, values);
+            }
+            fn string_column(&mut self, key: u8, values: &[&str]) {
+                $writer::string_column(self, key, values);
+            }
+            fn column_keep(&mut self, key: u8, values: &[i64], float: bool) {
+                $writer::column_keep(self, key, values, float);
+            }
+            fn nullable_column(&mut self, key: u8, presence: &[u8], values: &[i64], float: bool) {
+                $writer::nullable_column(self, key, presence, values, float);
+            }
+            fn string_column_keep(&mut self, key: u8, values: &[&str]) {
+                $writer::string_column_keep(self, key, values);
+            }
+            fn nullable_strings(&mut self, key: u8, presence: &[u8], values: &[&str]) {
+                $writer::nullable_strings(self, key, presence, values);
+            }
+        }
+    };
+}
+
+column_writer!(Writer);
+column_writer!(Writer8);
+
+/// A table's columns at either key width.
+fn write_columns<T: Colbin, W: ColumnWriter>(w: &mut W, values: &[T]) {
+    let rows = values.len();
+    let mut ints: Vec<i64> = Vec::with_capacity(rows);
+    let mut strings: Vec<&str> = Vec::with_capacity(rows);
+    let mut presence: Vec<u8> = Vec::new();
     for (index, spec) in T::COLUMNS.iter().enumerate() {
         match spec.kind {
             ColumnKind::Str => {
@@ -391,6 +453,48 @@ fn write_columns8<T: Colbin>(w: &mut Writer8<'_>, values: &[T]) {
                 ints.clear();
                 ints.extend(values.iter().map(|value| value.colbin_column_i64(index)));
                 w.column(spec.key, &ints);
+            }
+            ColumnKind::Float64 => {
+                ints.clear();
+                ints.extend(values.iter().map(|value| value.colbin_column_i64(index)));
+                w.float_column(spec.key, &ints);
+            }
+            ColumnKind::OptInt | ColumnKind::OptFloat64 => {
+                presence.clear();
+                presence.resize(wire::presence_bytes(rows), 0);
+                ints.clear();
+                for (row, value) in values.iter().enumerate() {
+                    if let Some(found) = value.colbin_column_opt_i64(index) {
+                        presence[row >> 3] |= 1 << (row & 7);
+                        ints.push(found);
+                    }
+                }
+                let float = spec.kind == ColumnKind::OptFloat64;
+                // Absent when no row holds a value, which under a pointer field
+                // means nil in every row; the plain column, written even when
+                // every value is zero, when every row does; and otherwise the
+                // presence and the values of the rows present.
+                if ints.len() == rows {
+                    w.column_keep(spec.key, &ints, float);
+                } else if !ints.is_empty() {
+                    w.nullable_column(spec.key, &presence, &ints, float);
+                }
+            }
+            ColumnKind::OptStr => {
+                presence.clear();
+                presence.resize(wire::presence_bytes(rows), 0);
+                strings.clear();
+                for (row, value) in values.iter().enumerate() {
+                    if let Some(found) = value.colbin_column_opt_str(index) {
+                        presence[row >> 3] |= 1 << (row & 7);
+                        strings.push(found);
+                    }
+                }
+                if strings.len() == rows {
+                    w.string_column_keep(spec.key, &strings);
+                } else if !strings.is_empty() {
+                    w.nullable_strings(spec.key, &presence, &strings);
+                }
             }
         }
     }
@@ -515,14 +619,96 @@ fn read_runs<T: Colbin>(
 /// A column run under four-bit keys, into the records of `out`. A failure is
 /// left on `columns` for the caller to carry up.
 fn read_columns<T: Colbin>(columns: &mut Reader<'_>, out: &mut [T]) {
+    read_column_run(columns, out);
+}
+
+/// [`read_columns`] under eight-bit keys.
+fn read_columns8<T: Colbin>(columns: &mut Reader8<'_>, out: &mut [T]) {
+    read_column_run(columns, out);
+}
+
+/// The column readers both key widths have, which is all a table's columns need.
+trait ColumnReader<'a> {
+    fn more(&self) -> bool;
+    fn key(&self) -> u8;
+    fn skip(&mut self) -> bool;
+    fn ints(&mut self, rows: usize, dst: &mut Vec<i64>);
+    fn strings(&mut self, dst: &mut Vec<String>);
+    fn is_nullable(&self) -> bool;
+    fn nullable_ints(&mut self, rows: usize) -> (&'a [u8], Vec<i64>);
+    fn nullable_strings(&mut self, rows: usize) -> (&'a [u8], Vec<&'a [u8]>);
+    fn fail(&mut self, err: Error);
+}
+
+impl<'a> ColumnReader<'a> for Reader<'a> {
+    fn more(&self) -> bool {
+        Reader::more(self)
+    }
+    fn key(&self) -> u8 {
+        Reader::key(self)
+    }
+    fn skip(&mut self) -> bool {
+        Reader::skip(self)
+    }
+    fn ints(&mut self, rows: usize, dst: &mut Vec<i64>) {
+        self.column(rows, dst);
+    }
+    fn strings(&mut self, dst: &mut Vec<String>) {
+        self.column_strings_into(dst);
+    }
+    fn is_nullable(&self) -> bool {
+        Reader::is_nullable(self)
+    }
+    fn nullable_ints(&mut self, rows: usize) -> (&'a [u8], Vec<i64>) {
+        self.nullable_column(rows)
+    }
+    fn nullable_strings(&mut self, rows: usize) -> (&'a [u8], Vec<&'a [u8]>) {
+        self.nullable_strings_bytes(rows)
+    }
+    fn fail(&mut self, err: Error) {
+        Reader::fail(self, err);
+    }
+}
+
+impl<'a> ColumnReader<'a> for Reader8<'a> {
+    fn more(&self) -> bool {
+        Reader8::more(self)
+    }
+    fn key(&self) -> u8 {
+        Reader8::key(self)
+    }
+    fn skip(&mut self) -> bool {
+        Reader8::skip(self)
+    }
+    fn ints(&mut self, rows: usize, dst: &mut Vec<i64>) {
+        self.column(rows, dst);
+    }
+    fn strings(&mut self, dst: &mut Vec<String>) {
+        self.strings_into(dst);
+    }
+    fn is_nullable(&self) -> bool {
+        Reader8::is_nullable(self)
+    }
+    fn nullable_ints(&mut self, rows: usize) -> (&'a [u8], Vec<i64>) {
+        self.nullable_column(rows)
+    }
+    fn nullable_strings(&mut self, rows: usize) -> (&'a [u8], Vec<&'a [u8]>) {
+        self.nullable_strings_bytes(rows)
+    }
+    fn fail(&mut self, err: Error) {
+        Reader8::fail(self, err);
+    }
+}
+
+fn read_column_run<'a, T: Colbin, R: ColumnReader<'a>>(columns: &mut R, out: &mut [T]) {
     let rows = out.len();
     let mut ints: Vec<i64> = Vec::new();
     let mut strings: Vec<String> = Vec::new();
     while columns.more() {
         let key = columns.key();
         let Some(index) = column_index::<T>(key) else {
-            // A column this type no longer declares is stepped over, as it is
-            // under wide keys: the nibble sizes it without its type.
+            // A column this type no longer declares is stepped over: the nibble,
+            // or the descriptor, sizes it without its type.
             if !columns.skip() {
                 return;
             }
@@ -531,42 +717,74 @@ fn read_columns<T: Colbin>(columns: &mut Reader<'_>, out: &mut [T]) {
         match T::COLUMNS[index].kind {
             ColumnKind::Str => {
                 strings.clear();
-                columns.column_strings_into(&mut strings);
+                columns.strings(&mut strings);
                 scatter_strings(out, index, &mut strings, rows);
             }
-            ColumnKind::Int => {
-                columns.column(rows, &mut ints);
+            ColumnKind::Int | ColumnKind::Float64 => {
+                columns.ints(rows, &mut ints);
                 scatter_ints(out, index, &ints, rows);
+            }
+            ColumnKind::OptInt | ColumnKind::OptFloat64 => {
+                if columns.is_nullable() {
+                    let (presence, values) = columns.nullable_ints(rows);
+                    if presence.is_empty() {
+                        // The read failed, and said so on the reader.
+                        continue;
+                    }
+                    let mut next = values.iter();
+                    for (row, record) in out.iter_mut().enumerate() {
+                        let value = wire::present(presence, row).then(|| next.next().copied());
+                        record.colbin_set_column_opt_i64(index, value.flatten());
+                    }
+                } else {
+                    // Every row holds a value.
+                    columns.ints(rows, &mut ints);
+                    if ints.len() < rows {
+                        continue;
+                    }
+                    for (record, value) in out.iter_mut().zip(&ints) {
+                        record.colbin_set_column_opt_i64(index, Some(*value));
+                    }
+                }
+            }
+            ColumnKind::OptStr => {
+                if columns.is_nullable() {
+                    let (presence, values) = columns.nullable_strings(rows);
+                    if presence.is_empty() {
+                        continue;
+                    }
+                    let mut next = values.iter();
+                    for (row, record) in out.iter_mut().enumerate() {
+                        let value = wire::present(presence, row).then(|| next.next());
+                        let value = value.flatten().map(|raw| utf8(raw));
+                        match value {
+                            Some(Ok(text)) => record.colbin_set_column_opt_str(index, Some(text)),
+                            Some(Err(err)) => {
+                                columns.fail(err);
+                                return;
+                            }
+                            None => record.colbin_set_column_opt_str(index, None),
+                        }
+                    }
+                } else {
+                    strings.clear();
+                    columns.strings(&mut strings);
+                    if strings.len() < rows {
+                        continue;
+                    }
+                    for (record, value) in out.iter_mut().zip(strings.drain(..)) {
+                        record.colbin_set_column_opt_str(index, Some(value));
+                    }
+                }
             }
         }
     }
 }
 
-/// [`read_columns`] under eight-bit keys.
-fn read_columns8<T: Colbin>(columns: &mut Reader8<'_>, out: &mut [T]) {
-    let rows = out.len();
-    let mut ints: Vec<i64> = Vec::new();
-    let mut strings: Vec<String> = Vec::new();
-    while columns.more() {
-        let key = columns.key();
-        let Some(index) = column_index::<T>(key) else {
-            if !columns.skip() {
-                return;
-            }
-            continue;
-        };
-        match T::COLUMNS[index].kind {
-            ColumnKind::Str => {
-                strings.clear();
-                columns.strings_into(&mut strings);
-                scatter_strings(out, index, &mut strings, rows);
-            }
-            ColumnKind::Int => {
-                columns.column(rows, &mut ints);
-                scatter_ints(out, index, &ints, rows);
-            }
-        }
-    }
+fn utf8(raw: &[u8]) -> Result<String, Error> {
+    core::str::from_utf8(raw)
+        .map(String::from)
+        .map_err(|_| Error::NotUtf8)
 }
 
 /// The column a wire key names, or `None` when the type does not declare it.

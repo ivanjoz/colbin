@@ -32,8 +32,8 @@
 use super::{
     ELEMENT_SIZE_ESCAPE, INLINE_ELEMENT_SIZE, INT_POSITIVE_FLAG, Integer, LENGTH_WIDTH,
     MAGNITUDE_WIDTH, Mark, UINT_INLINE_MAX, UINT_WIDTH_BASE, append_array, append_count,
-    append_elements, append_magnitude, bit_length, groups, le_uint, length_code_for, read_count,
-    size_code_for,
+    append_elements, append_ints, append_magnitude, append_string_element, bit_length, groups,
+    le_uint, length_code_for, read_count, size_code_for,
 };
 use crate::Error;
 use crate::column;
@@ -52,7 +52,7 @@ const NIBBLE_SIZED_BIAS: u8 = 3;
 /// The length form, `1 1 f1 f0`: a length follows the header, and the low two
 /// bits are a flag whose meaning is the type's. Every nibble from here up is
 /// sized the same way, which is why a flag can never change the field's size.
-const NIBBLE_LENGTH: u8 = 0b1100;
+pub(super) const NIBBLE_LENGTH: u8 = 0b1100;
 
 /// The flag bits of the length form.
 const FLAG_MASK: u8 = 0b11;
@@ -70,6 +70,11 @@ const COMPOSITE_STRUCT_WIDE: u8 = 0b01;
 const COMPOSITE_TABLE: u8 = 0b01;
 /// A list's or a map's `f1`: one element, no count.
 const COMPOSITE_SINGLE: u8 = 0b10;
+/// What a narrow table column's flags are when it is nullable, and when it holds
+/// dictionary ids, and when it holds the ids of the rows present.
+pub(super) const NULLABLE_FLAGS: u8 = NIBBLE_LENGTH | 0b10;
+pub(super) const DICT_FLAGS: u8 = NIBBLE_LENGTH | 0b01;
+pub(super) const NULLABLE_DICT_FLAGS: u8 = NIBBLE_LENGTH | 0b11;
 
 /// The longest length one byte holds. `F0..=FD` open a two-byte form holding
 /// 240..=3823 (`LENGTH_PAIR` plus a 12-bit offset), and 254 and 255 are the
@@ -637,6 +642,52 @@ impl<'a> Writer<'a> {
         column::append_array(self.buf, values);
         self.close(mark);
     }
+
+    /// The integer column of a pointer field in which every row holds a value,
+    /// written even when every value is zero, since its absence would mean nil.
+    /// `float` says the values are an `f64` column's bit patterns.
+    pub fn column_keep(&mut self, key: u8, values: &[i64], float: bool) {
+        let mark = self.open_composite(key, 0);
+        append_ints(self.buf, values, float);
+        self.close(mark);
+    }
+
+    /// The integer column of a pointer field in which some rows are nil: their
+    /// presence, then the values of the rows present.
+    pub fn nullable_column(&mut self, key: u8, presence: &[u8], values: &[i64], float: bool) {
+        let mark = self.open_composite(key, COMPOSITE_SINGLE);
+        self.buf.extend_from_slice(presence);
+        append_ints(self.buf, values, float);
+        self.close(mark);
+    }
+
+    /// The string column of a pointer field in which every row holds a value,
+    /// written even when every value is empty.
+    pub fn string_column_keep<S: AsRef<[u8]>>(&mut self, key: u8, values: &[S]) {
+        self.string_list(key, values);
+    }
+
+    /// The string column of a pointer field in which some rows are nil: their
+    /// presence, then the strings of the rows present, each behind its size.
+    pub fn nullable_strings<S: AsRef<[u8]>>(&mut self, key: u8, presence: &[u8], values: &[S]) {
+        let mark = self.open_composite(key, COMPOSITE_SINGLE);
+        self.buf.extend_from_slice(presence);
+        for value in values {
+            append_string_element(self.buf, value.as_ref());
+        }
+        self.close(mark);
+    }
+
+    /// [`Writer::column`] for an `f64` column held as its bit patterns: a decimal
+    /// column when its values are decimals and that is smaller.
+    pub fn float_column(&mut self, key: u8, values: &[i64]) {
+        if values.iter().all(|&value| value == 0) {
+            return;
+        }
+        let mark = self.open_composite(key, 0);
+        column::append_float64(self.buf, values);
+        self.close(mark);
+    }
 }
 
 /// What a raw blob of `size` bytes costs after its header byte: no length up to
@@ -670,8 +721,8 @@ fn make_room(buf: &mut Vec<u8>, mark: Mark, extra: usize) {
 /// buffer, so a decode loop ends rather than spinning, every later read answers
 /// zero, and one check of [`Reader::err`] at the end covers the whole message.
 pub struct Reader<'a> {
-    buf: &'a [u8],
-    at: usize,
+    pub(super) buf: &'a [u8],
+    pub(super) at: usize,
     err: Option<Error>,
 }
 
@@ -746,7 +797,7 @@ impl<'a> Reader<'a> {
     /// size of a field the nibble's business alone: a read can only disagree
     /// with [`Reader::skip`] about what the bytes mean, never about where the
     /// next field starts.
-    fn field(&mut self) -> Option<(u8, &'a [u8])> {
+    pub(super) fn field(&mut self) -> Option<(u8, &'a [u8])> {
         let Some(&header) = self.buf.get(self.at) else {
             self.fail(Error::Truncated);
             return None;

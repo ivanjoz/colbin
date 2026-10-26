@@ -481,6 +481,9 @@ pub fn decode_array<T: Signed>(buf: &[u8], n: usize, out: &mut [T]) -> Result<us
     }
     let header = *buf.first().ok_or(Error::Truncated)?;
     let mut position = 1;
+    if header == HEADER_DECIMAL && n > 0 {
+        return decode_decimal(buf, n, out);
+    }
     if !header_written(header, n) {
         return Err(Error::BadColumnHeader);
     }
@@ -697,4 +700,241 @@ mod tests {
             let _ = decode_array(&[byte; 12], 8, &mut out);
         }
     }
+}
+
+// --- decimal columns --------------------------------------------------------
+//
+// A float64 column whose values are decimals, as nearly every double that came
+// out of a CSV, a form or a database is. Mirrors `column/float.go`:
+//
+//     [0x08] [e] [exceptions:u32] [integers] ( [positions] [bits] )
+//
+// `integers` is an ordinary column of n values, each in [−2^51, 2^51), with
+// v = float64(i) / 10^e exactly; `positions` and `bits`, present when there are
+// exceptions, are ordinary columns of the rows that are not, and their bit
+// patterns. An exception's own integer is the one before it.
+
+/// The header byte of a decimal column.
+const HEADER_DECIMAL: u8 = 0x08;
+
+/// The largest exponent a decimal column takes: 10^18 is the largest power of ten
+/// an `i64` holds.
+const MAX_DECIMAL_EXPONENT: usize = 18;
+
+/// The divisors. Every one is exact in an `f64`.
+const POWERS_OF_10: [f64; MAX_DECIMAL_EXPONENT + 1] = [
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+    1e17, 1e18,
+];
+
+/// 2^52 + 2^51. Added to an `f64` with |s| < 2^51 it lands in [2^52, 2^53), where
+/// the step is exactly one, so the sum is `s` rounded to the nearest integer.
+const DECIMAL_MAGIC: f64 = (1_u64 << 52 | 1 << 51) as f64;
+
+/// A decimal column's integers each lie in [−DECIMAL_SPAN, DECIMAL_SPAN).
+const DECIMAL_SPAN: i64 = 1 << 51;
+
+/// How many values the exponent is chosen from.
+const DECIMAL_SAMPLE: usize = 32;
+
+/// The longest column the scalar scoring treats as one short block.
+const SHORT_COLUMN: usize = 32;
+
+/// The integer of the bit pattern `bits` at exponent `e`, and whether it is one:
+/// whether `float64(i) / 10^e` gives back the value bit for bit, which rules out
+/// −0, NaN and the infinities as well as the decimals `e` does not reach.
+#[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+fn decimal_of(bits: i64, e: usize) -> (i64, bool) {
+    let power = POWERS_OF_10[e];
+    let product = f64::from_bits(bits as u64) * power;
+    let sum = product + DECIMAL_MAGIC;
+    let i = (sum.to_bits() as i64).wrapping_sub(DECIMAL_MAGIC.to_bits() as i64);
+    let in_span = (i.wrapping_add(DECIMAL_SPAN) as u64) < 2 * DECIMAL_SPAN as u64;
+    (
+        i,
+        in_span && ((sum - DECIMAL_MAGIC) / power).to_bits() as i64 == bits,
+    )
+}
+
+/// The smallest exponent that reaches as many of a sample of the values as any
+/// does, and how many of the sample that is.
+fn choose_exponent(vals: &[i64]) -> (usize, usize, usize) {
+    let step = (vals.len() / DECIMAL_SAMPLE).max(1);
+    let (mut exponent, mut reached, mut sampled) = (0, 0, 0);
+    for e in 0..=MAX_DECIMAL_EXPONENT {
+        let (mut count, mut seen) = (0, 0);
+        let mut index = 0;
+        while index < vals.len() && seen < DECIMAL_SAMPLE {
+            if decimal_of(vals[index], e).1 {
+                count += 1;
+            }
+            seen += 1;
+            index += step;
+        }
+        sampled = seen;
+        if count > reached {
+            exponent = e;
+            reached = count;
+        }
+        if reached == seen {
+            break;
+        }
+    }
+    (exponent, reached, sampled)
+}
+
+/// Whether the sample says a decimal column could be smaller than the bits.
+#[allow(clippy::cast_sign_loss)]
+fn worth_converting(vals: &[i64], exponent: usize, reached: usize, sampled: usize) -> bool {
+    if reached * 2 < sampled {
+        return false;
+    }
+    let step = (vals.len() / DECIMAL_SAMPLE).max(1);
+    let (mut low_int, mut high_int) = (i64::MAX, i64::MIN);
+    let (mut low_bits, mut high_bits) = (i64::MAX, i64::MIN);
+    let (mut index, mut seen) = (0, 0);
+    while index < vals.len() && seen < DECIMAL_SAMPLE {
+        low_bits = low_bits.min(vals[index]);
+        high_bits = high_bits.max(vals[index]);
+        let (i, ok) = decimal_of(vals[index], exponent);
+        if ok {
+            low_int = low_int.min(i);
+            high_int = high_int.max(i);
+        }
+        index += step;
+        seen += 1;
+    }
+    // In bits per value: a frame of reference over each, and an exception at 64
+    // bits and a position's dozen or so.
+    let int_bits = bit_len(high_int.wrapping_sub(low_int) as u64);
+    let float_bits = bit_len(high_bits.wrapping_sub(low_bits) as u64);
+    let misses = sampled - reached;
+    int_bits * sampled + 76 * misses <= float_bits * sampled
+}
+
+const fn bit_len(value: u64) -> usize {
+    (64 - value.leading_zeros()) as usize
+}
+
+/// `len(append_array(vals))`: what a caller choosing between two encodings of a
+/// column compares.
+fn array_cost(vals: &[i64]) -> usize {
+    let mut scratch = Vec::new();
+    append_array(&mut scratch, vals);
+    scratch.len()
+}
+
+/// [`append_array`] for a column of `f64` bit patterns: a decimal column when
+/// that is smaller, and `append_array`'s own bytes otherwise, so a float column
+/// never costs more than it did before decimal columns.
+#[allow(clippy::cast_possible_truncation)]
+pub fn append_float64(out: &mut Vec<u8>, vals: &[i64]) {
+    if vals.is_empty() {
+        return append_array(out, vals);
+    }
+    let (exponent, reached, sampled) = choose_exponent(vals);
+    if !worth_converting(vals, exponent, reached, sampled) {
+        return append_array(out, vals);
+    }
+    let mut ints = vec![0_i64; vals.len()];
+    let mut positions: Vec<i64> = Vec::new();
+    let mut bits: Vec<i64> = Vec::new();
+    let mut previous = 0_i64;
+    for (index, &value) in vals.iter().enumerate() {
+        let (i, ok) = decimal_of(value, exponent);
+        if ok {
+            ints[index] = i;
+            previous = i;
+        } else {
+            ints[index] = previous;
+            positions.push(index as i64);
+            bits.push(value);
+        }
+    }
+
+    // Written whichever way is smaller, scored as the encoder would write it —
+    // except for a long column with no exceptions, whose integers no transform
+    // can make cost more than its bits unless the bits are a constant.
+    if positions.is_empty() && vals.len() > SHORT_COLUMN {
+        if ints.iter().all(|&value| value == ints[0]) {
+            return append_array(out, vals);
+        }
+    } else {
+        let mut decimal = 6 + array_cost(&ints);
+        if !positions.is_empty() {
+            decimal += array_cost(&positions) + array_cost(&bits);
+        }
+        if decimal >= array_cost(vals) {
+            return append_array(out, vals);
+        }
+    }
+    out.push(HEADER_DECIMAL);
+    out.push(exponent as u8);
+    out.extend_from_slice(&(positions.len() as u32).to_le_bytes());
+    append_array(out, &ints);
+    if !positions.is_empty() {
+        append_array(out, &positions);
+        append_array(out, &bits);
+    }
+}
+
+/// Reads the decimal column of `n` values that `buf` opens with into `out`, as
+/// their bit patterns, and returns the bytes it used.
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
+fn decode_decimal<T: Signed>(buf: &[u8], n: usize, out: &mut [T]) -> Result<usize, Error> {
+    if buf.len() < 6 {
+        return Err(Error::Truncated);
+    }
+    let exponent = usize::from(buf[1]);
+    let exceptions = u32::from_le_bytes([buf[2], buf[3], buf[4], buf[5]]) as usize;
+    if exponent > MAX_DECIMAL_EXPONENT || exceptions > n {
+        return Err(Error::BadColumnHeader);
+    }
+    let mut position = 6;
+    // Decoded as int64, then narrowed when the column is a narrower type, as
+    // every column is.
+    let mut target = vec![0_i64; n];
+    position += decode_inner(&buf[position..], n, &mut target)?;
+
+    let power = POWERS_OF_10[exponent];
+    let mut outside = 0_u64;
+    for value in &mut target {
+        outside |= value.wrapping_add(DECIMAL_SPAN) as u64;
+        *value = ((*value as f64) / power).to_bits() as i64;
+    }
+    if bit_len(outside) > 52 {
+        return Err(Error::ColumnOutOfRange);
+    }
+    if exceptions > 0 {
+        let mut positions = vec![0_i64; exceptions];
+        let mut bits = vec![0_i64; exceptions];
+        position += decode_inner(&buf[position..], exceptions, &mut positions)?;
+        position += decode_inner(&buf[position..], exceptions, &mut bits)?;
+        let mut last = -1_i64;
+        for (index, &at) in positions.iter().enumerate() {
+            // In order, each once, and inside the column.
+            if at <= last || at >= n as i64 {
+                return Err(Error::BadColumnHeader);
+            }
+            target[at as usize] = bits[index];
+            last = at;
+        }
+    }
+    for (slot, &value) in out.iter_mut().zip(&target) {
+        let narrowed = T::from_i64(value);
+        if narrowed.as_i64() != value {
+            return Err(Error::ColumnOutOfRange);
+        }
+        *slot = narrowed;
+    }
+    Ok(position)
+}
+
+/// [`decode_array`] for a column inside a decimal one, which is never decimal
+/// itself: one could nest another as deep as the message is long.
+fn decode_inner(buf: &[u8], n: usize, out: &mut [i64]) -> Result<usize, Error> {
+    if buf.first() == Some(&HEADER_DECIMAL) {
+        return Err(Error::BadColumnHeader);
+    }
+    decode_array(buf, n, out)
 }

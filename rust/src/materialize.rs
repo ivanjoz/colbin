@@ -131,9 +131,37 @@ pub fn to_buffer(schema: &Schema, message: &[u8], wide: bool) -> Result<Option<V
         return Err(Error::TooManyRows);
     }
     let gathered =
-        Gathered::read_table(sub_plan, rows, group_rows, body, wide || sub_plan.is_wide)?;
+        Gathered::read_table(schema, at, rows, group_rows, body, wide || sub_plan.is_wide)?;
+    // A nullable, dictionary, page or list column has no flat form here, and the
+    // caller falls back to the JSON decode for it.
+    if !gathered.is_plain() {
+        return Ok(None);
+    }
     let columns = build_columns(sub_plan, &gathered, rows)?;
     Ok(Some(write_buffer(sub_plan, rows, &columns)))
+}
+
+/// [`to_buffer`] for a whole message, root byte and section included: the
+/// message's own section takes precedence over `held`.
+///
+/// # Errors
+///
+/// Any malformed message, a root this version does not read, and
+/// [`Error::NoSchema`] for a typed message with no section anywhere.
+pub fn message_to_buffer(held: Option<&Schema>, message: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+    let split = crate::walk::split_root(message)?;
+    let schema = split.schema.as_ref().or(held);
+    match split.root {
+        0xD0 | 0xD8 => to_buffer(
+            schema.ok_or(Error::NoSchema)?,
+            split.body,
+            split.root == 0xD8,
+        ),
+        // A dynamic document is not a table, and a message with dictionaries has
+        // columns of ids this flat form does not resolve.
+        0xD1 | 0xD3 | 0xD2 | 0xDA => Ok(None),
+        root => Err(Error::BadRoot(root)),
+    }
 }
 
 /// One gathered column, transformed to the value it means — the same

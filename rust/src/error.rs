@@ -31,6 +31,15 @@ pub enum Error {
     /// A column header with a reserved bit set, or one the encoder never writes
     /// for its transform: refused rather than read some plausible way.
     BadColumnHeader,
+    /// A decimal column whose integers fall outside the span they are drawn
+    /// from, or a value past the type it is read into.
+    ColumnOutOfRange,
+    /// A nullable column whose presence and values disagree.
+    BadPresence,
+    /// A list column whose lengths do not add up to its elements.
+    BadLengths,
+    /// A dictionary column naming a dictionary or an id the message lacks.
+    BadDictionary,
     /// A column decode was handed an output slice shorter than the row count.
     ShortBuffer,
     /// Byte 0 is not a root descriptor this version writes.
@@ -103,6 +112,18 @@ impl fmt::Display for Error {
             Self::BadColumnHeader => {
                 out.write_str("colbin: reserved or non-canonical column header")
             }
+            Self::ColumnOutOfRange => {
+                out.write_str("colbin: a decimal column's value is out of range")
+            }
+            Self::BadPresence => {
+                out.write_str("colbin: a nullable column's presence does not match its values")
+            }
+            Self::BadLengths => {
+                out.write_str("colbin: a list column's lengths do not add up to its elements")
+            }
+            Self::BadDictionary => out.write_str(
+                "colbin: a dictionary column names a dictionary or id that is not there",
+            ),
             Self::ShortBuffer => out.write_str("colbin: column output slice too short"),
             Self::BadRoot(byte) => write!(
                 out,

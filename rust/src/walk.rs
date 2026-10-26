@@ -74,43 +74,119 @@ pub fn to_json(schema: &Schema, message: &[u8], wide: bool) -> Result<Vec<u8>, E
 /// section among them), and [`Error::NoSchema`] for a typed message with no
 /// section anywhere.
 pub fn message_to_json(held: Option<&Schema>, message: &[u8]) -> Result<Vec<u8>, Error> {
-    let first = message
-        .first()
-        .copied()
-        .filter(|&byte| wire::root::is_root(byte));
-    let Some(root) = first else {
-        // A typed narrow message, which has no root byte.
-        let schema = held.ok_or(Error::NoSchema)?;
-        return to_json(schema, message, false);
-    };
-    let (root_bits, has_section) = (root & !ROOT_SCHEMA, root & ROOT_SCHEMA != 0);
-    let (parsed, body) = if has_section {
-        let parsed = section::parse(&message[1..])?;
-        let body = message[1..].get(parsed.size..).ok_or(Error::Truncated)?;
-        (Some(parsed), body)
-    } else {
-        (None, &message[1..])
-    };
-    let schema = parsed.as_ref().or(held);
-    match root_bits {
+    let split = split_root(message)?;
+    let schema = split.schema.as_ref().or(held);
+    match split.root {
         ROOT_NARROW | ROOT_WIDE => {
             let schema = schema.ok_or(Error::NoSchema)?;
-            to_json(schema, body, root_bits == ROOT_WIDE)
+            to_json(schema, split.body, split.root == ROOT_WIDE)
+        }
+        ROOT_DICT_NARROW | ROOT_DICT_WIDE => {
+            // A message with dictionaries carries no schema section, and its
+            // dictionaries come ahead of the body for the walk to resolve its id
+            // columns against.
+            let schema = schema.ok_or(Error::NoSchema)?;
+            let (dicts, body) = parse_dictionaries(split.body)?;
+            let mut walker = Walker::new(schema, message.len()).with_dictionaries(dicts);
+            walker.root(0, body, split.root == ROOT_DICT_WIDE)?;
+            Ok(walker.to.finish())
         }
         ROOT_DYNAMIC_MAP | ROOT_DYNAMIC_LIST => {
             let none = Schema::default();
             let mut walker = Walker::new(schema.unwrap_or(&none), message.len());
-            walker.dynamic_root(body, root_bits == ROOT_DYNAMIC_LIST)?;
+            walker.dynamic_root(split.body, split.root == ROOT_DYNAMIC_LIST)?;
             Ok(walker.to.finish())
         }
-        _ => Err(Error::BadRoot(root)),
+        _ => Err(Error::BadRoot(split.root)),
     }
+}
+
+/// Reads the dictionary section at the front of `data` and returns its
+/// dictionaries and the body after it:
+///
+/// ```text
+/// section := [byteLength] [dictCount] ( [entryCount] ( [size] [bytes] )* )*
+/// ```
+fn parse_dictionaries(data: &[u8]) -> Result<(Vec<Vec<Vec<u8>>>, &[u8]), Error> {
+    let section_error = Error::BadDictionary;
+    let (size, width) = wire::read_count(data).ok_or(Error::BadDictionary)?;
+    if size > data.len() - width {
+        return Err(section_error);
+    }
+    let (section, body) = (&data[width..width + size], &data[width + size..]);
+    let (count, mut at) = wire::read_count(section).ok_or(Error::BadDictionary)?;
+    // Every dictionary is at least its count byte.
+    if count > section.len() - at {
+        return Err(Error::BadDictionary);
+    }
+    let mut dicts = Vec::with_capacity(count);
+    for _ in 0..count {
+        let (entries, used) = wire::read_count(&section[at..]).ok_or(Error::BadDictionary)?;
+        at += used;
+        // And every entry at least its size byte.
+        if entries > section.len() - at {
+            return Err(Error::BadDictionary);
+        }
+        let mut values = Vec::with_capacity(entries);
+        for _ in 0..entries {
+            let (length, used) = wire::read_count(&section[at..]).ok_or(Error::BadDictionary)?;
+            at += used;
+            if length > section.len() - at {
+                return Err(Error::BadDictionary);
+            }
+            values.push(section[at..at + length].to_vec());
+            at += length;
+        }
+        dicts.push(values);
+    }
+    if at != section.len() {
+        return Err(Error::BadDictionary);
+    }
+    Ok((dicts, body))
+}
+
+/// A message cut at its root: the root byte without the schema bit (`ROOT_NARROW`
+/// for a message that has none), the section it carries, and the body behind
+/// both.
+pub(crate) struct Split<'m> {
+    pub(crate) root: u8,
+    pub(crate) schema: Option<Schema>,
+    pub(crate) body: &'m [u8],
+}
+
+/// Reads a message's root byte and steps over its section, as Go's `rootParts`
+/// does. A first byte outside `0xD0..=0xDF`, or an empty message, is a typed
+/// narrow message's key run.
+pub(crate) fn split_root(message: &[u8]) -> Result<Split<'_>, Error> {
+    let Some(&root) = message.first().filter(|&&byte| wire::root::is_root(byte)) else {
+        return Ok(Split {
+            root: ROOT_NARROW,
+            schema: None,
+            body: message,
+        });
+    };
+    if root & ROOT_SCHEMA == 0 {
+        return Ok(Split {
+            root,
+            schema: None,
+            body: &message[1..],
+        });
+    }
+    let parsed = section::parse(&message[1..])?;
+    let body = message[1..].get(parsed.size..).ok_or(Error::Truncated)?;
+    Ok(Split {
+        root: root & !ROOT_SCHEMA,
+        schema: Some(parsed),
+        body,
+    })
 }
 
 /// The root bytes this module dispatches on, without the schema bit.
 const ROOT_NARROW: u8 = 0xD0;
 const ROOT_WIDE: u8 = 0xD8;
 const ROOT_SCHEMA: u8 = 0x04;
+const ROOT_DICT_NARROW: u8 = 0xD2;
+const ROOT_DICT_WIDE: u8 = 0xDA;
 const ROOT_DYNAMIC_MAP: u8 = 0xD1;
 const ROOT_DYNAMIC_LIST: u8 = 0xD3;
 
@@ -123,6 +199,9 @@ pub struct Walker<'s> {
     key_runs: Vec<Vec<Vec<u8>>>,
     to: JsonSink,
     depth: u32,
+    /// The message's dictionaries, for a root that declared them: the strings
+    /// an id column's ids index. Empty for every other message.
+    dicts: Vec<Vec<Vec<u8>>>,
 }
 
 impl<'s> Walker<'s> {
@@ -143,7 +222,14 @@ impl<'s> Walker<'s> {
             key_runs,
             to: JsonSink::with_message_len(message_len),
             depth: 0,
+            dicts: Vec::new(),
         }
+    }
+
+    /// Hands the walk the dictionaries of a message that has them.
+    pub fn with_dictionaries(mut self, dicts: Vec<Vec<Vec<u8>>>) -> Self {
+        self.dicts = dicts;
+        self
     }
 
     /// The rendered bytes, once a walk has finished.
@@ -1017,8 +1103,9 @@ impl<'s> Walker<'s> {
         self.to.begin_array();
         for run in Runs::new(rows, group_rows, body) {
             let (rows, columns) = run?;
-            let gathered = Gathered::read(self.plan_at(at)?, columns, rows, wide)?;
-            self.table_rows(at, &gathered, rows)?;
+            let mut gathered = Gathered::new(self.plan_at(at)?.fields.len());
+            gathered.read(self.schema, at, columns, rows, wide, self.dicts_on(), 0)?;
+            self.table_rows(at, &mut gathered, rows)?;
         }
         self.to.end_array();
         self.leave();
@@ -1036,54 +1123,132 @@ impl<'s> Walker<'s> {
         if rows > MAX_ROWS {
             return Err(Error::TooManyRows);
         }
-        let plan = self.plan_at(at)?;
-        let mut gathered = Gathered::new(plan.fields.len());
-        while columns.more() {
-            let Some(index) = plan.field_of(columns.key()) else {
-                columns.skip();
-                columns.err()?;
-                continue;
-            };
-            let op = plan.fields[index].op;
-            gathered.take8(columns, index, op, rows);
-            columns.err()?;
-        }
-        columns.err()?;
+        let mut gathered = Gathered::new(self.plan_at(at)?.fields.len());
+        gathered.read_run8(self.schema, at, columns, rows, self.dicts_on(), 0)?;
         self.enter()?;
         self.to.begin_array();
-        self.table_rows(at, &gathered, rows)?;
+        self.table_rows(at, &mut gathered, rows)?;
         self.to.end_array();
         self.leave();
         Ok(())
     }
 
+    /// Whether this message declared dictionaries, which is what makes a string
+    /// column worth asking whether it holds ids.
+    fn dicts_on(&self) -> bool {
+        !self.dicts.is_empty()
+    }
+
     /// The transpose itself: `rows` objects, without the array around them,
     /// which a grouped table writes once for all its groups.
-    fn table_rows(&mut self, plan_at: u32, gathered: &Gathered, rows: usize) -> Result<(), Error> {
-        let plan = self.plan_at(plan_at)?;
+    fn table_rows(
+        &mut self,
+        plan_at: u32,
+        gathered: &mut Gathered<'_>,
+        rows: usize,
+    ) -> Result<(), Error> {
+        gathered.restart();
         for row in 0..rows {
             self.to.begin_object();
-            for (index, field) in plan.fields.iter().enumerate() {
-                self.write_key(plan_at, index);
-                if !gathered.present[index] {
-                    // A column whose every value was zero is not written at all,
-                    // and its absence is the whole of what says so.
-                    let field = field.clone();
-                    self.zero(&field)?;
-                } else if field.op == OP_STRING {
-                    let value = gathered.strings[index].get(row).copied().unwrap_or(&[]);
-                    self.to.text_bytes(value);
-                } else {
-                    // A column shorter than the table's row count is a message
-                    // that disagrees with itself; the row still has to be
-                    // written, and a zero is what an absent column means
-                    // everywhere else here.
-                    let raw = gathered.ints[index].get(row).copied().unwrap_or(0);
-                    self.column_value(field.op, raw)?;
-                }
-            }
+            self.row_fields(plan_at, gathered, row)?;
             self.to.end_object();
         }
+        Ok(())
+    }
+
+    /// One row's fields into the object open for it, a paged row type's next
+    /// pages merged in as a record's are ([`Walker::page`]).
+    fn row_fields(
+        &mut self,
+        plan_at: u32,
+        gathered: &mut Gathered<'_>,
+        row: usize,
+    ) -> Result<(), Error> {
+        let plan = self.plan_at(plan_at)?;
+        for (index, field) in plan.fields.iter().enumerate() {
+            if self.links_page(field) {
+                let at = field.sub.ok_or(Error::BadSection)?;
+                match gathered.pages[index].as_deref_mut() {
+                    Some(page) if gathered.present[index] => self.row_fields(at, page, row)?,
+                    _ => self.absent_page(field.sub)?,
+                }
+                continue;
+            }
+            self.write_key(plan_at, index);
+            if field.op == OP_STRUCTS && gathered.present[index] {
+                self.list_rows(field, gathered, index, row)?;
+                continue;
+            }
+            let (mut op, mut at) = (field.op, row);
+            if op == OP_POINTER && gathered.present[index] {
+                op = field.elem_op;
+                if let Some(presence) = gathered.presence[index] {
+                    if !wire::present(presence, row) {
+                        self.to.null();
+                        continue;
+                    }
+                    at = gathered.next[index];
+                    gathered.next[index] += 1;
+                }
+            }
+            if !gathered.present[index] {
+                // A column whose every value was zero is not written at all, and
+                // its absence is the whole of what says so — or, for a pointer
+                // column, that every row was nil.
+                self.zero(field)?;
+            } else if op == OP_STRING {
+                if let Some(number) = gathered.dict[index] {
+                    let id = gathered.ints[index].get(at).copied().unwrap_or(0);
+                    let value = usize::try_from(id)
+                        .ok()
+                        .and_then(|id| self.dicts.get(number)?.get(id))
+                        .ok_or(Error::BadDictionary)?;
+                    self.to.text_bytes(value);
+                } else {
+                    let value = gathered.strings[index].get(at).copied().unwrap_or(&[]);
+                    self.to.text_bytes(value);
+                }
+            } else {
+                // A column shorter than the table's row count is a message that
+                // disagrees with itself; the row still has to be written, and a
+                // zero is what an absent column means everywhere else here.
+                let raw = gathered.ints[index].get(at).copied().unwrap_or(0);
+                self.column_value(op, raw)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// One row's elements of a list column: the next of them in its element
+    /// table, as many as the row's length says. A row with none is what an empty
+    /// slice is in a record, which leaves it out.
+    fn list_rows(
+        &mut self,
+        field: &PlanField,
+        gathered: &mut Gathered<'_>,
+        index: usize,
+        row: usize,
+    ) -> Result<(), Error> {
+        let n = gathered.lengths[index].get(row).copied().unwrap_or(0);
+        if n == 0 {
+            return self.zero(field);
+        }
+        let at = field.sub.ok_or(Error::BadSection)?;
+        let n = usize::try_from(n).map_err(|_| Error::BadLengths)?;
+        self.enter()?;
+        let start = gathered.cursor[index];
+        gathered.cursor[index] += n;
+        let elements = gathered.lists[index]
+            .as_deref_mut()
+            .ok_or(Error::BadLengths)?;
+        self.to.begin_array();
+        for element in start..start + n {
+            self.to.begin_object();
+            self.row_fields(at, elements, element)?;
+            self.to.end_object();
+        }
+        self.to.end_array();
+        self.leave();
         Ok(())
     }
 
@@ -1133,13 +1298,80 @@ impl<'s> Walker<'s> {
 /// The columns of one table, gathered before the transpose.
 ///
 /// `pub(crate)` rather than private: [`crate::materialize`] reuses this
-/// gather step verbatim — a table row is only ever a columnable op (see
-/// [`plan::columnable_op`]), so the same per-column read serves both sinks.
+/// gather step verbatim for the plain columns of a table.
 pub(crate) struct Gathered<'a> {
     pub(crate) present: Vec<bool>,
     pub(crate) ints: Vec<Vec<i64>>,
     pub(crate) strings: Vec<Vec<&'a [u8]>>,
+    /// A nullable column's presence, `None` for a column every row holds a
+    /// value of; `next` is where the row being written reads its value from.
+    presence: Vec<Option<&'a [u8]>>,
+    next: Vec<usize>,
+    /// Which of the message's dictionaries a string column's ids index. The ids
+    /// are in `ints`, and resolved as the rows are written.
+    dict: Vec<Option<usize>>,
+    /// A paged row type's next pages, by the index of their link: each a table
+    /// of the same rows.
+    pages: Vec<Option<Box<Gathered<'a>>>>,
+    /// The element tables of list columns by field index, `lengths` each row's
+    /// count of elements and `cursor` the element the row being written starts at.
+    lists: Vec<Option<Box<Gathered<'a>>>>,
+    lengths: Vec<Vec<i64>>,
+    cursor: Vec<usize>,
 }
+
+/// How many list columns deep a table may go, which no writer takes past.
+const MAX_LIST_DEPTH: u32 = 4;
+
+/// A column run's reader at either key width.
+trait ColumnReader<'a> {
+    fn is_nullable(&self) -> bool;
+    fn is_dict_column(&self) -> bool;
+    fn is_nullable_dict_column(&self) -> bool;
+    fn int_column(&mut self, op: u8, rows: usize) -> Vec<i64>;
+    fn string_column(&mut self) -> Vec<&'a [u8]>;
+    fn nullable_ints(&mut self, rows: usize) -> (&'a [u8], Vec<i64>);
+    fn nullable_strings(&mut self, rows: usize) -> (&'a [u8], Vec<&'a [u8]>);
+    fn dict_ids(&mut self, rows: usize) -> Option<(usize, Vec<i64>)>;
+    fn nullable_dict_ids(&mut self, rows: usize) -> Option<(usize, &'a [u8], Vec<i64>)>;
+}
+
+macro_rules! column_reader {
+    ($reader:ident, $int_column:ident, $strings:ident) => {
+        impl<'a> ColumnReader<'a> for $reader<'a> {
+            fn is_nullable(&self) -> bool {
+                $reader::is_nullable(self)
+            }
+            fn is_dict_column(&self) -> bool {
+                $reader::is_dict_column(self)
+            }
+            fn is_nullable_dict_column(&self) -> bool {
+                $reader::is_nullable_dict_column(self)
+            }
+            fn int_column(&mut self, op: u8, rows: usize) -> Vec<i64> {
+                $int_column(self, op, rows)
+            }
+            fn string_column(&mut self) -> Vec<&'a [u8]> {
+                $reader::$strings(self)
+            }
+            fn nullable_ints(&mut self, rows: usize) -> (&'a [u8], Vec<i64>) {
+                $reader::nullable_column(self, rows)
+            }
+            fn nullable_strings(&mut self, rows: usize) -> (&'a [u8], Vec<&'a [u8]>) {
+                $reader::nullable_strings_bytes(self, rows)
+            }
+            fn dict_ids(&mut self, rows: usize) -> Option<(usize, Vec<i64>)> {
+                $reader::dict_column(self, rows)
+            }
+            fn nullable_dict_ids(&mut self, rows: usize) -> Option<(usize, &'a [u8], Vec<i64>)> {
+                $reader::nullable_dict_column(self, rows)
+            }
+        }
+    };
+}
+
+column_reader!(Reader, read_column, column_strings_bytes);
+column_reader!(Reader8, read_column8, strings_bytes);
 
 impl<'a> Gathered<'a> {
     pub(crate) fn new(fields: usize) -> Self {
@@ -1147,58 +1379,254 @@ impl<'a> Gathered<'a> {
             present: alloc::vec![false; fields],
             ints: (0..fields).map(|_| Vec::new()).collect(),
             strings: (0..fields).map(|_| Vec::new()).collect(),
+            presence: alloc::vec![None; fields],
+            next: alloc::vec![0; fields],
+            dict: alloc::vec![None; fields],
+            pages: (0..fields).map(|_| None).collect(),
+            lists: (0..fields).map(|_| None).collect(),
+            lengths: (0..fields).map(|_| Vec::new()).collect(),
+            cursor: alloc::vec![0; fields],
         }
     }
 
-    pub(crate) fn take(&mut self, columns: &mut Reader<'a>, index: usize, op: u8, rows: usize) {
+    /// Whether any column is something the plain gather does not hold: a
+    /// nullable, dictionary, page or list column.
+    #[cfg(feature = "materialize")]
+    pub(crate) fn is_plain(&self) -> bool {
+        self.presence.iter().all(Option::is_none)
+            && self.dict.iter().all(Option::is_none)
+            && self.pages.iter().all(Option::is_none)
+            && self.lists.iter().all(Option::is_none)
+    }
+
+    /// Rewinds where each nullable column's next value is read from, and each
+    /// list column's next element, its pages' and element tables' included.
+    fn restart(&mut self) {
+        self.next.fill(0);
+        self.cursor.fill(0);
+        for index in 0..self.present.len() {
+            if !self.present[index] {
+                continue;
+            }
+            if let Some(page) = self.pages[index].as_deref_mut() {
+                page.restart();
+            }
+            if let Some(elements) = self.lists[index].as_deref_mut() {
+                elements.restart();
+            }
+        }
+    }
+
+    /// Reads the column at the cursor into field `index`.
+    fn take_column<R: ColumnReader<'a>>(
+        &mut self,
+        columns: &mut R,
+        field: &PlanField,
+        index: usize,
+        rows: usize,
+        dicts_on: bool,
+    ) {
+        let mut op = field.op;
+        if op == OP_POINTER {
+            op = field.elem_op;
+        }
+        self.presence[index] = None;
+        self.dict[index] = None;
+        if op == OP_STRING && dicts_on && self.take_dict_column(columns, index, rows) {
+            return;
+        }
+        let nullable = field.op == OP_POINTER && columns.is_nullable();
         if op == OP_STRING {
-            self.strings[index] = columns.column_strings_bytes();
+            if nullable {
+                let (presence, strings) = columns.nullable_strings(rows);
+                self.presence[index] = Some(presence);
+                self.strings[index] = strings;
+            } else {
+                self.strings[index] = columns.string_column();
+            }
+        } else if nullable {
+            let (presence, ints) = columns.nullable_ints(rows);
+            self.presence[index] = Some(presence);
+            self.ints[index] = ints;
         } else {
-            self.ints[index] = read_column(columns, op, rows);
+            self.ints[index] = columns.int_column(op, rows);
         }
         self.present[index] = true;
     }
 
-    pub(crate) fn take8(&mut self, columns: &mut Reader8<'a>, index: usize, op: u8, rows: usize) {
-        if op == OP_STRING {
-            self.strings[index] = columns.strings_bytes();
-        } else {
-            self.ints[index] = read_column8(columns, op, rows);
+    /// Reads a string column written as ids, in either form. It reads nothing and
+    /// reports `false` when the column at the cursor is not one.
+    fn take_dict_column<R: ColumnReader<'a>>(
+        &mut self,
+        columns: &mut R,
+        index: usize,
+        rows: usize,
+    ) -> bool {
+        if columns.is_dict_column() {
+            if let Some((number, ids)) = columns.dict_ids(rows) {
+                self.dict[index] = Some(number);
+                self.ints[index] = ids;
+                self.present[index] = true;
+            }
+            return true;
         }
-        self.present[index] = true;
+        if columns.is_nullable_dict_column() {
+            if let Some((number, presence, ids)) = columns.nullable_dict_ids(rows) {
+                self.dict[index] = Some(number);
+                self.presence[index] = Some(presence);
+                self.ints[index] = ids;
+                self.present[index] = true;
+            }
+            return true;
+        }
+        false
     }
 
-    /// Gathers one column run of `rows` rows, keyed at eight bits if `wide`,
-    /// stepping over a column the plan does not declare.
+    /// Reads the list column at the cursor into field `index`: its lengths, and
+    /// its element table, keyed at eight bits if `wide`.
+    #[allow(clippy::too_many_arguments)]
+    fn take_list<R: ListColumns<'a>>(
+        &mut self,
+        schema: &Schema,
+        columns: &mut R,
+        field: &PlanField,
+        index: usize,
+        rows: usize,
+        wide: bool,
+        dicts_on: bool,
+        depth: u32,
+    ) -> Result<(), Error> {
+        let at = field.sub.ok_or(Error::BadSection)?;
+        let sub = schema.plan(at).ok_or(Error::BadSection)?;
+        let Some(list) = columns.list_column(rows) else {
+            return Ok(());
+        };
+        if list.children > MAX_ROWS {
+            return Err(Error::TooManyRows);
+        }
+        if depth >= MAX_LIST_DEPTH {
+            return Err(Error::TooDeep);
+        }
+        self.lengths[index] = list.lengths;
+        let elements =
+            self.lists[index].get_or_insert_with(|| Box::new(Gathered::new(sub.fields.len())));
+        elements.read(
+            schema,
+            at,
+            list.run,
+            list.children,
+            wide || sub.is_wide,
+            dicts_on,
+            depth + 1,
+        )?;
+        self.present[index] = true;
+        Ok(())
+    }
+
+    /// Reads the table at the cursor as field `index`'s page, a table of the same
+    /// rows.
+    fn take_page(
+        &mut self,
+        schema: &Schema,
+        columns: &mut Reader8<'a>,
+        field: &PlanField,
+        index: usize,
+        rows: usize,
+        dicts_on: bool,
+        depth: u32,
+    ) -> Result<(), Error> {
+        let at = field.sub.ok_or(Error::BadSection)?;
+        let sub = schema.plan(at).ok_or(Error::BadSection)?;
+        let (page_rows, group_rows, body) = columns.table().ok_or(Error::Truncated)?;
+        if page_rows != rows || group_rows != 0 {
+            return Err(Error::BadGroup);
+        }
+        let page =
+            self.pages[index].get_or_insert_with(|| Box::new(Gathered::new(sub.fields.len())));
+        page.read(schema, at, body, rows, true, dicts_on, depth)?;
+        self.present[index] = true;
+        Ok(())
+    }
+
+    /// Gathers one column run of `rows` rows of plan `at`, keyed at eight bits if
+    /// `wide`, stepping over a column the plan does not declare.
     pub(crate) fn read(
-        plan: &Plan,
+        &mut self,
+        schema: &Schema,
+        at: u32,
         body: &'a [u8],
         rows: usize,
         wide: bool,
-    ) -> Result<Self, Error> {
-        let mut gathered = Self::new(plan.fields.len());
+        dicts_on: bool,
+        depth: u32,
+    ) -> Result<(), Error> {
         if wide {
             let mut columns = Reader8::new(body);
-            while columns.more() {
-                if let Some(index) = plan.field_of(columns.key()) {
-                    gathered.take8(&mut columns, index, plan.fields[index].op, rows);
-                } else {
-                    columns.skip();
-                }
-                columns.err()?;
-            }
-            return Ok(gathered);
+            return self.read_run8(schema, at, &mut columns, rows, dicts_on, depth);
         }
+        let plan = schema.plan(at).ok_or(Error::BadSection)?;
+        self.present.fill(false);
         let mut columns = Reader::new(body);
         while columns.more() {
-            if let Some(index) = plan.field_of(columns.key()) {
-                gathered.take(&mut columns, index, plan.fields[index].op, rows);
-            } else {
+            let Some(index) = plan.field_of(columns.key()) else {
                 columns.skip();
+                columns.err()?;
+                continue;
+            };
+            let field = &plan.fields[index];
+            if field.op == OP_STRUCTS {
+                self.take_list(
+                    schema,
+                    &mut columns,
+                    field,
+                    index,
+                    rows,
+                    false,
+                    dicts_on,
+                    depth,
+                )?;
+            } else {
+                self.take_column(&mut columns, field, index, rows, dicts_on);
             }
             columns.err()?;
         }
-        Ok(gathered)
+        columns.err()
+    }
+
+    /// [`Gathered::read`] for a column run keyed at eight bits, already opened.
+    pub(crate) fn read_run8(
+        &mut self,
+        schema: &Schema,
+        at: u32,
+        columns: &mut Reader8<'a>,
+        rows: usize,
+        dicts_on: bool,
+        depth: u32,
+    ) -> Result<(), Error> {
+        let plan = schema.plan(at).ok_or(Error::BadSection)?;
+        self.present.fill(false);
+        while columns.more() {
+            let Some(index) = plan.field_of(columns.key()) else {
+                columns.skip();
+                columns.err()?;
+                continue;
+            };
+            let field = &plan.fields[index];
+            let links_page = field.op == OP_STRUCT
+                && field
+                    .sub
+                    .and_then(|sub| schema.plan(sub))
+                    .is_some_and(|sub| sub.is_page);
+            if links_page {
+                self.take_page(schema, columns, field, index, rows, dicts_on, depth)?;
+            } else if field.op == OP_STRUCTS {
+                self.take_list(schema, columns, field, index, rows, true, dicts_on, depth)?;
+            } else {
+                self.take_column(columns, field, index, rows, dicts_on);
+            }
+            columns.err()?;
+        }
+        columns.err()
     }
 
     /// Gathers a whole table body, each group's rows after the one before's, so
@@ -1206,20 +1634,25 @@ impl<'a> Gathered<'a> {
     /// group leaves out is zeros, or empty strings, for that group's rows.
     #[cfg(feature = "materialize")]
     pub(crate) fn read_table(
-        plan: &Plan,
+        schema: &Schema,
+        at: u32,
         rows: usize,
         group_rows: usize,
         body: &'a [u8],
         wide: bool,
     ) -> Result<Self, Error> {
+        let plan = schema.plan(at).ok_or(Error::BadSection)?;
         if group_rows == 0 {
-            return Self::read(plan, body, rows, wide);
+            let mut whole = Self::new(plan.fields.len());
+            whole.read(schema, at, body, rows, wide, false, 0)?;
+            return Ok(whole);
         }
         let mut whole = Self::new(plan.fields.len());
         let mut start = 0;
         for run in Runs::new(rows, group_rows, body) {
             let (size, columns) = run?;
-            let group = Self::read(plan, columns, size, wide)?;
+            let mut group = Self::new(plan.fields.len());
+            group.read(schema, at, columns, size, wide, false, 0)?;
             for (index, field) in plan.fields.iter().enumerate() {
                 if !group.present[index] && !whole.present[index] {
                     continue;
@@ -1238,6 +1671,23 @@ impl<'a> Gathered<'a> {
             start += size;
         }
         Ok(whole)
+    }
+}
+
+/// A column run's reader, for the list column.
+trait ListColumns<'a> {
+    fn list_column(&mut self, rows: usize) -> Option<wire::ListColumn<'a>>;
+}
+
+impl<'a> ListColumns<'a> for Reader<'a> {
+    fn list_column(&mut self, rows: usize) -> Option<wire::ListColumn<'a>> {
+        Reader::list_column(self, rows)
+    }
+}
+
+impl<'a> ListColumns<'a> for Reader8<'a> {
+    fn list_column(&mut self, rows: usize) -> Option<wire::ListColumn<'a>> {
+        Reader8::list_column(self, rows)
     }
 }
 

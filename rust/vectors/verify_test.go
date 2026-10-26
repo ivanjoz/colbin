@@ -64,6 +64,7 @@ func TestEveryCaseRoundTrips(t *testing.T) {
 		"main.Hashed":      func() any { return &Hashed{} },
 		"main.PackedText":  func() any { return &PackedText{} },
 		"main.Ledger":      func() any { return &Ledger{} },
+		"*main.MaybeRows":  func() any { return &MaybeRows{} },
 	}
 
 	for _, one := range held.Cases {

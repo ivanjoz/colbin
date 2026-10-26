@@ -659,3 +659,54 @@ fn derived_field_ids_match_go() {
     }
     assert_eq!(colbin::fnv8("CompanyID"), 202);
 }
+
+#[derive(Colbin, Debug, PartialEq, Clone)]
+struct MaybeRow {
+    #[cb(1)]
+    id: i32,
+    #[cb(2)]
+    count: Option<i32>,
+    #[cb(3)]
+    name: Option<String>,
+    #[cb(4)]
+    price: Option<f64>,
+    #[cb(5)]
+    flag: Option<bool>,
+    #[cb(6)]
+    never: Option<String>,
+}
+
+#[derive(Colbin, Debug, PartialEq)]
+struct MaybeRows {
+    #[cb(1)]
+    rows: Vec<MaybeRow>,
+}
+
+/// `maybeRows` in `rust/vectors/main.go`.
+fn maybe_rows(rows: usize) -> MaybeRows {
+    MaybeRows {
+        rows: (0..rows)
+            .map(|index| MaybeRow {
+                id: index as i32,
+                flag: Some(index % 3 == 0),
+                count: (index % 2 == 0).then(|| (index * 7 % 5) as i32),
+                name: (index % 3 != 1).then(|| format!("name-{index}")),
+                price: (index % 4 != 3).then(|| index as f64 * 1.25),
+                never: None,
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn nullable_column_cases() {
+    check("maybe.table", &maybe_rows(20));
+    let mut all = maybe_rows(12);
+    for (index, row) in all.rows.iter_mut().enumerate() {
+        row.count = Some(index as i32);
+        row.name = Some(index.to_string());
+        row.price = Some(index as f64);
+        row.never = Some(String::new());
+    }
+    check("maybe.table all present", &all);
+}

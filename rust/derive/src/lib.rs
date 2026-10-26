@@ -187,6 +187,10 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let column_str = columns.get_str();
     let set_column_i64 = columns.set_i64();
     let set_column_str = columns.set_str();
+    let column_opt_i64 = columns.get_opt_i64();
+    let column_opt_str = columns.get_opt_str();
+    let set_column_opt_i64 = columns.set_opt_i64();
+    let set_column_opt_str = columns.set_opt_str();
 
     let writer = if wide {
         quote!(::colbin::wire::Writer8)
@@ -258,6 +262,10 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             #column_str
             #set_column_i64
             #set_column_str
+            #column_opt_i64
+            #column_opt_str
+            #set_column_opt_i64
+            #set_column_opt_str
         }
     })
 }
@@ -414,10 +422,15 @@ impl<'a> Columns<'a> {
         }
         let entries = self.fields.iter().map(|(index, field)| {
             let key = &self.keys[*index];
-            let kind = if matches!(field.shape, Shape::Str) {
-                quote!(::colbin::ColumnKind::Str)
-            } else {
-                quote!(::colbin::ColumnKind::Int)
+            let kind = match &field.shape {
+                Shape::Str => quote!(::colbin::ColumnKind::Str),
+                Shape::Float(64) => quote!(::colbin::ColumnKind::Float64),
+                Shape::Optional(inner) => match **inner {
+                    Shape::Str => quote!(::colbin::ColumnKind::OptStr),
+                    Shape::Float(64) => quote!(::colbin::ColumnKind::OptFloat64),
+                    _ => quote!(::colbin::ColumnKind::OptInt),
+                },
+                _ => quote!(::colbin::ColumnKind::Int),
             };
             quote!(::colbin::ColumnSpec { key: #key, kind: #kind })
         });
@@ -496,6 +509,108 @@ impl<'a> Columns<'a> {
         });
         quote! {
             fn colbin_set_column_str(&mut self, column: usize, value: ::std::string::String) {
+                match column {
+                    #(#arms)*
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+impl Columns<'_> {
+    fn get_opt_i64(&self) -> proc_macro2::TokenStream {
+        if !self.transposable {
+            return quote!();
+        }
+        let arms = self.fields.iter().filter_map(|(index, field)| {
+            let Shape::Optional(inner) = &field.shape else {
+                return None;
+            };
+            let ident = &field.ident;
+            let value = inner.column_value(quote!((*value)))?;
+            Some(quote!(#index => self.#ident.as_ref().map(|value| #value),))
+        });
+        quote! {
+            fn colbin_column_opt_i64(&self, column: usize) -> ::core::option::Option<i64> {
+                match column {
+                    #(#arms)*
+                    _ => ::core::option::Option::None,
+                }
+            }
+        }
+    }
+
+    fn get_opt_str(&self) -> proc_macro2::TokenStream {
+        if !self.transposable {
+            return quote!();
+        }
+        let arms = self.fields.iter().filter_map(|(index, field)| {
+            let Shape::Optional(inner) = &field.shape else {
+                return None;
+            };
+            if !matches!(**inner, Shape::Str) {
+                return None;
+            }
+            let ident = &field.ident;
+            Some(quote!(#index => self.#ident.as_deref(),))
+        });
+        quote! {
+            fn colbin_column_opt_str(&self, column: usize) -> ::core::option::Option<&str> {
+                match column {
+                    #(#arms)*
+                    _ => ::core::option::Option::None,
+                }
+            }
+        }
+    }
+
+    fn set_opt_i64(&self) -> proc_macro2::TokenStream {
+        if !self.transposable {
+            return quote!();
+        }
+        let arms = self.fields.iter().filter_map(|(index, field)| {
+            let Shape::Optional(inner) = &field.shape else {
+                return None;
+            };
+            let ident = &field.ident;
+            let converted = inner.column_from(quote!(value))?;
+            Some(quote!(#index => self.#ident = value.map(|value| #converted),))
+        });
+        quote! {
+            fn colbin_set_column_opt_i64(
+                &mut self,
+                column: usize,
+                value: ::core::option::Option<i64>,
+            ) {
+                match column {
+                    #(#arms)*
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn set_opt_str(&self) -> proc_macro2::TokenStream {
+        if !self.transposable {
+            return quote!();
+        }
+        let arms = self.fields.iter().filter_map(|(index, field)| {
+            let Shape::Optional(inner) = &field.shape else {
+                return None;
+            };
+            if !matches!(**inner, Shape::Str) {
+                return None;
+            }
+            let ident = &field.ident;
+            Some(quote!(#index => self.#ident = value,))
+        });
+        quote! {
+            fn colbin_set_column_opt_str(
+                &mut self,
+                column: usize,
+                value: ::core::option::Option<::std::string::String>,
+            ) {
                 match column {
                     #(#arms)*
                     _ => {}
@@ -711,10 +826,12 @@ impl Shape {
     /// Whether the column codec carries this shape, which is what makes a slice
     /// of the enclosing struct a candidate for a table.
     fn columnable(&self) -> bool {
-        matches!(
-            self,
-            Self::Bool | Self::Int(_) | Self::Uint(_) | Self::Float(_) | Self::Str
-        )
+        match self {
+            Self::Bool | Self::Int(_) | Self::Uint(_) | Self::Float(_) | Self::Str => true,
+            // A pointer is a nullable column (`wire/nullable.rs`).
+            Self::Optional(inner) => inner.columnable(),
+            _ => false,
+        }
     }
 
     /// The writer call for the field, including the omit-zero test the writer
@@ -911,30 +1028,38 @@ impl Shape {
     /// bit pattern, whose transforms find nothing but whose raw blocks cost
     /// exactly the element width.
     fn to_column_i64(&self, ident: &Ident) -> Option<proc_macro2::TokenStream> {
+        self.column_value(quote!(self.#ident))
+    }
+
+    /// `value`, a scalar of this shape, widened to `i64`.
+    fn column_value(&self, value: proc_macro2::TokenStream) -> Option<proc_macro2::TokenStream> {
         Some(match self {
-            Self::Bool => quote!(if self.#ident { 1 } else { 0 }),
-            Self::Int(_) | Self::Uint(_) => quote!(self.#ident as i64),
-            Self::Float(32) => quote!(self.#ident.to_bits() as i64),
-            Self::Float(_) => quote!(self.#ident.to_bits() as i64),
-            Self::Str => return None,
+            Self::Bool => quote!(if #value { 1 } else { 0 }),
+            Self::Int(_) | Self::Uint(_) => quote!(#value as i64),
+            Self::Float(_) => quote!(#value.to_bits() as i64),
             _ => return None,
         })
     }
 
     fn set_column_expr(&self, ident: &Ident) -> Option<proc_macro2::TokenStream> {
+        let converted = self.column_from(quote!(value))?;
+        Some(quote!(self.#ident = #converted))
+    }
+
+    /// `value`, an `i64`, narrowed back to this shape.
+    fn column_from(&self, value: proc_macro2::TokenStream) -> Option<proc_macro2::TokenStream> {
         Some(match self {
-            Self::Bool => quote!(self.#ident = value == 1),
-            Self::Int(8) => quote!(self.#ident = value as i8),
-            Self::Int(16) => quote!(self.#ident = value as i16),
-            Self::Int(32) => quote!(self.#ident = value as i32),
-            Self::Int(_) => quote!(self.#ident = value),
-            Self::Uint(8) => quote!(self.#ident = value as u8),
-            Self::Uint(16) => quote!(self.#ident = value as u16),
-            Self::Uint(32) => quote!(self.#ident = value as u32),
-            Self::Uint(_) => quote!(self.#ident = value as u64),
-            Self::Float(32) => quote!(self.#ident = f32::from_bits(value as u32)),
-            Self::Float(_) => quote!(self.#ident = f64::from_bits(value as u64)),
-            Self::Str => return None,
+            Self::Bool => quote!(#value == 1),
+            Self::Int(8) => quote!(#value as i8),
+            Self::Int(16) => quote!(#value as i16),
+            Self::Int(32) => quote!(#value as i32),
+            Self::Int(_) => quote!(#value),
+            Self::Uint(8) => quote!(#value as u8),
+            Self::Uint(16) => quote!(#value as u16),
+            Self::Uint(32) => quote!(#value as u32),
+            Self::Uint(_) => quote!(#value as u64),
+            Self::Float(32) => quote!(f32::from_bits(#value as u32)),
+            Self::Float(_) => quote!(f64::from_bits(#value as u64)),
             _ => return None,
         })
     }

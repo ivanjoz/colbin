@@ -79,16 +79,21 @@ use alloc::vec::Vec;
 
 mod bitmap;
 mod compact;
+mod dictionary;
 mod dynamic;
 mod groups;
+mod listcolumn;
 mod narrow;
+mod nullable;
 pub mod root;
 mod wide;
 
 pub use bitmap::{BitmapReader, BitmapWriter, MAX_BITMAP_KEY};
 pub use dynamic::{Kind, kind_of};
 pub use groups::Runs;
+pub use listcolumn::ListColumn;
 pub use narrow::{Reader, Writer};
+pub use nullable::{presence_bytes, present};
 pub use wide::{Reader8, Writer8};
 
 /// What four key bits buy: keys 0..=15. A record needing a seventeenth field
@@ -228,6 +233,24 @@ pub(crate) fn append_count(buf: &mut Vec<u8>, count: usize) {
     }
     buf.push(ELEMENT_SIZE_ESCAPE);
     buf.extend_from_slice(&(count as u32).to_le_bytes());
+}
+
+/// The column codec a column of values takes: the float one for an `f64`
+/// column's bit patterns.
+pub(crate) fn append_ints(buf: &mut Vec<u8>, values: &[i64], float: bool) {
+    if float {
+        crate::column::append_float64(buf, values);
+    } else {
+        crate::column::append_array(buf, values);
+    }
+}
+
+/// Writes one string element: its size as [`append_count`] writes a count, then
+/// its bytes.
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn append_string_element(buf: &mut Vec<u8>, value: &[u8]) {
+    append_count(buf, value.len());
+    buf.extend_from_slice(value);
 }
 
 /// Reverses [`append_count`], returning the count and the offset just past it.

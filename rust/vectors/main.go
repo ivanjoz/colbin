@@ -777,6 +777,118 @@ type Paged struct {
 	Last string `cb:"600"`
 }
 
+// MaybeRow is a table row of pointer fields: a column of them is absent when
+// every row is nil, the plain column when none is, and a presence bitmap and the
+// values of the rows present otherwise.
+type MaybeRow struct {
+	ID    int32    `cb:"1"`
+	Count *int32   `cb:"2"`
+	Name  *string  `cb:"3"`
+	Price *float64 `cb:"4"`
+	Flag  *bool    `cb:"5"`
+	Never *string  `cb:"6"`
+}
+
+type MaybeRows struct {
+	Rows []MaybeRow `cb:"1"`
+}
+
+func maybeRows(rows int) *MaybeRows {
+	out := &MaybeRows{}
+	for index := range rows {
+		row := MaybeRow{ID: int32(index), Flag: new(bool)}
+		*row.Flag = index%3 == 0
+		if index%2 == 0 {
+			row.Count = new(int32)
+			*row.Count = int32(index * 7 % 5)
+		}
+		if index%3 != 1 {
+			row.Name = new(string)
+			*row.Name = fmt.Sprintf("name-%d", index)
+		}
+		if index%4 != 3 {
+			row.Price = new(float64)
+			*row.Price = float64(index) * 1.25
+		}
+		out.Rows = append(out.Rows, row)
+	}
+	return out
+}
+
+// PagedRow is Paged as a table row: its pages are tables of the same rows.
+type PagedRows struct {
+	Rows []Paged `cb:"1"`
+}
+
+// Basket holds a slice of structs, so a table of baskets writes the field as a
+// list column: each row's count, then every row's lines as one table.
+type Basket struct {
+	ID    uint32 `cb:"1"`
+	Lines []Line `cb:"2"`
+	Note  string `cb:"3"`
+}
+
+type Baskets struct {
+	Rows []Basket `cb:"1"`
+}
+
+// Place has a string column whose values repeat, and a pointer to one in which
+// some rows are nil: both are dictionary columns when dictionaries are on.
+type Place struct {
+	ID   int32   `cb:"1"`
+	City string  `cb:"2"`
+	Area *string `cb:"3"`
+}
+
+type Places struct {
+	Rows []Place `cb:"1"`
+}
+
+func places(rows int) *Places {
+	cities := []string{"Lima", "Cusco", "Arequipa", "Trujillo"}
+	out := &Places{}
+	for index := range rows {
+		place := Place{ID: int32(index), City: cities[index%len(cities)]}
+		if index%3 != 0 {
+			place.Area = new(string)
+			*place.Area = "zone-" + cities[index%2]
+		}
+		out.Rows = append(out.Rows, place)
+	}
+	return out
+}
+
+func allPresent(rows int) *MaybeRows {
+	out := maybeRows(rows)
+	for index := range out.Rows {
+		row := &out.Rows[index]
+		row.Count, row.Name, row.Price = new(int32), new(string), new(float64)
+		*row.Count, *row.Name, *row.Price = int32(index), fmt.Sprint(index), float64(index)
+		row.Never = new(string)
+	}
+	return out
+}
+
+func pagedRows(rows int) []Paged {
+	out := make([]Paged, rows)
+	for index := range out {
+		out[index] = Paged{ID: uint32(index + 1), Name: fmt.Sprint("n", index), Late: int64(-300 * index), Last: fmt.Sprint("l", index%3)}
+	}
+	return out
+}
+
+func baskets(rows int) *Baskets {
+	out := &Baskets{}
+	for index := range rows {
+		basket := Basket{ID: uint32(index + 1), Note: fmt.Sprint("note ", index%2)}
+		if index%4 != 3 {
+			basket.Lines = lines(index%5 + 1)
+		}
+		out.Rows = append(out.Rows, basket)
+	}
+	return out
+}
+
 // Catalog holds maps of structs, whose section names the value's struct by its
 // index in the table, the way a slice of structs names its element. Its values
 // are narrow (Inner), wide (WideLine), and wide holding a map of structs in
@@ -904,6 +1016,18 @@ func walks() []walkCase {
 		catalog())
 	add("doc.map-of-structs-absent", "every map and pointer empty or nil, so absent and null",
 		&Catalog{Name: "none", Tags: &[]string{}})
+	add("doc.nullable-columns", "pointer fields of a table: some rows nil, none nil, every row nil",
+		maybeRows(20))
+	add("doc.nullable-columns-all-present", "a table of pointer fields in which every row holds a value",
+		allPresent(12))
+	add("doc.paged-table", "a table of rows whose type has three pages, each page a table of the same rows",
+		&PagedRows{Rows: pagedRows(12)})
+	add("doc.list-column", "a table whose rows hold slices of structs, written as one table of all the lines",
+		baskets(12))
+	colbin.SetDictionary(true)
+	add("doc.dictionary-columns", "a string column and a nullable one written as ids into dictionaries",
+		places(40))
+	colbin.SetDictionary(false)
 	grouped(func() {
 		add("doc.grouped-table", "a table cut into groups of four rows, the last holding the rest",
 			&Order{ID: 5, Lines: lines(10)})
@@ -1209,6 +1333,9 @@ func cases() []caseOut {
 		Ledger{ID: 3, Lines: wideLines(20)})
 	add("ledger.wide rows list", "the same rows under the threshold, each a wide run in a narrow list",
 		Ledger{ID: 4, Lines: wideLines(3)})
+	add("maybe.table", "pointer columns of a table: some rows nil, none nil, every row nil", maybeRows(20))
+	add("maybe.table all present", "a table of pointer fields in which every row holds a value, written even when zero",
+		allPresent(12))
 	grouped(func() {
 		add("order.grouped table", "a table cut into groups of four rows, which this port reads and does not write",
 			Order{ID: 7, Lines: lines(10)})
