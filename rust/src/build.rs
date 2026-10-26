@@ -269,6 +269,13 @@ impl<'a, 'd> Builder<'a, 'd> {
             w.close(mark);
             return;
         }
+        if rows == 1 {
+            let single = w.open_single(field.key);
+            let child = self.doc.child_at(node, 0);
+            self.run(w.buf, sub, child);
+            w.close(single);
+            return;
+        }
         let list = w.open_list(field.key, rows);
         for index in 0..rows {
             if !self.ok() {

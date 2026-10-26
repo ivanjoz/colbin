@@ -49,7 +49,6 @@ fn the_benchmark_record_is_the_bytes_internals_documents() {
     assert_eq!(
         message,
         vec![
-            0xD0, // root: STRUCT, narrow keys — the frame bounds it
             0x04, 0x07, // key 0, one byte: 7
             0x14, 0x2A, // key 1, one byte: 42
             0x24, 0x67, // key 2, one byte: 103
@@ -65,7 +64,7 @@ fn an_omitted_field_reads_back_as_zero() {
     let message = Charge::colbin_zero().encode();
     assert_eq!(
         message,
-        vec![0xD0],
+        Vec::<u8>::new(),
         "every field is zero, so nothing is written"
     );
     assert_eq!(
@@ -144,9 +143,9 @@ fn every_scalar_round_trips_at_its_extremes() {
 /// whole of what the byte reversal buys.
 #[test]
 fn a_float_trims_its_low_end() {
-    // The magnitude bytes of the one field set: the message is the root
-    // descriptor, the field header, and those.
-    let magnitude = |value: Scalars| value.encode().len() - 2;
+    // The magnitude bytes of the one field set: the message is the field header
+    // and those, a typed narrow message having no root byte.
+    let magnitude = |value: Scalars| value.encode().len() - 1;
 
     // A round value is nearly all zero mantissa, so it costs two bytes.
     assert_eq!(
@@ -267,7 +266,7 @@ struct Optionals {
 #[test]
 fn a_present_zero_is_not_an_absent_field() {
     let none = Optionals::colbin_zero();
-    assert_eq!(none.encode(), vec![0xD0]);
+    assert_eq!(none.encode(), Vec::<u8>::new());
     assert_eq!(Optionals::decode(&none.encode()).expect("decode"), none);
 
     let zero = Optionals {
@@ -366,7 +365,7 @@ fn a_long_slice_of_structs_becomes_a_table() {
         // lines and ask the field what it is. (A nested struct is written even
         // when it is empty — it is a length and nothing else — so the customer
         // is there to be stepped past.)
-        let mut reader = colbin::wire::Reader::new(&message[1..]);
+        let mut reader = colbin::wire::Reader::new(&message);
         assert_eq!(reader.key(), 0);
         let _ = reader.u32();
         assert_eq!(reader.key(), 1);
@@ -592,17 +591,19 @@ fn a_truncated_message_is_refused_rather_than_panicked_on() {
     }
 }
 
-/// A byte 0 that is not a root descriptor this version writes is refused, which
-/// is what keeps an old message from being misparsed as a new one.
+/// A first byte in the root range that is not a root this version writes is
+/// refused, which is what keeps a message of a newer kind from being misparsed
+/// as a key run. An empty message is the record with every field zero.
 #[test]
 fn a_message_that_is_not_one_is_refused() {
-    assert_eq!(Charge::decode(&[]), Err(Error::Truncated));
-    for root in [0x00_u8, 0x02, 0x04, 0x06, 0x08, 0xD2, 0xD3, 0xFF] {
+    assert_eq!(Charge::decode(&[]), Ok(Charge::colbin_zero()));
+    for root in [0xD1_u8, 0xD2, 0xD3, 0xD4, 0xD7, 0xD9, 0xDF] {
         assert_eq!(Charge::decode(&[root]), Err(Error::BadRoot(root)));
     }
-    // 0xD1 is a narrow root whose body holds a grouped table, which an empty
-    // body does not, and which says nothing a reader needs.
-    assert!(Charge::decode(&[0xD1]).is_ok());
+    // Outside the range a first byte is a key run's first field, and 0xD0 is a
+    // narrow root that holds an empty run.
+    assert!(Charge::decode(&[0xD0]).is_ok());
+    assert!(Charge::decode(&[0x04, 0x07]).is_ok());
 }
 
 /// A list element is the one composite with no descriptor in front of it, so it cannot widen the
@@ -643,4 +644,24 @@ fn a_list_element_past_the_inline_length_round_trips() {
             "an element body of {size} bytes did not survive the round trip"
         );
     }
+}
+
+/// A message has no root byte, so a first field of key 13 — whose header is in
+/// the root range — keeps `0xD0` in front, and reads back through it.
+#[test]
+fn a_first_field_of_key_13_keeps_the_root_byte() {
+    #[derive(Colbin, Clone, Debug, Default, PartialEq)]
+    struct Thirteen {
+        #[cb(14)]
+        value: u32,
+    }
+    let message = Thirteen { value: 7 }.encode();
+    assert_eq!(message, [0xD0, 0xD4, 0x07]);
+    assert_eq!(
+        Thirteen::decode(&message).expect("decode"),
+        Thirteen { value: 7 }
+    );
+    // The bare run, which a reader also takes for a message of its own, is a
+    // root-range first byte and is refused as one.
+    assert_eq!(Thirteen::decode(&[0xD4, 0x07]), Err(Error::BadRoot(0xD4)));
 }

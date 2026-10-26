@@ -875,7 +875,7 @@ impl Shape {
                 let counted = if wide {
                     quote!(r.map())
                 } else {
-                    quote!(r.counted())
+                    quote!(r.map())
                 };
                 let read = if wide {
                     quote!(read_element8)

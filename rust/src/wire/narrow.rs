@@ -12,7 +12,7 @@
 //!   4..11            exactly nibble − 3 bytes, 1..8
 //!   12..15 (11 f1f0) a length, then that many bytes; f1f0 is the type's flag
 //!
-//!   length           one byte ≤ 253 · 0xFE then a u16 · 0xFF then a u32
+//!   length           00..EF inline · F0..FD and a byte, 240..=3823 · 0xFE then a u16 · 0xFF then a u32
 //! ```
 //!
 //! That is what makes [`Reader::skip`] work under narrow keys exactly as
@@ -68,10 +68,15 @@ const STRING_PACKED_UPPER: u8 = 0b10;
 /// Rust types, so their flags overlap nothing a reader could confuse.
 const COMPOSITE_STRUCT_WIDE: u8 = 0b01;
 const COMPOSITE_TABLE: u8 = 0b01;
+/// A list's or a map's `f1`: one element, no count.
+const COMPOSITE_SINGLE: u8 = 0b10;
 
-/// The longest length one byte holds. 254 and 255 are the escapes, so a length
-/// of either is spelled the long way.
-const LENGTH_INLINE_MAX: usize = 253;
+/// The longest length one byte holds. `F0..=FD` open a two-byte form holding
+/// 240..=3823 (`LENGTH_PAIR` plus a 12-bit offset), and 254 and 255 are the
+/// u16 and u32 escapes.
+const LENGTH_INLINE_MAX: usize = 0xEF;
+const LENGTH_PAIR: usize = 0xF0;
+const LENGTH_PAIR_MAX: usize = LENGTH_PAIR + ((LENGTH_ESCAPE_U16 as usize - LENGTH_PAIR) << 8) - 1;
 const LENGTH_ESCAPE_U16: u8 = 0xFE;
 const LENGTH_ESCAPE_U32: u8 = 0xFF;
 
@@ -83,6 +88,8 @@ const NARROW_FIELD_LIMIT: &str = "colbin: a narrow field holds at most 2^32 − 
 const fn length_bytes(size: usize) -> usize {
     if size <= LENGTH_INLINE_MAX {
         1
+    } else if size <= LENGTH_PAIR_MAX {
+        2
     } else if size <= 0xFFFF {
         3
     } else {
@@ -95,6 +102,10 @@ const fn length_bytes(size: usize) -> usize {
 fn append_length(buf: &mut Vec<u8>, size: usize) {
     if size <= LENGTH_INLINE_MAX {
         buf.push(size as u8);
+    } else if size <= LENGTH_PAIR_MAX {
+        let pair = size - LENGTH_PAIR;
+        buf.push(LENGTH_PAIR as u8 + (pair >> 8) as u8);
+        buf.push(pair as u8);
     } else if size <= 0xFFFF {
         buf.push(LENGTH_ESCAPE_U16);
         buf.extend_from_slice(&(size as u16).to_le_bytes());
@@ -368,6 +379,21 @@ impl<'a> Writer<'a> {
     /// length is too, and unlike a composite it needs no backpatch.
     #[allow(clippy::cast_possible_truncation)]
     pub fn strings<S: AsRef<[u8]>>(&mut self, key: u8, values: &[S]) {
+        if let [only] = values {
+            // A list of one is its element's bytes alone.
+            let only = only.as_ref();
+            self.buf.push(key << 4 | NIBBLE_LENGTH | COMPOSITE_SINGLE);
+            append_length(self.buf, only.len());
+            self.buf.extend_from_slice(only);
+            return;
+        }
+        self.string_list(key, values);
+    }
+
+    /// [`Writer::strings`] in the counted form whatever the count, which a table
+    /// column needs: there `f1` says the column is nullable.
+    #[allow(clippy::cast_possible_truncation)]
+    fn string_list<S: AsRef<[u8]>>(&mut self, key: u8, values: &[S]) {
         if values.is_empty() {
             return;
         }
@@ -397,7 +423,7 @@ impl<'a> Writer<'a> {
         if values.iter().all(|value| value.as_ref().is_empty()) {
             return;
         }
-        self.strings(key, values);
+        self.string_list(key, values);
     }
 
     /// Writes a field the omit-zero rule would otherwise drop: the length form
@@ -447,8 +473,19 @@ impl<'a> Writer<'a> {
         mark
     }
 
-    /// Begins a map of `count` entries under `key`.
+    /// Begins a list of one element under `key`. The element's body follows
+    /// with no [`Writer::open_element`] around it: the field's length is the
+    /// element's.
+    pub fn open_single(&mut self, key: u8) -> Mark {
+        self.open_composite(key, COMPOSITE_SINGLE)
+    }
+
+    /// Begins a map of `count` entries under `key`; one entry goes out with no
+    /// count.
     pub fn open_map(&mut self, key: u8, count: usize) -> Mark {
+        if count == 1 {
+            return self.open_composite(key, COMPOSITE_SINGLE);
+        }
         let mark = self.open_composite(key, 0);
         append_count(self.buf, count);
         mark
@@ -475,7 +512,7 @@ impl<'a> Writer<'a> {
     ///
     /// Sizing the value first would cost a pass over every nested one; this way
     /// the common composite is one reserved byte and one store, and a body past
-    /// 253 bytes makes room for the escape and its u16 or u32 by shifting the
+    /// 239 bytes makes room for the escape and its u16 or u32 by shifting the
     /// body up — a memmove on a buffer already in cache, and only for composites
     /// large enough not to care. The header in front is never touched: the
     /// length says its own width, so nothing else has to.
@@ -484,6 +521,13 @@ impl<'a> Writer<'a> {
         let body = self.buf.len() - (mark.at + 1);
         if body <= LENGTH_INLINE_MAX {
             self.buf[mark.at] = body as u8;
+            return;
+        }
+        if body <= LENGTH_PAIR_MAX {
+            make_room(self.buf, mark, 1);
+            let pair = body - LENGTH_PAIR;
+            self.buf[mark.at] = LENGTH_PAIR as u8 + (pair >> 8) as u8;
+            self.buf[mark.at + 1] = pair as u8;
             return;
         }
         if body <= 0xFFFF {
@@ -502,9 +546,9 @@ impl<'a> Writer<'a> {
     ///
     /// It is not [`Writer::close`]: an element's length is the list element
     /// form, one byte up to 254 or `0xFF` and a u32, which [`Reader::element`]
-    /// reads — not a field's length, whose one-byte form stops at 253. The two
-    /// agree below 254 and nowhere above it, so a list whose element body
-    /// reached 254 bytes would be written in one spelling and read in the
+    /// reads — not a field's length, whose one-byte form stops at 239. The two
+    /// agree below 240 and nowhere above it, so a list whose element body
+    /// reached 240 bytes would be written in one spelling and read in the
     /// other. That happened once already, when `close` widened by OR-ing into
     /// the byte before the placeholder, which for an element is the previous
     /// element's tail.
@@ -745,6 +789,14 @@ impl<'a> Reader<'a> {
                     return None;
                 };
                 (le_uint(bytes, 4), at + 5)
+            }
+            pair if usize::from(pair) >= LENGTH_PAIR => {
+                let Some(&low) = self.buf.get(at + 1) else {
+                    self.fail(Error::Truncated);
+                    return None;
+                };
+                let offset = (usize::from(pair) - LENGTH_PAIR) << 8 | usize::from(low);
+                ((LENGTH_PAIR + offset) as u64, at + 2)
             }
             size => (u64::from(size), at + 1),
         };
@@ -1032,10 +1084,24 @@ impl<'a> Reader<'a> {
     /// walked size by size. An element running past the length is refused
     /// rather than read from the field after it.
     pub fn strings_bytes(&mut self) -> Vec<&'a [u8]> {
+        self.string_elements(true)
+    }
+
+    /// [`Reader::strings_bytes`] for a table's string column, which is always
+    /// the counted form: there `f1` is not a list of one.
+    pub fn column_strings_bytes(&mut self) -> Vec<&'a [u8]> {
+        self.string_elements(false)
+    }
+
+    fn string_elements(&mut self, single_ok: bool) -> Vec<&'a [u8]> {
         let mut dst = Vec::new();
         let Some((nibble, payload)) = self.field() else {
             return dst;
         };
+        if single_ok && nibble == NIBBLE_LENGTH | COMPOSITE_SINGLE {
+            dst.push(payload);
+            return dst;
+        }
         if nibble != NIBBLE_LENGTH {
             self.fail(Error::BadDescriptor);
             return dst;
@@ -1085,7 +1151,18 @@ impl<'a> Reader<'a> {
 
     /// Appends each element of a string array onto `dst`, reusing its capacity.
     pub fn strings_into(&mut self, dst: &mut Vec<String>) {
-        for raw in self.strings_bytes() {
+        let raws = self.strings_bytes();
+        self.push_strings(raws, dst);
+    }
+
+    /// [`Reader::strings_into`] for a table's string column.
+    pub fn column_strings_into(&mut self, dst: &mut Vec<String>) {
+        let raws = self.column_strings_bytes();
+        self.push_strings(raws, dst);
+    }
+
+    fn push_strings(&mut self, raws: Vec<&[u8]>, dst: &mut Vec<String>) {
+        for raw in raws {
             match core::str::from_utf8(raw) {
                 Ok(value) => dst.push(value.to_owned()),
                 Err(_) => {
@@ -1128,10 +1205,33 @@ impl<'a> Reader<'a> {
         })
     }
 
-    /// Returns the element count of a list or a map and a reader over what
-    /// follows it.
-    pub fn counted(&mut self) -> Option<(usize, Reader<'a>)> {
-        let (_, body) = self.composite(|flag| flag == 0)?;
+    /// Returns a list's element count and a reader over its elements.
+    ///
+    /// A list of one has no element length to read, so its reader stands one
+    /// past the end of the body, where only [`Reader::element`] looks — in the
+    /// branch it takes for a list that has run out, which leaves every other
+    /// element's read as it was.
+    pub fn list(&mut self) -> Option<(usize, Reader<'a>)> {
+        let (flag, body) = self.composite(|flag| flag & !COMPOSITE_SINGLE == 0)?;
+        if flag == COMPOSITE_SINGLE {
+            let mut elements = Reader::new(body);
+            elements.at = body.len() + 1;
+            return Some((1, elements));
+        }
+        self.counted(body)
+    }
+
+    /// Returns a map's entry count and a reader over its entries. One entry is
+    /// the whole body, with no count before it.
+    pub fn map(&mut self) -> Option<(usize, Reader<'a>)> {
+        let (flag, body) = self.composite(|flag| flag & !COMPOSITE_SINGLE == 0)?;
+        if flag == COMPOSITE_SINGLE {
+            return Some((1, Reader::new(body)));
+        }
+        self.counted(body)
+    }
+
+    fn counted(&mut self, body: &'a [u8]) -> Option<(usize, Reader<'a>)> {
         let Some((count, at)) = read_count(body) else {
             self.fail(Error::Truncated);
             return None;
@@ -1160,6 +1260,11 @@ impl<'a> Reader<'a> {
     /// Returns one narrow list element's body: a length and then a key run.
     pub fn element(&mut self) -> Option<&'a [u8]> {
         let Some(first) = self.buf.get(self.at) else {
+            if self.at == self.buf.len() + 1 {
+                // A list of one: see Reader::list.
+                self.at -= 1;
+                return Some(self.buf);
+            }
             self.fail(Error::Truncated);
             return None;
         };

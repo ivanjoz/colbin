@@ -5,14 +5,13 @@
 //! # A message is one value
 //!
 //! ```text
-//! [root descriptor:1] [key run]
+//! [key run]                      a typed narrow message
+//! [root descriptor:1] [key run]  anything else
 //! ```
 //!
-//! There is no header. Byte 0 is an ordinary descriptor naming the root's class
-//! — always a struct here — and the key width used inside it. Everything the old
-//! format's version bytes carried is either in that byte or gone: the mode bit,
-//! because there is one format; the shape bits, because the class says it; the
-//! omit-empty flag, because omission is unconditional.
+//! There is no header. A narrow message is its key run; a first byte in
+//! `0xD0..=0xDF` is a root descriptor naming the root's class — always a struct
+//! here — and the key width used inside it.
 //!
 //! # Choosing the key width
 //!
@@ -32,20 +31,17 @@
 
 use crate::Error;
 use crate::walk::MAX_ROWS;
+use crate::wire::root::{finish_narrow, narrow_body};
 use crate::wire::{Reader, Reader8, Runs, Writer, Writer8};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// Root descriptors; `INTERNALS.md` §2.1 lists them. Both are even and above
-/// 0x90, which is what no message the old format wrote could begin with — so an
-/// old reader rejects a new message rather than misparsing it.
+/// Root descriptors; `INTERNALS.md` §2.1 lists them. A typed narrow message
+/// writes `0xD0` only when its key run begins in the root range (see
+/// [`crate::wire::root`]); `0xD8` is a wide-keyed message's root.
 pub const ROOT_STRUCT_NARROW: u8 = 0xD0;
 /// The root descriptor of a message whose top-level key run is wide-keyed.
 pub const ROOT_STRUCT_WIDE: u8 = 0xD8;
-/// The root detail bit a writer sets when the body holds a grouped table, so
-/// that a reader from before groups refuses the message. A reader that knows
-/// them reads each table's own descriptor and needs the bit for nothing.
-pub const ROOT_GROUPED: u8 = 0x01;
 
 /// Where a table overtakes a list of structs.
 ///
@@ -128,13 +124,19 @@ pub trait Colbin: Sized {
     fn colbin_set_column_str(&mut self, _column: usize, _value: String) {}
 
     /// Encodes the value onto `dst`, which may already hold other bytes.
+    ///
+    /// A narrow message has no root byte: its key run is the message, and
+    /// [`finish_narrow`] puts `0xD0` back only when that run begins in the root
+    /// range. A wide one keeps its `0xD8`.
     fn append_encoded(&self, dst: &mut Vec<u8>) {
-        dst.push(if Self::WIDE_KEYS {
-            ROOT_STRUCT_WIDE
-        } else {
-            ROOT_STRUCT_NARROW
-        });
+        if Self::WIDE_KEYS {
+            dst.push(ROOT_STRUCT_WIDE);
+            self.colbin_write_run(dst);
+            return;
+        }
+        let start = dst.len();
         self.colbin_write_run(dst);
+        finish_narrow(dst, start);
     }
 
     /// Encodes the value onto a fresh buffer.
@@ -144,16 +146,15 @@ pub trait Colbin: Sized {
         out
     }
 
-    /// Decodes a message, refusing a byte 0 that is not a root descriptor this
-    /// version writes.
+    /// Decodes a message, refusing a first byte in the root range that is not a
+    /// root this version writes.
     fn decode(message: &[u8]) -> Result<Self, Error> {
-        let Some((root, body)) = message.split_first() else {
-            return Err(Error::Truncated);
-        };
-        match *root & !ROOT_GROUPED {
-            ROOT_STRUCT_NARROW => Self::colbin_read_run(body, false),
-            ROOT_STRUCT_WIDE => Self::colbin_read_run(body, true),
-            _ => Err(Error::BadRoot(*root)),
+        if let Some(body) = narrow_body(message) {
+            return Self::colbin_read_run(body, false);
+        }
+        match message[0] {
+            ROOT_STRUCT_WIDE => Self::colbin_read_run(&message[1..], true),
+            root => Err(Error::BadRoot(root)),
         }
     }
 }
@@ -289,6 +290,14 @@ pub fn write_structs<T: Colbin>(w: &mut Writer<'_>, key: u8, values: &[T]) {
         write_table(w, key, values);
         return;
     }
+    if let [value] = values {
+        // A list of one is its element's body, with no count and no length of its
+        // own: the field's length is the element's.
+        let single = w.open_single(key);
+        value.colbin_write_run(w.buf);
+        w.close(single);
+        return;
+    }
     let list = w.open_list(key, values.len());
     for value in values {
         // A narrow list's element carries a length and no descriptor — its shape
@@ -393,7 +402,7 @@ pub fn read_structs<T: Colbin>(r: &mut Reader<'_>) -> Vec<T> {
     if r.is_table() {
         return read_table(r);
     }
-    let Some((count, mut elements)) = r.counted() else {
+    let Some((count, mut elements)) = r.list() else {
         return Vec::new();
     };
     // The count is the peer's claim. Every element takes at least a byte, so
@@ -522,7 +531,7 @@ fn read_columns<T: Colbin>(columns: &mut Reader<'_>, out: &mut [T]) {
         match T::COLUMNS[index].kind {
             ColumnKind::Str => {
                 strings.clear();
-                columns.strings_into(&mut strings);
+                columns.column_strings_into(&mut strings);
                 scatter_strings(out, index, &mut strings, rows);
             }
             ColumnKind::Int => {

@@ -780,7 +780,7 @@ impl<'s> Walker<'s> {
     fn narrow_list(&mut self, reader: &mut Reader<'_>, field: &PlanField) -> Result<(), Error> {
         let at = field.sub.ok_or(Error::BadSection)?;
         let sub_wide = self.plan_at(at)?.is_wide;
-        let (count, mut elements) = reader.counted().ok_or(Error::Truncated)?;
+        let (count, mut elements) = reader.list().ok_or(Error::Truncated)?;
         self.enter()?;
         self.to.begin_array();
         for _ in 0..count {
@@ -995,7 +995,7 @@ impl<'a> Gathered<'a> {
 
     pub(crate) fn take(&mut self, columns: &mut Reader<'a>, index: usize, op: u8, rows: usize) {
         if op == OP_STRING {
-            self.strings[index] = columns.strings_bytes();
+            self.strings[index] = columns.column_strings_bytes();
         } else {
             self.ints[index] = read_column(columns, op, rows);
         }

@@ -321,7 +321,7 @@ impl SpanWalker {
         offset: usize,
     ) -> Result<(), Error> {
         let before = reader.cursor();
-        let (count, mut elements) = reader.counted().ok_or(Error::Truncated)?;
+        let (count, mut elements) = reader.list().ok_or(Error::Truncated)?;
         let body_end = offset + reader.cursor();
         let body_at = body_end - elements.buf_len();
         let sub = self.sub_plan(schema, field)?;

@@ -242,15 +242,17 @@ fn narrow_integer_arrays_round_trip_at_every_width() {
     check(&[0_u8, 0], 1);
 }
 
-/// A narrow composite's length is one byte up to 253 and then escapes to a u16
-/// and a u32 — never touching the header in front of it, which is why the
+/// A narrow composite's length is one byte up to 239, two to 3823, and then
+/// escapes to a u16 and a u32 — never touching the header in front of it, which is why the
 /// reader cannot tell a widened length from one written wide to begin with.
 #[test]
 fn a_long_narrow_composite_widens_its_length() {
     for (size, length_bytes) in [
         (10_usize, 1),
-        (253, 1),
-        (254, 3),
+        (239, 1),
+        (240, 2),
+        (3823, 2),
+        (3824, 3),
         (0xFFFF, 3),
         (0x1_0000, 5),
     ] {
@@ -670,7 +672,7 @@ fn arbitrary_bytes_are_refused_rather_than_panicked_on() {
             let mut r = Reader::new(&message);
             let _ = r.struct_body();
             let mut r = Reader::new(&message);
-            let _ = r.counted();
+            let _ = r.list();
             let mut r = Reader::new(&message);
             let _ = r.table();
             let mut r = Reader::new(&message);
@@ -682,4 +684,129 @@ fn arbitrary_bytes_are_refused_rather_than_panicked_on() {
             while r.more() && r.skip() {}
         }
     }
+}
+
+/// The narrow length: `00..=EF` inline, `F0..=FD` and a byte for 240..=3823,
+/// `FE` and a u16, `FF` and a u32. Every edge reads back as itself.
+#[test]
+fn a_narrow_length_takes_the_shortest_of_its_four_forms() {
+    let edges: [(usize, &[u8]); 7] = [
+        (239, &[0xEF]),
+        (240, &[0xF0, 0x00]),
+        (3823, &[0xFD, 0xFF]),
+        (3824, &[0xFE, 0xF0, 0x0E]),
+        (65535, &[0xFE, 0xFF, 0xFF]),
+        (65536, &[0xFF, 0x00, 0x00, 0x01, 0x00]),
+        (255, &[0xF0, 0x0F]),
+    ];
+    for (size, length) in edges {
+        let value = vec![0x61_u8; size];
+        let mut buf = Vec::new();
+        Writer::new(&mut buf).bytes(1, &value);
+        assert_eq!(buf[0], 0x1C, "{size}: key 1, the length form");
+        assert_eq!(&buf[1..1 + length.len()], length, "{size}");
+        assert_eq!(buf.len(), 1 + length.len() + size, "{size}");
+
+        let mut r = Reader::new(&buf);
+        assert_eq!(r.key(), 1);
+        assert_eq!(r.bytes(), &value[..], "{size}");
+        r.err().expect("a clean read");
+    }
+}
+
+/// A composite's length is patched after its body, and widens in place into the
+/// same forms.
+#[test]
+fn a_composite_body_widens_into_the_two_byte_length() {
+    for body in [239_usize, 240, 3823, 3824] {
+        let mut buf = Vec::new();
+        let mut w = Writer::new(&mut buf);
+        let mark = w.open_struct(2);
+        w.buf.extend(core::iter::repeat_n(0x0F_u8, body));
+        w.close(mark);
+        let mut r = Reader::new(&buf);
+        assert_eq!(r.key(), 2);
+        let (run, wide) = r.struct_body().expect("a struct");
+        assert!(!wide);
+        assert_eq!(run.len(), body);
+    }
+}
+
+/// A wide BLOB: `[00 lw]` raw behind a length, `[1 n:3]` for one to eight bytes
+/// with no length at all.
+#[test]
+fn a_wide_blob_of_up_to_eight_bytes_has_no_length() {
+    for size in [1_usize, 2, 8, 9, 255, 256] {
+        let value = vec![b'x'; size];
+        let mut buf = Vec::new();
+        Writer8::new(&mut buf).bytes(5, &value);
+        assert_eq!(buf[0], 5);
+        if size <= 8 {
+            assert_eq!(buf[1], 0x90 | 0b1000 | (size - 1) as u8, "{size}");
+            assert_eq!(buf.len(), 2 + size);
+        } else if size <= 255 {
+            assert_eq!(&buf[1..3], &[0x90, size as u8], "{size}");
+        } else {
+            assert_eq!(&buf[1..4], &[0x91, 0x00, 0x01], "{size}");
+        }
+        let mut r = Reader8::new(&buf);
+        assert_eq!(r.key(), 5);
+        assert_eq!(r.bytes(), &value[..], "{size}");
+        r.err().expect("a clean read");
+    }
+    // An empty one is written by nothing, and the explicit form still reads.
+    let mut buf = Vec::new();
+    Writer8::new(&mut buf).bytes(5, b"");
+    assert!(buf.is_empty());
+    let mut r = Reader8::new(&[5, 0x90, 0]);
+    assert_eq!(r.key(), 5);
+    assert_eq!(r.bytes(), b"");
+    r.err().expect("a clean read");
+}
+
+/// A narrow list of strings of one is the string's bytes alone, behind f1.
+#[test]
+fn a_narrow_string_array_of_one_is_its_bytes_alone() {
+    let mut buf = Vec::new();
+    Writer::new(&mut buf).strings(3, &["hello"]);
+    assert_eq!(buf, [0x3E, 5, b'h', b'e', b'l', b'l', b'o']);
+    let mut r = Reader::new(&buf);
+    assert_eq!(r.key(), 3);
+    assert_eq!(r.strings(), vec!["hello".to_owned()]);
+    r.err().expect("a clean read");
+
+    // A table's string column of one row stays counted: f1 there is nullable.
+    let mut buf = Vec::new();
+    Writer::new(&mut buf).string_column(3, &["hello"]);
+    assert_eq!(buf[0], 0x3C);
+}
+
+/// A narrow list of one has no count and no element length, even when the
+/// element is empty; a map of one has no count.
+#[test]
+fn a_narrow_list_or_map_of_one_has_no_count() {
+    let mut buf = Vec::new();
+    let mut w = Writer::new(&mut buf);
+    let mark = w.open_single(1);
+    w.close(mark);
+    assert_eq!(buf, [0x1E, 0x00]);
+    let mut r = Reader::new(&buf);
+    assert_eq!(r.key(), 1);
+    let (count, mut elements) = r.list().expect("a list");
+    assert_eq!(count, 1);
+    assert_eq!(elements.element().expect("one element"), b"");
+    r.err().expect("a clean read");
+
+    let mut buf = Vec::new();
+    let mut w = Writer::new(&mut buf);
+    let mark = w.open_map(2, 1);
+    w.element_uint(3);
+    w.element_uint(9);
+    w.close(mark);
+    assert_eq!(buf[0], 0x2E);
+    let mut r = Reader::new(&buf);
+    assert_eq!(r.key(), 2);
+    let (count, mut entries) = r.map().expect("a map");
+    assert_eq!(count, 1);
+    assert_eq!((entries.element_uint(), entries.element_uint()), (3, 9));
 }

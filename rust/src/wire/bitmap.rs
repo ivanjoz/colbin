@@ -32,8 +32,8 @@
 //! own length, and an unknown field is still nameable: its key is its bit
 //! position.
 
-use super::wide::{CLASS_BLOB, CLASS_INT, Reader8, descriptor};
-use super::{INT_POSITIVE_FLAG, append_magnitude, length_code_for, size_code_for};
+use super::wide::{CLASS_INT, Reader8, descriptor};
+use super::{INT_POSITIVE_FLAG, append_magnitude, size_code_for};
 use crate::Error;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -213,9 +213,7 @@ impl<'a> BitmapWriter<'a> {
             return;
         }
         self.present(key);
-        let (code, width) = length_code_for(value.len() as u64);
-        self.buf.push(descriptor(CLASS_BLOB, code));
-        append_magnitude(self.buf, value.len() as u64, width);
+        super::wide::append_blob_header(self.buf, value.len());
         self.buf.extend_from_slice(value);
     }
 }

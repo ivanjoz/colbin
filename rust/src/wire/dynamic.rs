@@ -29,8 +29,9 @@
 //! its own fields and has no dynamic value to write.
 
 use super::wide::{
-    CLASS_BLOB, CLASS_COL, CLASS_INT, CLASS_LIST, CLASS_MAP, CLASS_SPECIAL, CLASS_STRUCT,
-    CLASS_VEC, DESC_EXPLICIT, SPECIAL_VARINT, TABLE_FLAG, read_varint_at,
+    BLOB_PACKED, BLOB_SHORT, CLASS_BLOB, CLASS_COL, CLASS_INT, CLASS_LIST, CLASS_MAP,
+    CLASS_SPECIAL, CLASS_STRUCT, CLASS_VEC, DESC_EXPLICIT, SPECIAL_VARINT, TABLE_FLAG,
+    read_varint_at,
 };
 use super::{INT_POSITIVE_FLAG, LENGTH_WIDTH, MAGNITUDE_WIDTH, Reader8, le_uint, read_count};
 use crate::Error;
@@ -188,11 +189,17 @@ pub(super) fn declared_length(buf: &[u8], at: usize, want: u8) -> Result<(usize,
     if desc < DESC_EXPLICIT || (desc >> 4) & 0b111 != want {
         return Err(Error::BadDescriptor);
     }
-    let width = if want == CLASS_VEC {
-        if desc & 1 == 0 { 1 } else { 4 }
-    } else {
-        LENGTH_WIDTH[usize::from(desc & 0b11)]
-    };
+    let mut width = LENGTH_WIDTH[usize::from(desc & 0b11)];
+    if want == CLASS_VEC {
+        width = if desc & 1 == 0 { 1 } else { 4 };
+    } else if want == CLASS_BLOB {
+        if desc & BLOB_SHORT != 0 {
+            return Ok((usize::from(desc & 0b111) + 1, at + 1));
+        }
+        if desc & BLOB_PACKED != 0 {
+            width = LENGTH_WIDTH[usize::from(desc & 1)];
+        }
+    }
     let rest = &buf[at + 1..];
     if rest.len() < width {
         return Err(Error::Truncated);

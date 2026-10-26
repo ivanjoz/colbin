@@ -50,7 +50,7 @@
 //!
 //!     0..3       no payload
 //!     4..11      exactly nibble − 3 bytes
-//!     12..15     11 f1 f0, then a length (one byte ≤ 253, 0xFE + u16, 0xFF + u32)
+//!     12..15     11 f1 f0, then a length (one byte ≤ 239, two bytes to 3823, 0xFE + u16, 0xFF + u32)
 //!                and that many bytes
 //!
 //! unsigned       0..3 → the value nibble + 1 · 4..11 → the value's bytes
@@ -81,6 +81,7 @@ mod bitmap;
 mod dynamic;
 mod groups;
 mod narrow;
+pub mod root;
 mod wide;
 
 pub use bitmap::{BitmapReader, BitmapWriter, MAX_BITMAP_KEY};

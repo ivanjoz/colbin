@@ -21,7 +21,9 @@
 //! 1 ccc dddd                  class ccc, detail dddd
 //!
 //! class 0 INT      [pos:1][n:3]         n magnitude bytes
-//! class 1 BLOB     [enc:2][lw:2]        [size: lw] then size bytes
+//! class 1 BLOB     [0 0 lw:2]           [size: lw] then size bytes
+//!                  [0 1 up lw:1]        the same, packed5
+//!                  [1 size:3]           size+1 bytes, no length
 //! class 2 VEC      [w:2][pos:1][lw:1]   [bytelen: lw] then the elements
 //! class 3 COL      [kind:2][lw:2]       [bytelen: lw] then a blocked column
 //! class 4 LIST     [homog:1][-:1][lw:2] [bytelen: lw][count] then elements
@@ -95,15 +97,40 @@ pub(crate) const STRUCT_WIDE_KEYS: u8 = 0b1000;
 /// only in what the body holds.
 pub(crate) const TABLE_FLAG: u8 = 0b1000;
 
-/// The BLOB descriptor's `enc` codes, in bits 3-2.
-///
-/// packed5 owns two of the four. A packed string writes no frame header of its
-/// own — the descriptor already carries the size and the encoding, which is two
-/// of the three things a header would hold — so the spare code buys the third:
-/// the case mode the unit stream opens in.
-const ENC_PACKED5: u8 = 1 << 2;
-const ENC_PACKED5_UP: u8 = 3 << 2;
-const ENC_MASK: u8 = 3 << 2;
+/// The BLOB descriptor's detail bits: `0 0 lw:2` raw behind a length, `0 1 up
+/// lw:1` packed5 opening in lower or upper case behind a one- or two-byte
+/// length, and `1 size:3` raw of size+1 bytes with no length at all.
+pub(crate) const BLOB_PACKED: u8 = 0b0100;
+const BLOB_UPPER: u8 = 0b0010;
+pub(crate) const BLOB_SHORT: u8 = 0b1000;
+/// The bits that say which of the three a blob is. A short blob is raw bytes,
+/// so only packed needs telling apart.
+const BLOB_FORM: u8 = BLOB_SHORT | BLOB_PACKED;
+/// The longest blob with no length.
+const MAX_SHORT_BLOB: usize = 8;
+
+/// Writes a blob's descriptor and length: the short form for one of 1 to
+/// [`MAX_SHORT_BLOB`] bytes, and a length of 1, 2, 4 or 8 bytes otherwise.
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn append_blob_header(buf: &mut Vec<u8>, size: usize) {
+    if size.wrapping_sub(1) < MAX_SHORT_BLOB {
+        buf.push(descriptor(CLASS_BLOB, BLOB_SHORT | (size - 1) as u8));
+        return;
+    }
+    let (code, width) = length_code_for(size as u64);
+    buf.push(descriptor(CLASS_BLOB, code));
+    append_magnitude(buf, size as u64, width);
+}
+
+/// The whole field [`Writer8::string`] writes for `size` bytes: the key, the
+/// descriptor, the length when there is one, and the bytes.
+const fn raw_blob_size(size: usize) -> usize {
+    if size <= MAX_SHORT_BLOB {
+        return 2 + size;
+    }
+    let (_, width) = length_code_for(size as u64);
+    2 + width + size
+}
 
 /// Folds a signed value so that small negatives stay small, which is what makes
 /// the varint worth using for a delta. An unsigned value is not folded: it would
@@ -362,10 +389,8 @@ impl<'a> Writer8<'a> {
     }
 
     fn blob_header(&mut self, key: u8, size: usize) {
-        let (code, width) = length_code_for(size as u64);
         self.buf.push(key);
-        self.buf.push(descriptor(CLASS_BLOB, code));
-        append_magnitude(self.buf, size as u64, width);
+        append_blob_header(self.buf, size);
     }
 
     /// Writes a string in the packed5 encoding when that is smaller than the raw
@@ -390,8 +415,18 @@ impl<'a> Writer8<'a> {
             self.bytes(key, value);
             return;
         };
-        let enc = if upper { ENC_PACKED5_UP } else { ENC_PACKED5 };
         let (code, width) = length_code_for(stream.len() as u64);
+        // The raw field is the comparison, since a raw string of up to eight bytes
+        // carries no length and a packed one always does.
+        if stream.len() > 0xFFFF || 2 + width + stream.len() >= raw_blob_size(value.len()) {
+            self.bytes(key, value);
+            return;
+        }
+        let enc = if upper {
+            BLOB_PACKED | BLOB_UPPER
+        } else {
+            BLOB_PACKED
+        };
         self.buf.push(key);
         self.buf.push(descriptor(CLASS_BLOB, enc | code));
         append_magnitude(self.buf, stream.len() as u64, width);
@@ -577,9 +612,7 @@ impl<'a> Writer8<'a> {
 
     /// Writes a string element.
     pub fn element_string(&mut self, value: &str) {
-        let (code, width) = length_code_for(value.len() as u64);
-        self.buf.push(descriptor(CLASS_BLOB, code));
-        append_magnitude(self.buf, value.len() as u64, width);
+        append_blob_header(self.buf, value.len());
         self.buf.extend_from_slice(value.as_bytes());
     }
 
@@ -888,9 +921,9 @@ impl<'a> Reader8<'a> {
             self.fail(Error::Truncated);
             return String::new();
         };
-        let enc = desc & ENC_MASK;
+        let packed = desc & BLOB_FORM == BLOB_PACKED;
         let raw = self.bytes();
-        if enc == 0 {
+        if !packed {
             return match core::str::from_utf8(raw) {
                 Ok(value) => value.to_owned(),
                 Err(_) => {
@@ -899,12 +932,8 @@ impl<'a> Reader8<'a> {
                 }
             };
         }
-        if enc == 2 << 2 {
-            self.fail(Error::BadDescriptor); // a dictionary reference, not a string
-            return String::new();
-        }
         let mut bytes = Vec::new();
-        match packed5::append_string(&mut bytes, raw, enc == ENC_PACKED5_UP) {
+        match packed5::append_string(&mut bytes, raw, desc & BLOB_UPPER != 0) {
             Ok(()) => match String::from_utf8(bytes) {
                 Ok(value) => value,
                 Err(_) => {

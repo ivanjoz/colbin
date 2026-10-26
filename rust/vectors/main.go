@@ -847,7 +847,7 @@ func walks() []walkCase {
 		out = append(out, walkCase{
 			Name:           name,
 			About:          about,
-			Wide:           message[0]&0x08 != 0,
+			Wide:           isWide(message),
 			Section:        hex.EncodeToString(schema.Bytes()),
 			Message:        hex.EncodeToString(message),
 			SelfDescribing: hex.EncodeToString(standalone),
@@ -1280,4 +1280,11 @@ func repeat(unit string, times int) string {
 		out = append(out, unit...)
 	}
 	return string(out)
+}
+
+// isWide reports the root byte's key-width bit. A typed narrow message has no
+// root byte (an empty one has no byte at all), so only a first byte in the root
+// range D0..DF can say wide.
+func isWide(message []byte) bool {
+	return len(message) > 0 && message[0]&0xF0 == 0xD0 && message[0]&0x08 != 0
 }
