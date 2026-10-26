@@ -386,6 +386,34 @@ func appendLong[T Signed](out []byte, vals []T) []byte {
 	return appendBlocks(out, vals, transform, minimum, zigzagged)
 }
 
+// arrayCost is len(AppendArray(nil, vals)), scored the way appendLong scores
+// its transforms and without writing anything: what a caller choosing between
+// two encodings of a column compares.
+func arrayCost(vals []int64) int {
+	n := len(vals)
+	if n <= shortColumn || forcedTransform >= 0 {
+		var scratch [1 + 8 + 1 + 8*shortColumn]byte
+		return len(AppendArray(scratch[:0], vals))
+	}
+	var constant, deltaOverflows bool
+	var best, frame, steps int
+	if useSIMD {
+		_, constant, deltaOverflows, best, frame, steps = scanSIMD(vals)
+	} else {
+		var minimum int64
+		minimum, constant, deltaOverflows = stats(vals)
+		best, frame, steps = blockedCosts(vals, minimum, minimum < 0, !deltaOverflows)
+	}
+	best = min(best, frame)
+	if !deltaOverflows {
+		best = min(best, steps)
+	}
+	if constant {
+		best = min(best, constantCost)
+	}
+	return 1 + best
+}
+
 // appendBlocks materialises each block's residuals into a scratch array on the
 // stack and packs it. 128 uint64 is a kilobyte, which is worth not allocating
 // and worth not walking the input twice for.
@@ -430,8 +458,8 @@ func appendBlocks[T Signed](out []byte, vals []T, transform uint8, base int64, z
 	return out
 }
 
-// DecodeArray reads n values written by AppendArray into out and returns the
-// number of bytes consumed from buf.
+// DecodeArray reads n values written by AppendArray, or AppendFloat64, into out
+// and returns the number of bytes consumed from buf.
 //
 // T need not be the type the column was written from: any element type that
 // can hold the values will do, and a value outside T's range is an error rather
@@ -450,6 +478,9 @@ func DecodeArray[T Signed](buf []byte, n int, out []T) (int, error) {
 	}
 	header := buf[0]
 	position := 1
+	if header == headerDecimal && n > 0 {
+		return decodeDecimal(buf, n, out)
+	}
 	if !headerWritten(header, n) {
 		return 0, errBadHeader
 	}

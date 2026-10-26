@@ -341,6 +341,8 @@ func TestArrayDecodeRejectsOutOfRange(t *testing.T) {
 func TestArrayDecodeRejectsUnwrittenHeaders(t *testing.T) {
 	written := map[uint8]bool{
 		trRaw: true, trRaw | zigzagFlag: true, trDelta | zigzagFlag: true, trFOR: true, trConstant: true,
+		// Zeros after it are exponent 0, no exceptions and a raw column of zeros.
+		headerDecimal: true,
 	}
 	for header := range 256 {
 		// Zeros after the header are a valid base and a width-0 block, so the
@@ -706,6 +708,7 @@ func FuzzArrayDecode(f *testing.F) {
 	f.Add([]byte{0x00}, uint8(4))
 	f.Add([]byte{0xFF, 0xFF, 0xFF, 0xFF}, uint8(10))
 	f.Add(AppendArray(nil, []int64{511, 511, 511}), uint8(3))
+	f.Add(AppendFloat64(nil, floatBits(0, 0.5, 1, 1.5, math.NaN(), 2, 2.5, 3)), uint8(8))
 	f.Fuzz(func(t *testing.T, buf []byte, n uint8) {
 		// Arbitrary bytes must not panic any element type, and every narrower
 		// type must agree with int64: the same values when they fit, an error
