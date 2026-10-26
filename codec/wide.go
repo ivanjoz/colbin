@@ -113,7 +113,9 @@ func rootParts(data []byte) (section, body []byte, wide, ok bool) {
 	if len(data) == 0 {
 		return nil, nil, false, false
 	}
-	switch data[0] {
+	// A grouped table is its own descriptor's business, so the root's saying
+	// there is one changes nothing here.
+	switch data[0] &^ rootGrouped {
 	case rootStructNarrow:
 		return nil, data[1:], false, true
 	case rootStructWide:

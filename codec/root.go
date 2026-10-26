@@ -18,15 +18,15 @@ package codec
 //
 // # The reservation
 //
-//	0xD0 .. 0xDF   colbin. Sixteen detail combinations, four used today.
+//	0xD0 .. 0xDF   colbin. Sixteen detail combinations.
 //	everything else  never written by colbin, and rejected on read.
 //
 // Four detail bits, allocated:
 //
 //	0x08  wide     eight-bit keys inside, rather than four
 //	0x04  schema   a schema section precedes the body (see schema.go)
-//	0x02  —        unallocated
-//	0x01  —        unallocated
+//	0x02  dict     a dictionary section precedes the body (see dictionary.go)
+//	0x01  grouped  the body holds a grouped table (see wire/groups.go)
 //
 // # What an application may do with the rest
 //
@@ -40,8 +40,8 @@ package codec
 // 0xD0), leave colbin messages bare, and a reader dispatches on one comparison.
 //
 // The one thing an application must not assume is that *every* byte in
-// 0xD0..0xDF is currently valid. Twelve of the sixteen are unassigned and a
-// reader must refuse them, which is what rootOf does — that is what leaves room
+// 0xD0..0xDF is currently valid. A reader refuses a combination it does not
+// read, which is what rootOf does — that is what leaves room
 // for the format to grow without an application's framing colliding with it.
 const (
 	// RootFirst and RootLast bound every first byte colbin writes or accepts.
@@ -56,6 +56,12 @@ const (
 	// that the message describes its own type. MarshalSelfDescribing writes it
 	// and rootOf steps over it. See schema.go.
 	rootSchema byte = 0x04
+	// rootGrouped says the body holds at least one grouped table, which is how
+	// a reader from before groups comes to refuse the message: a grouped table
+	// under eight-bit keys is a bit it never checked, and it would read the
+	// groups as columns. A reader that knows groups reads each table's own
+	// descriptor and needs the bit for nothing.
+	rootGrouped byte = 0x01
 )
 
 // IsColbin reports whether data begins with a byte in colbin's reserved range.

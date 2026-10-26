@@ -106,30 +106,31 @@ func allEmpty(values []string) bool {
 	return true
 }
 
-// Table returns the row count and a reader over the columns, which are an
-// ordinary key run. As with Reader.Table, the row count is not bounded by the
-// message and a caller allocating for it must budget rows itself.
-func (r *Reader8) Table() (int, Reader8, bool) {
+// Table returns the row count, the rows per group and the body: for a table
+// written whole, groupRows 0 and the column run, an ordinary key run for
+// NewReader8; for a grouped one, its groups (groups.go). As with Reader.Table,
+// the row count is not bounded by the message and a caller allocating for it
+// must budget rows itself.
+func (r *Reader8) Table() (rows, groupRows int, body []byte, ok bool) {
 	if r.at+2 > len(r.buffer) {
 		r.fail(ErrTruncated)
-		return 0, Reader8{}, false
+		return 0, 0, nil, false
 	}
-	if r.buffer[r.at+1]&tableFlag == 0 {
+	desc := r.buffer[r.at+1]
+	if desc&tableFlag == 0 {
 		r.fail(ErrBadDescriptor)
-		return 0, Reader8{}, false
+		return 0, 0, nil, false
 	}
-	body, ok := r.compositeBody(classMap)
+	whole, ok := r.compositeBody(classMap)
 	if !ok {
-		return 0, Reader8{}, false
+		return 0, 0, nil, false
 	}
-	rows, at, ok := readCount(body)
-	if !ok {
-		r.fail(ErrTruncated)
-		return 0, Reader8{}, false
+	rows, groupRows, body, err := tableHead(whole, desc&groupedFlag != 0)
+	if err != nil {
+		r.fail(err)
+		return 0, 0, nil, false
 	}
-	// The columns are keyed, so unlike a list's elements they read as an
-	// ordinary run and need no cursor offset.
-	return rows, Reader8{buffer: body[at:]}, true
+	return rows, groupRows, body, true
 }
 
 // Column readers. Each takes the row count, because a column does not carry its

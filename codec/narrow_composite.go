@@ -19,6 +19,7 @@ import (
 	"unsafe"
 
 	"github.com/ivanjoz/colbin/column"
+	"github.com/ivanjoz/colbin/internal/wirefmt"
 	"github.com/ivanjoz/colbin/wire"
 )
 
@@ -119,17 +120,23 @@ func appendNarrowElement(writer *wire.Writer, plan *typePlan, at unsafe.Pointer,
 }
 
 // appendNarrowTable writes a table under a narrow parent, its columns keyed at
-// the row type's width. See table.go.
+// the row type's width, and in groups past wirefmt.TableGroupRows rows. See
+// table.go.
 func appendNarrowTable(writer *wire.Writer, field *planField, at unsafe.Pointer, buf *scratch) {
 	slice := (*sliceHeader)(at)
-	mark := writer.OpenTable(field.key, slice.len)
-	if field.sub.isWide {
-		wide := wire.Writer8{Buffer: writer.Buffer}
-		appendColumns(&wide, field.sub, slice, field.stride, buf, buf.dict)
-		writer.Buffer = wide.Buffer
+	if groupRows := wirefmt.TableGroupRows; slice.len > groupRows {
+		mark := writer.OpenGroupedTable(field.key, slice.len, groupRows)
+		writer.Buffer = appendGroups(writer.Buffer, field, slice, groupRows, field.sub.isWide, buf)
 		writer.Close(mark)
 		return
 	}
+	mark := writer.OpenTable(field.key, slice.len)
+	writer.Buffer = appendTableColumns(writer.Buffer, field, slice, field.sub.isWide, buf)
+	writer.Close(mark)
+}
+
+// appendNarrowColumns writes a narrow table's columns for the rows of slice.
+func appendNarrowColumns(writer *wire.Writer, plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratch) {
 	rows := slice.len
 	var narrow []int32
 	var ints []int64
@@ -137,16 +144,16 @@ func appendNarrowTable(writer *wire.Writer, field *planField, at unsafe.Pointer,
 	var payloads []int
 	var scans []column.Scan
 	if useScannedTables && column.Scanned(rows) {
-		narrow, ints, strings, payloads, scans = gatherScanned(field.sub, slice, field.stride, buf)
+		narrow, ints, strings, payloads, scans = gatherScanned(plan, slice, stride, buf)
 	} else {
-		narrow, ints, strings, payloads = gatherTable(field.sub, slice, field.stride, buf)
+		narrow, ints, strings, payloads = gatherTable(plan, slice, stride, buf)
 	}
 	var choices []dictColumn
 	if buf.dict != nil {
-		choices = buf.dict.tableIDs(field.sub, strings, rows)
+		choices = buf.dict.tableIDs(plan, strings, rows)
 	}
-	for index := range field.sub.fields {
-		field := &field.sub.fields[index]
+	for index := range plan.fields {
+		field := &plan.fields[index]
 		if field.op == opString {
 			if len(choices) != 0 {
 				choice := &choices[0]
@@ -181,7 +188,6 @@ func appendNarrowTable(writer *wire.Writer, field *planField, at unsafe.Pointer,
 		}
 		ints = ints[rows:]
 	}
-	writer.Close(mark)
 }
 
 func appendNarrowMap(writer *wire.Writer, field *planField, at unsafe.Pointer, buf *scratch) {
@@ -360,22 +366,17 @@ func readNarrowStructs(reader *wire.Reader, field *planField, at unsafe.Pointer,
 // readNarrowTable reads a table under a narrow parent, whose columns are keyed
 // at the row type's width. See table.go.
 func readNarrowTable(reader *wire.Reader, field *planField, at unsafe.Pointer, buf *scratch) {
-	rows, body, ok := reader.Table()
+	rows, groupRows, body, ok := reader.Table()
 	if !ok {
 		return
 	}
-	if field.sub.isWide {
-		columns := wire.NewReader8(body)
-		readColumns(&columns, field, at, rows, buf)
-		reader.Fail(columns.Err())
-		return
-	}
-	if err := takeRows(&buf.rowsLeft, rows, len(field.sub.fields)); err != nil {
-		reader.Fail(err)
-		return
-	}
-	reused := newSlice(field, at, rows)
-	table := startTable(field, (*sliceHeader)(at).data, rows, buf)
+	reader.Fail(readTable(field, at, rows, groupRows, body, field.sub.isWide, buf))
+}
+
+// readNarrowColumns fills rows rows from data on from a table's four-bit-keyed
+// columns.
+func readNarrowColumns(field *planField, data unsafe.Pointer, rows int, body []byte, buf *scratch) error {
+	table := startTable(field, data, rows, buf)
 	columns := wire.NewReader(body)
 	for columns.More() {
 		column := field.sub.find(columns.Key())
@@ -409,8 +410,7 @@ func readNarrowTable(reader *wire.Reader, field *planField, at unsafe.Pointer, b
 		}
 	}
 	table.finish()
-	field.sub.reset.settleRows(reused, (*sliceHeader)(at).data, rows, field.stride)
-	reader.Fail(columns.Err())
+	return columns.Err()
 }
 
 func readNarrowMap(reader *wire.Reader, field *planField, at unsafe.Pointer, buf *scratch) {

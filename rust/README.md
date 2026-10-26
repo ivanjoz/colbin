@@ -104,7 +104,9 @@ A `Vec<T: Colbin>` is written as a list of key runs below
 `colbin::TABLE_THRESHOLD` rows and transposed into keyed columns at or above it,
 which is the decision the Go encoder makes at the same threshold. Both are
 self-describing — a `LIST` and a `TABLE` are different descriptor classes — so
-the reader dispatches on what it finds.
+the reader dispatches on what it finds. Go writes a table of more than 4 096
+rows in groups of rows; this crate reads grouped tables everywhere it reads
+tables, and writes every table whole, which every reader accepts.
 
 ## Driving the wire directly
 

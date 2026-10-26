@@ -32,7 +32,7 @@
 
 use crate::Error;
 use crate::walk::MAX_ROWS;
-use crate::wire::{Reader, Reader8, Writer, Writer8};
+use crate::wire::{Reader, Reader8, Runs, Writer, Writer8};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -42,6 +42,10 @@ use alloc::vec::Vec;
 pub const ROOT_STRUCT_NARROW: u8 = 0xD0;
 /// The root descriptor of a message whose top-level key run is wide-keyed.
 pub const ROOT_STRUCT_WIDE: u8 = 0xD8;
+/// The root detail bit a writer sets when the body holds a grouped table, so
+/// that a reader from before groups refuses the message. A reader that knows
+/// them reads each table's own descriptor and needs the bit for nothing.
+pub const ROOT_GROUPED: u8 = 0x01;
 
 /// Where a table overtakes a list of structs.
 ///
@@ -146,10 +150,10 @@ pub trait Colbin: Sized {
         let Some((root, body)) = message.split_first() else {
             return Err(Error::Truncated);
         };
-        match *root {
+        match *root & !ROOT_GROUPED {
             ROOT_STRUCT_NARROW => Self::colbin_read_run(body, false),
             ROOT_STRUCT_WIDE => Self::colbin_read_run(body, true),
-            other => Err(Error::BadRoot(other)),
+            _ => Err(Error::BadRoot(*root)),
         }
     }
 }
@@ -442,23 +446,67 @@ pub fn read_structs8<T: Colbin>(r: &mut Reader8<'_>) -> Vec<T> {
 /// is decoded whole and then scattered across the rows, which is the order the
 /// column codec wants: it fills a run and the scatter is a strided store.
 fn read_table<T: Colbin>(r: &mut Reader<'_>) -> Vec<T> {
-    let Some((rows, body)) = r.table() else {
+    let Some((rows, group_rows, body)) = r.table() else {
         return Vec::new();
     };
-    if rows > MAX_ROWS {
-        r.fail(Error::TooManyRows);
-        return Vec::new();
-    }
     // Wide rows keep their keys in a narrow parent's table; see write_table.
-    if T::WIDE_KEYS {
-        let mut columns = Reader8::new(body);
-        let out = read_columns8(&mut columns, rows);
-        r.fail_with(columns.err());
-        return out;
+    let (out, result) = read_runs(rows, group_rows, body, T::WIDE_KEYS);
+    r.fail_with(result);
+    out
+}
+
+/// [`read_table`] for a wide-keyed parent.
+fn read_table8<T: Colbin>(r: &mut Reader8<'_>) -> Vec<T> {
+    let Some((rows, group_rows, body)) = r.table() else {
+        return Vec::new();
+    };
+    let (out, result) = read_runs(rows, group_rows, body, true);
+    r.fail_with(result);
+    out
+}
+
+/// A table body's `rows` records: its columns, keyed at eight bits if `wide`,
+/// or for a grouped table each group's into that group's rows. What was read
+/// before a failure is returned with it.
+fn read_runs<T: Colbin>(
+    rows: usize,
+    group_rows: usize,
+    body: &[u8],
+    wide: bool,
+) -> (Vec<T>, Result<(), Error>) {
+    if rows > MAX_ROWS {
+        return (Vec::new(), Err(Error::TooManyRows));
     }
-    let mut columns = Reader::new(body);
     let mut out = Vec::with_capacity(rows);
     out.resize_with(rows, T::colbin_zero);
+    let mut start = 0;
+    for run in Runs::new(rows, group_rows, body) {
+        let (size, columns) = match run {
+            Ok(run) => run,
+            Err(err) => return (out, Err(err)),
+        };
+        let group = &mut out[start..start + size];
+        let result = if wide {
+            let mut columns = Reader8::new(columns);
+            read_columns8(&mut columns, group);
+            columns.err()
+        } else {
+            let mut columns = Reader::new(columns);
+            read_columns(&mut columns, group);
+            columns.err()
+        };
+        if result.is_err() {
+            return (out, result);
+        }
+        start += size;
+    }
+    (out, Ok(()))
+}
+
+/// A column run under four-bit keys, into the records of `out`. A failure is
+/// left on `columns` for the caller to carry up.
+fn read_columns<T: Colbin>(columns: &mut Reader<'_>, out: &mut [T]) {
+    let rows = out.len();
     let mut ints: Vec<i64> = Vec::new();
     let mut strings: Vec<String> = Vec::new();
     while columns.more() {
@@ -467,7 +515,7 @@ fn read_table<T: Colbin>(r: &mut Reader<'_>) -> Vec<T> {
             // A column this type no longer declares is stepped over, as it is
             // under wide keys: the nibble sizes it without its type.
             if !columns.skip() {
-                break;
+                return;
             }
             continue;
         };
@@ -475,44 +523,26 @@ fn read_table<T: Colbin>(r: &mut Reader<'_>) -> Vec<T> {
             ColumnKind::Str => {
                 strings.clear();
                 columns.strings_into(&mut strings);
-                scatter_strings(&mut out, index, &mut strings, rows);
+                scatter_strings(out, index, &mut strings, rows);
             }
             ColumnKind::Int => {
                 columns.column(rows, &mut ints);
-                scatter_ints(&mut out, index, &ints, rows);
+                scatter_ints(out, index, &ints, rows);
             }
         }
     }
-    r.fail_with(columns.err());
-    out
 }
 
-/// [`read_table`] for a wide-keyed parent.
-fn read_table8<T: Colbin>(r: &mut Reader8<'_>) -> Vec<T> {
-    let Some((rows, mut columns)) = r.table() else {
-        return Vec::new();
-    };
-    if rows > MAX_ROWS {
-        r.fail(Error::TooManyRows);
-        return Vec::new();
-    }
-    let out = read_columns8(&mut columns, rows);
-    r.fail_with(columns.err());
-    out
-}
-
-/// A table's columns under eight-bit keys, into `rows` records. A failure is
-/// left on `columns` for the caller to carry up.
-fn read_columns8<T: Colbin>(columns: &mut Reader8<'_>, rows: usize) -> Vec<T> {
-    let mut out = Vec::with_capacity(rows);
-    out.resize_with(rows, T::colbin_zero);
+/// [`read_columns`] under eight-bit keys.
+fn read_columns8<T: Colbin>(columns: &mut Reader8<'_>, out: &mut [T]) {
+    let rows = out.len();
     let mut ints: Vec<i64> = Vec::new();
     let mut strings: Vec<String> = Vec::new();
     while columns.more() {
         let key = columns.key();
         let Some(index) = column_index::<T>(key) else {
             if !columns.skip() {
-                return out;
+                return;
             }
             continue;
         };
@@ -520,15 +550,14 @@ fn read_columns8<T: Colbin>(columns: &mut Reader8<'_>, rows: usize) -> Vec<T> {
             ColumnKind::Str => {
                 strings.clear();
                 columns.strings_into(&mut strings);
-                scatter_strings(&mut out, index, &mut strings, rows);
+                scatter_strings(out, index, &mut strings, rows);
             }
             ColumnKind::Int => {
                 columns.column(rows, &mut ints);
-                scatter_ints(&mut out, index, &ints, rows);
+                scatter_ints(out, index, &ints, rows);
             }
         }
     }
-    out
 }
 
 /// The column a wire key names, or `None` when the type does not declare it.

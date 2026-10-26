@@ -54,10 +54,14 @@ detail bits are assigned:
 | 3 | 0x08 | the body's key run uses eight-bit keys |
 | 2 | 0x04 | a schema section (§10) comes before the body |
 | 1 | 0x02 | a dictionary section (§6.3) comes before the body — prototype |
-| 0 | — | unassigned |
+| 0 | 0x01 | the body holds a grouped table (§6.3) |
 
-So six root bytes exist, and a reader refuses the other ten values in the range
-rather than guess at them:
+Bit 0 changes nothing about how the body reads — a grouped table says so in its
+own descriptor — and exists so that a reader older than groups refuses the
+message: under eight-bit keys a grouped table differs from a whole one by a
+descriptor bit that reader never checked, and it would read the groups as
+columns. A writer sets it whenever the body holds a grouped table; a reader
+masks it off. So the root bytes are:
 
 | byte | body |
 |---|---|
@@ -68,6 +72,9 @@ rather than guess at them:
 | `0xD2` | dictionary section, then narrow keys |
 | `0xDA` | dictionary section, then wide keys |
 
+each also with bit 0 set, and a reader refuses the other values in the range
+rather than guess at them.
+
 A reader dispatches the first four in one switch and reaches the dictionary
 roots only through the branch that would refuse the byte, so a message without
 dictionaries is read exactly as it was before they existed.
@@ -75,7 +82,11 @@ dictionaries is read exactly as it was before they existed.
 The other 240 first bytes are never colbin. `colbin.IsColbin` is a range check on
 0xD0..0xDF, and an application may use any byte outside it for framing of its own
 (`RootFirst`/`RootLast`). There is no version byte: an unassigned root detail is
-how a later version would announce itself, and an older reader refuses it.
+how a later version would announce itself, and an older reader refuses it. With
+bit 0 spent on grouped tables every detail bit is assigned, so the next change
+an older reader has to refuse needs another door — a combination no writer
+produces, such as the dictionary and schema bits together, or SPECIAL `0xF6`
+inside the body.
 
 A reader decodes the body at the width the root byte declares, not the width its
 own type would have chosen.
@@ -173,7 +184,8 @@ A narrow composite is the length form with a body:
 
 A list and a table are both a `[]Struct`, which is why one bit tells them apart; a
 struct and a map are other Go types, so their flags overlap nothing. `f1 = 1` is
-refused.
+set only on a table whose rows are in groups — nibble `1111`, §6.3 — and refused
+everywhere else.
 
 A count is one byte up to 254, or `0xFF` and a u32. A list element carries a
 length and **no descriptor**: its shape is the schema's to know, which is a byte
@@ -217,7 +229,7 @@ the wide width exists, and why a type that has to evolve past its readers uses i
 | 3 COL | 0xB0–0xBF | `[—:2][lw:2]` | the length, then a column (§7) |
 | 4 LIST | 0xC0–0xCF | `[homog:1][—:1][lw:2]` | `[length][count]` then the elements |
 | 5 STRUCT | 0xD0–0xDF | `[k8:1][—:1][lw:2]` | `[length]` then a key run at the width `k8` names |
-| 6 MAP | 0xE0–0xEF | `[sub:1][—:1][lw:2]`; `sub = 1` is a table | `[length][count or rows]` then entries or columns |
+| 6 MAP | 0xE0–0xEF | `[sub:1][grp:1][lw:2]`; `sub = 1` is a table, and `grp = 1` a table in groups (§6.3) | `[length][count or rows]` then entries or columns |
 | 7 SPECIAL | 0xF0–0xFF | below | varies |
 
 `lw` selects a length of 1, 2, 4 or 8 bytes, except in VEC where its single bit
@@ -349,6 +361,41 @@ An integer column whose every value is zero is not written, and its absence mean
 zeros. A string column of only empty strings is omitted too, at both widths, and
 its absence means empty strings.
 
+**Grouped tables** (`wire/groups.go`). A table's rows can be cut into groups,
+each group the column run a table of its rows would hold:
+
+```
+wide:    [key] [0xEC | lw] [length] [rows] [groupRows] group*
+narrow:  [key | 1111]      [length] [rows] [groupRows] group*
+group := [byteLength:u32] column*
+```
+
+- `groupRows` is a count (§3.3), at least 1. Every group holds `groupRows` rows
+  but the last, which holds the rest, and there are exactly ⌈rows / groupRows⌉
+  of them: a group missing, one running past the table, or bytes after the last
+  are refused.
+- A group's columns are keyed as the table's would be, and are absent, zeros or
+  dictionary ids by the same rules — per group, so a column can be absent from
+  one group and present in the next.
+- The group's length is a fixed four bytes rather than a length form, so the
+  writer patches it in place: a group is far past what one byte holds, and a
+  widening backpatch would move it.
+- The message's root byte has bit 0 set (§2.1).
+- Only a table field is grouped. A table in a dynamic value (§9) never is, and a
+  reader refuses one that says it is.
+
+Grouping is the writer's choice, and a reader takes `groupRows` from the message.
+Go groups a table field of more than 4 096 rows into groups of 4 096
+(`wirefmt.TableGroupRows`); Rust writes every table whole. The point is the
+writer's memory: a table is transposed through one buffer holding every column
+of the rows being written, and for a table written whole that is every column
+of every row — 90 MB for TPC-H's lineitem at a tenth of scale, dropped by the
+pool at the next GC and allocated again. A group's columns fit in cache between
+their gather and their write. Encoding TPC-H's normalized tables was 26% faster
+on Lambda x86 and 18% on Graviton2, and decoding 4–7%, for 0.04% more bytes: a
+group's four-byte length, its column headers, and a FOR base or delta seed per
+group.
+
 **Dictionary columns** (prototype, `SetDictionary`, `codec/dictionary.go`). A
 string column whose values repeat can go out as ids into a dictionary the message
 holds once, ahead of its body:
@@ -380,10 +427,11 @@ when every id is zero, since its absence would mean empty strings. Only the type
 decoders read it yet; the JSON walks, `DecodeAny` and the Rust and JS readers
 refuse the root byte.
 
-On the Go side a table is gathered into one reusable column buffer (`scratch`,
-pooled up to 2¹⁶ rows) and scattered straight into the destination slice, so a
-table of any number of columns holds one column in memory at a time. The JSON walk
-cannot do that — a row needs every column's value — so it holds all of them (§12).
+On the Go side a table, or a group of one, is gathered into one reusable column
+buffer (`scratch`, pooled up to 2¹⁶ rows) that holds every column of its rows,
+and decoded through the same buffer before it is scattered into the
+destination slice. The JSON walk holds every column of a table too — a row
+needs every column's value — and of a grouped table one group's at a time (§12).
 
 ### 6.4 Maps
 
@@ -767,7 +815,8 @@ call fails and says how to fix it.
 - **Pages** are merged into the object that links them.
 - **Tables** are transposed back into an array of objects: every column is read
   first, after spending the row budget (§13), and rows are emitted in schema field
-  order. A missing column, or one shorter than the table, renders zeros.
+  order. A missing column, or one shorter than the table, renders zeros. A
+  grouped table is one array, read and emitted a group at a time.
 - **Maps** render in wire order, which is key order. An integer key becomes a
   quoted decimal.
 - **Envelopes** are unwrapped.
@@ -799,6 +848,7 @@ pay for.
 | cells (rows × declared columns) per message | `2²² + 64 × len(message)` | `rowBudget` |
 | a list's count | ≤ its body's bytes | every element is at least one byte |
 | a map's count | ≤ its body's bytes / 2 | |
+| a grouped table's groups | `groupRows` ≥ 1, exactly ⌈rows / groupRows⌉, none past the table and nothing after them | `wire.ErrBadGroup`; Rust `Error::BadGroup` |
 | an integer array's count | ≤ bytes / width | |
 | an integer that does not fit its field | refused (`ErrFieldTooWide`) | a scalar is never truncated |
 | fields per run | 16 narrow, 256 wide | |
@@ -1019,7 +1069,9 @@ The Go side is further covered by fuzz targets over every decoder and codec
 `rust/wasm/Cargo.toml`, `Cargo.lock` and `rust/wasm/Cargo.lock`, and the tag
 `vX.Y.Z` is the Go module version. On 0.x the minor version is the compatibility
 unit: a new op or map kind is a minor bump, because an older reader refuses a
-section that names it.
+section that names it. So is a new root bit, for the same reason: grouped
+tables (§6.3) made the release after 0.6 a minor one, since a 0.6 reader refuses
+a message holding one.
 
 **Releasing:**
 

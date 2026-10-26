@@ -37,7 +37,7 @@
 use super::{
     ELEMENT_SIZE_ESCAPE, INLINE_ELEMENT_SIZE, INT_POSITIVE_FLAG, Integer, MAGNITUDE_WIDTH, Mark,
     append_array, append_count, append_elements, append_magnitude, array_plan_of, count_bytes,
-    le_uint, length_code_for, read_count, size_code_for,
+    groups, le_uint, length_code_for, read_count, size_code_for,
 };
 use crate::{Error, column, packed5};
 use alloc::borrow::ToOwned;
@@ -1156,9 +1156,10 @@ impl<'a> Reader8<'a> {
         })
     }
 
-    /// Returns the row count and a reader over the columns, which are an
-    /// ordinary key run.
-    pub fn table(&mut self) -> Option<(usize, Reader8<'a>)> {
+    /// Returns the row count, the rows per group and the body: for a table
+    /// written whole, 0 and the columns, an ordinary key run; for a grouped
+    /// one, its groups. [`super::Runs`] reads either.
+    pub fn table(&mut self) -> Option<(usize, usize, &'a [u8])> {
         let Some(desc) = self.buf.get(self.at + 1).copied() else {
             self.fail(Error::Truncated);
             return None;
@@ -1168,13 +1169,13 @@ impl<'a> Reader8<'a> {
             return None;
         }
         let body = self.composite_body(CLASS_MAP)?;
-        let Some((rows, at)) = read_count(body) else {
-            self.fail(Error::Truncated);
-            return None;
-        };
-        // The columns are keyed, so unlike a list's elements they read as an
-        // ordinary run and need no cursor offset.
-        Some((rows, Reader8::new(&body[at..])))
+        match groups::table_head(body, desc & groups::GROUPED_FLAG != 0) {
+            Ok(head) => Some(head),
+            Err(err) => {
+                self.fail(err);
+                None
+            }
+        }
     }
 
     /// Reads a column into `dst`. The row count comes from the table, which said

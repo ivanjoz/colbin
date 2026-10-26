@@ -52,13 +52,15 @@ use colbin::diag::Diag;
 use colbin::section::{self, Schema};
 use colbin::walk;
 
-/// The root bytes this version writes. `0xD0` narrow, `0xD8` wide, and the two
-/// with bit 2 set carry their own schema section in front of the body.
+/// The root bytes this version reads. `0xD0` narrow, `0xD8` wide; with bit 2
+/// set they carry their own schema section in front of the body, and with bit
+/// 0 the body holds a grouped table, which the walk reads from its descriptor.
 const ROOT_STRUCT_NARROW: u8 = 0xd0;
 const ROOT_WIDE_BIT: u8 = 0x08;
 const ROOT_SCHEMA_BIT: u8 = 0x04;
+const ROOT_GROUPED_BIT: u8 = 0x01;
 const ROOT_RANGE_MASK: u8 = 0xf0;
-const ROOT_ASSIGNED: u8 = ROOT_WIDE_BIT | ROOT_SCHEMA_BIT;
+const ROOT_ASSIGNED: u8 = ROOT_WIDE_BIT | ROOT_SCHEMA_BIT | ROOT_GROUPED_BIT;
 
 thread_local! {
     /// Held across calls, because the host writes the input in one call and
@@ -170,7 +172,7 @@ pub extern "C" fn decode(len: usize) -> i32 {
         if root & ROOT_RANGE_MASK != ROOT_STRUCT_NARROW {
             return Err(colbin::Error::BadRoot(*root));
         }
-        // Four of sixteen detail values are assigned. The rest must be refused,
+        // Three of the four detail bits are read here. The rest must be refused,
         // which is what leaves room for the format to grow.
         if root & !ROOT_ASSIGNED != ROOT_STRUCT_NARROW {
             return Err(colbin::Error::BadRoot(*root));

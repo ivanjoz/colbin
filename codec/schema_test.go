@@ -334,10 +334,11 @@ func TestSelfDescribingIsMarshalWithAPrefix(t *testing.T) {
 }
 
 // A root byte inside colbin's range that this version does not assign stays
-// refused. Taking 0x04 for the schema must not have opened the other twelve.
+// refused. Taking 0x04 for the schema must not have opened the others, and
+// taking 0x01 for grouped tables opened only the roots it marks.
 func TestUnassignedRootBytesAreStillRefused(t *testing.T) {
 	for root := RootFirst; root <= RootLast; root++ {
-		switch root {
+		switch root &^ rootGrouped {
 		case rootStructNarrow, rootStructWide, rootStructNarrowSchema, rootStructWideSchema:
 			continue
 		}

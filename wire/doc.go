@@ -44,7 +44,9 @@
 // transposed: its body is a key run of columns, each one encoded by the column
 // codec, with the row count stated once. A table's column keys use the wider of
 // the enclosing run's width and the row type's; a reader takes the row type's
-// width from the schema, as it does for a narrow list's elements.
+// width from the schema, as it does for a narrow list's elements. A long table
+// can be cut into groups of rows, each group a column run of its own behind a
+// four-byte length (groups.go).
 //
 // # Reading untrusted input
 //

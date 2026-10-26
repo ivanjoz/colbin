@@ -305,8 +305,7 @@ func MarshalSelfDescribing(v any) ([]byte, error) {
 	}
 	dst := make([]byte, 0, 1+len(schema.section)+plan.sizeHint)
 	dst = append(append(dst, root), schema.section...)
-	body, err := appendRun(dst, plan, record)
-	return body, err
+	return appendRun(dst, 0, plan, record)
 }
 
 // marshalDynamic is MarshalSelfDescribing for a type that can reach a struct the
@@ -324,22 +323,30 @@ func marshalDynamic(root byte, plan *typePlan, record unsafe.Pointer) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
+	if buf.grouped {
+		root |= rootGrouped
+	}
 	section := builder.bytes()
 	dst := make([]byte, 0, 1+len(section)+len(body))
 	return append(append(append(dst, root), section...), body...), nil
 }
 
-// appendRun writes a plan's key run with no root descriptor in front of it,
-// which is what a message whose first byte is already spoken for needs.
+// appendRun writes a plan's key run onto dst, whose root descriptor — at
+// dst[root], with whatever section follows it — is already written, and which
+// it marks if the run held a grouped table.
 //
 // It is deliberately not appendPlan with the root byte hoisted out. appendPlan
 // is the hot path and is shaped around escape analysis — a writer declared per
 // branch, and the flat walk split out so that neither the scratch buffer nor the
 // writer escapes. This one runs once per self-describing message, so it takes
 // the general walk and none of that care.
-func appendRun(dst []byte, plan *typePlan, record unsafe.Pointer) ([]byte, error) {
+func appendRun(dst []byte, root int, plan *typePlan, record unsafe.Pointer) ([]byte, error) {
 	var buf scratch
-	return appendRunInto(dst, plan, record, &buf)
+	out, err := appendRunInto(dst, plan, record, &buf)
+	if err == nil && buf.grouped {
+		out[root] |= rootGrouped
+	}
+	return out, err
 }
 
 // appendRunInto is appendRun with the caller's scratch, which is what carries

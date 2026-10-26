@@ -30,8 +30,9 @@ package wire
 //	class 3 COL      [—:2][lw:2]           [bytelen: lw] a table column (table.go)
 //	class 4 LIST     [homog:1][—:1][lw:2]  [bytelen: lw][count] then elements
 //	class 5 STRUCT   [k8:1][—:1][lw:2]     [bytelen: lw] a nested key run
-//	class 6 MAP      [table:1][—:1][lw:2]  [bytelen: lw][count] entries, or a
-//	                                       table's row count and columns
+//	class 6 MAP      [table:1][grp:1][lw:2] [bytelen: lw][count] entries, or a
+//	                                       table's row count and columns; grp
+//	                                       is a table in groups (groups.go)
 //	class 7 SPECIAL  [detail:4]            null, true, false, the varint below,
 //	                                       and the self-describing values in
 //	                                       dynamic.go

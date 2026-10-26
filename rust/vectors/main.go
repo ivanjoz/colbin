@@ -32,6 +32,7 @@ import (
 
 	"github.com/ivanjoz/colbin"
 	"github.com/ivanjoz/colbin/column"
+	"github.com/ivanjoz/colbin/internal/wirefmt"
 )
 
 // --- the corpus types --------------------------------------------------------
@@ -122,6 +123,21 @@ type WideLine struct {
 type Ledger struct {
 	ID    uint32     `cb:"1"`
 	Lines []WideLine `cb:"2"`
+}
+
+// WideParent is a wide run holding a table of narrow rows, whose columns take
+// the parent's eight-bit keys.
+type WideParent struct {
+	Lines []Line `cb:"1"`
+	Far   uint32 `cb:"20"`
+}
+
+// grouped runs fn with tables grouped past four rows, so that a grouped table
+// is small enough to check in. Go groups past 4096 rows otherwise.
+func grouped(fn func()) {
+	defer func(was int) { wirefmt.TableGroupRows = was }(wirefmt.TableGroupRows)
+	wirefmt.TableGroupRows = 4
+	fn()
 }
 
 func wideLines(count int) []WideLine {
@@ -888,6 +904,16 @@ func walks() []walkCase {
 		catalog())
 	add("doc.map-of-structs-absent", "every map and pointer empty or nil, so absent and null",
 		&Catalog{Name: "none", Tags: &[]string{}})
+	grouped(func() {
+		add("doc.grouped-table", "a table cut into groups of four rows, the last holding the rest",
+			&Order{ID: 5, Lines: lines(10)})
+		add("doc.grouped-wide-rows", "a grouped table of wide rows, each group's columns at eight-bit keys",
+			&Ledger{ID: 6, Lines: wideLines(10)})
+		add("doc.grouped-wide-parent", "a grouped table under a wide parent",
+			&WideParent{Lines: lines(9), Far: 7})
+		add("doc.grouped-records", "an array of records at the root in groups, which materialize reads whole",
+			productsOf(10))
+	})
 
 	// The reader corpus. See the types above for what it covers and why.
 	readers := []struct {
@@ -1183,6 +1209,12 @@ func cases() []caseOut {
 		Ledger{ID: 3, Lines: wideLines(20)})
 	add("ledger.wide rows list", "the same rows under the threshold, each a wide run in a narrow list",
 		Ledger{ID: 4, Lines: wideLines(3)})
+	grouped(func() {
+		add("order.grouped table", "a table cut into groups of four rows, which this port reads and does not write",
+			Order{ID: 7, Lines: lines(10)})
+		add("ledger.grouped wide rows", "a grouped table of wide rows, read only",
+			Ledger{ID: 8, Lines: wideLines(10)})
+	})
 
 	add("maps.empty", "an empty map is an absent key", Maps{})
 	add("maps.one entry each", "a map's keys are values, not field ids", Maps{

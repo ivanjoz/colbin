@@ -597,9 +597,12 @@ fn a_truncated_message_is_refused_rather_than_panicked_on() {
 #[test]
 fn a_message_that_is_not_one_is_refused() {
     assert_eq!(Charge::decode(&[]), Err(Error::Truncated));
-    for root in [0x00_u8, 0x02, 0x04, 0x06, 0x08, 0xD1, 0xFF] {
+    for root in [0x00_u8, 0x02, 0x04, 0x06, 0x08, 0xD2, 0xD3, 0xFF] {
         assert_eq!(Charge::decode(&[root]), Err(Error::BadRoot(root)));
     }
+    // 0xD1 is a narrow root whose body holds a grouped table, which an empty
+    // body does not, and which says nothing a reader needs.
+    assert!(Charge::decode(&[0xD1]).is_ok());
 }
 
 /// A list element is the one composite with no descriptor in front of it, so it cannot widen the

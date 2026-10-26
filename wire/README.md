@@ -71,7 +71,8 @@ length, which is what makes a field skippable without its sub-schema.
 
 A table's body is a key run whose fields are *columns* of `rowcount` values. On a
 four-field row it overtakes a list of structs at three rows and is 2.6× smaller
-by four thousand.
+by four thousand. `groups.go` cuts a long table into groups of rows, each group
+a column run of its own behind a four-byte length.
 
 ## Wire format
 
@@ -118,6 +119,7 @@ string array   1100, then per element
     no count: the reader counts the sizes it walks anyway
 
 composite      11 0 f0 [length] [body] · f0: a struct's k8, or 1 for a table
+grouped table  1111 [length] [rows] [groupRows] ( [u32 length] [columns] )*
 ```
 
 A signed field's positive values cost what an unsigned field's do; a negative

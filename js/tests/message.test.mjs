@@ -57,9 +57,11 @@ test('a first byte outside the reserved range is not colbin', () => {
   }
 })
 
+// 0xD1 and 0xD9 are assigned: the body holds a grouped table. 0xD2 and 0xDA
+// carry a dictionary section, which the module does not read.
 test('an unassigned root detail is refused rather than guessed at', () => {
   wasm.exports.set_schema(0)
-  for (const byte of [0xd1, 0xd2, 0xd3, 0xdb]) {
+  for (const byte of [0xd2, 0xd3, 0xda, 0xdb]) {
     assert.equal(wasm.exports.decode(put(wasm, Uint8Array.from([byte, 0]))), -1)
     assert.match(failure(wasm), /not a root descriptor/)
   }

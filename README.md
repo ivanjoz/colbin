@@ -183,6 +183,13 @@ A `[]Struct` whose element fields are all columnable switches layout at
 The choice is made per field, at encode time, and the two layouts have different
 descriptor classes, so the reader dispatches on what it finds.
 
+A table of more than 4 096 rows is written in **groups** of 4 096, each its own
+set of columns. The encoder then transposes one group at a time rather than the
+whole table, which keeps its memory to a group's worth and its columns in cache:
+TPC-H's normalized tables encode 18–26% faster for 0.04% more bytes. A message
+holding a grouped table says so in its root byte (`0xD1`/`0xD9`), so a reader
+older than groups refuses it rather than misreading it.
+
 | six-field row | bytes per row |
 |---|---:|
 | list of structs, 7 rows | 16.9 |

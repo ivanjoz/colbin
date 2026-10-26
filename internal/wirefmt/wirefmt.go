@@ -52,6 +52,13 @@ const (
 // field's job.
 var ErrFieldTooLarge = errors.New("wire: a narrow field holds at most 2^32-1 bytes")
 
+// TableGroupRows is the rows past which codec writes a table field in groups,
+// and the rows each group holds (wire/groups.go). A reader takes the group size
+// from the message, so this is the writer's choice and not the format's; it is
+// a variable only so that the vector generators can write a grouped table small
+// enough to check in.
+var TableGroupRows = 4096
+
 // AppendMagnitude writes a magnitude's low width bytes, little-endian.
 //
 // It stores all eight and cuts back rather than switching on the width: two

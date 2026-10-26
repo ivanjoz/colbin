@@ -33,6 +33,18 @@ package codec
 // whose fields are integers, bools, floats and strings transposes; one with a
 // nested struct or a slice inside it does not, and stays row-wise however long
 // it gets. That is a property of the element type, so the plan resolves it once.
+//
+// # A long table goes out in groups
+//
+// Past wirefmt.TableGroupRows rows a table is written in groups of that many
+// (wire/groups.go), each transposed and written before the next is gathered. A
+// table gathered whole needed its every column in the scratch at once — 90 MB
+// for TPC-H's lineitem at a tenth of scale, dropped by the pool at the next GC
+// and allocated again — where a group needs a group's, which stays in cache
+// between its gather and its write: encoding TPC-H normalized was 26% faster on
+// x86 and 18% on Graviton2, for 0.04% more bytes. A message holding a grouped
+// table says so in its root byte (rootGrouped), so a reader from before groups
+// refuses it rather than misreading a wide one.
 
 import (
 	"errors"
@@ -41,6 +53,7 @@ import (
 	"unsafe"
 
 	"github.com/ivanjoz/colbin/column"
+	"github.com/ivanjoz/colbin/internal/wirefmt"
 	"github.com/ivanjoz/colbin/wire"
 )
 
@@ -115,6 +128,9 @@ type scratch struct {
 	// dict is the message's string dictionaries, on the dictionary path only.
 	// See dictionary.go.
 	dict *dictionaries
+	// grouped is set when an encode wrote a grouped table, for its caller to
+	// say so in the root byte.
+	grouped bool
 }
 
 // columnBuffers is the transposition buffer, pooled across messages: a table of
@@ -283,9 +299,43 @@ func (buf *scratch) reserveTable(ints, strings int) *columnBuffers {
 // field of the element type.
 func appendTableField(writer *wire.Writer8, field *planField, at unsafe.Pointer, buf *scratch) {
 	slice := (*sliceHeader)(at)
+	if groupRows := wirefmt.TableGroupRows; slice.len > groupRows {
+		mark := writer.OpenGroupedTable(field.key, slice.len, groupRows)
+		writer.Buffer = appendGroups(writer.Buffer, field, slice, groupRows, true, buf)
+		writer.Close(mark)
+		return
+	}
 	mark := writer.OpenTable(field.key, slice.len)
 	appendColumns(writer, field.sub, slice, field.stride, buf, buf.dict)
 	writer.Close(mark)
+}
+
+// appendGroups writes a table's rows as groups of groupRows, each the column
+// run a table of its rows would hold, keyed at eight bits if wide.
+func appendGroups(buffer []byte, field *planField, slice *sliceHeader, groupRows int, wide bool, buf *scratch) []byte {
+	buf.grouped = true
+	for start := 0; start < slice.len; start += groupRows {
+		group := sliceHeader{data: unsafe.Add(slice.data, uintptr(start)*field.stride),
+			len: min(groupRows, slice.len-start)}
+		var at int
+		buffer, at = wire.OpenGroup(buffer)
+		buffer = appendTableColumns(buffer, field, &group, wide, buf)
+		wire.CloseGroup(buffer, at)
+	}
+	return buffer
+}
+
+// appendTableColumns writes the columns of slice's rows onto buffer, keyed at
+// eight bits if wide and at four otherwise.
+func appendTableColumns(buffer []byte, field *planField, slice *sliceHeader, wide bool, buf *scratch) []byte {
+	if wide {
+		writer := wire.Writer8{Buffer: buffer}
+		appendColumns(&writer, field.sub, slice, field.stride, buf, buf.dict)
+		return writer.Buffer
+	}
+	writer := wire.Writer{Buffer: buffer}
+	appendNarrowColumns(&writer, field.sub, slice, field.stride, buf)
+	return writer.Buffer
 }
 
 // appendColumns writes a table's columns with eight-bit keys, which is every
@@ -658,23 +708,63 @@ func gatherStrings(dst []string, slice *sliceHeader, stride, offset uintptr) (pa
 // is the order the column codec wants: it fills a run and the scatter is a
 // strided store.
 func readTableField(reader *wire.Reader8, field *planField, at unsafe.Pointer, buf *scratch) {
-	rows, columns, ok := reader.Table()
+	rows, groupRows, body, ok := reader.Table()
 	if !ok {
 		return
 	}
-	readColumns(&columns, field, at, rows, buf)
-	reader.Fail(columns.Err())
+	reader.Fail(readTable(field, at, rows, groupRows, body, true, buf))
 }
 
-// readColumns fills a slice of structs from a table's eight-bit-keyed columns,
-// after spending its rows from the message's budget.
-func readColumns(columns *wire.Reader8, field *planField, at unsafe.Pointer, rows int, buf *scratch) {
+// readTable fills a slice of structs from a table's body, after spending its
+// rows from the message's budget: the column run, keyed at eight bits if wide,
+// or for a grouped table (groupRows not 0) each group's in turn.
+func readTable(field *planField, at unsafe.Pointer, rows, groupRows int, body []byte, wide bool, buf *scratch) error {
 	if err := takeRows(&buf.rowsLeft, rows, len(field.sub.fields)); err != nil {
-		columns.Fail(err)
-		return
+		return err
 	}
 	reused := newSlice(field, at, rows)
-	table := startTable(field, (*sliceHeader)(at).data, rows, buf)
+	data := (*sliceHeader)(at).data
+	err := readGroups(field, data, rows, groupRows, body, wide, buf)
+	field.sub.reset.settleRows(reused, data, rows, field.stride)
+	return err
+}
+
+func readGroups(field *planField, data unsafe.Pointer, rows, groupRows int, body []byte, wide bool, buf *scratch) error {
+	if groupRows == 0 {
+		return readTableColumns(field, data, rows, body, wide, buf)
+	}
+	for start := 0; start < rows; start += groupRows {
+		columns, rest, err := wire.NextGroup(body)
+		if err != nil {
+			return err
+		}
+		err = readTableColumns(field, unsafe.Add(data, uintptr(start)*field.stride),
+			min(groupRows, rows-start), columns, wide, buf)
+		if err != nil {
+			return err
+		}
+		body = rest
+	}
+	if len(body) != 0 {
+		return wire.ErrBadGroup
+	}
+	return nil
+}
+
+// readTableColumns fills rows rows from data on from a column run.
+func readTableColumns(field *planField, data unsafe.Pointer, rows int, body []byte, wide bool, buf *scratch) error {
+	if !wide {
+		return readNarrowColumns(field, data, rows, body, buf)
+	}
+	columns := wire.NewReader8(body)
+	readColumns(&columns, field, data, rows, buf)
+	return columns.Err()
+}
+
+// readColumns fills rows rows from data on from a table's eight-bit-keyed
+// columns.
+func readColumns(columns *wire.Reader8, field *planField, data unsafe.Pointer, rows int, buf *scratch) {
+	table := startTable(field, data, rows, buf)
 	for columns.More() {
 		column := field.sub.find(columns.Key())
 		if column == nil {
@@ -705,7 +795,6 @@ func readColumns(columns *wire.Reader8, field *planField, at unsafe.Pointer, row
 		}
 	}
 	table.finish()
-	field.sub.reset.settleRows(reused, (*sliceHeader)(at).data, rows, field.stride)
 }
 
 var errColumnLength = errors.New("colbin: a table column holds a different number of values than the table has rows")

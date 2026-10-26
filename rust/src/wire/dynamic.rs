@@ -337,10 +337,18 @@ impl<'a> Reader8<'a> {
         self.map()
     }
 
-    /// The row count and a reader over a key-less table's columns.
+    /// The row count and a reader over a key-less table's columns. A dynamic
+    /// value's table is never grouped, and one that is is refused.
     pub fn element_table(&mut self) -> Option<(usize, Reader8<'a>)> {
         self.step_back();
-        self.table()
+        let (rows, group_rows, columns) = self.table()?;
+        if group_rows != 0 {
+            self.fail(Error::BadDescriptor);
+            return None;
+        }
+        // The columns are keyed, so unlike a list's elements they read as an
+        // ordinary run and need no cursor offset.
+        Some((rows, Reader8::new(columns)))
     }
 
     /// Steps over one key-less value of any kind, which is what lets a reader

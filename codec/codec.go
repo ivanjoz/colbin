@@ -744,6 +744,9 @@ func appendRecord(dst []byte, plan *typePlan, record unsafe.Pointer) ([]byte, er
 	if err != nil {
 		return dst, err
 	}
+	if buf.grouped {
+		out[len(dst)] |= rootGrouped
+	}
 	return out, nil
 }
 

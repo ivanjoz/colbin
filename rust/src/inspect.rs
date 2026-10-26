@@ -48,7 +48,7 @@ use crate::plan::{
     OP_UINT64S, Plan, PlanField,
 };
 use crate::section::{self, Schema};
-use crate::wire::{Reader, Reader8};
+use crate::wire::{Reader, Reader8, Runs};
 
 /// How many of a list's elements get a node of their own.
 const ELEMENT_LIMIT: usize = 64;
@@ -59,6 +59,7 @@ const MAX_DEPTH: u32 = 128;
 const ROOT_FIRST: u8 = 0xd0;
 const ROOT_WIDE: u8 = 0x08;
 const ROOT_SCHEMA: u8 = 0x04;
+const ROOT_GROUPED: u8 = 0x01;
 
 /// One node of the tree, built before it is written so a parent can hold its
 /// children's total.
@@ -98,9 +99,10 @@ pub fn inspect(data: &[u8], schema: Option<&Schema>) -> Result<Vec<u8>, Error> {
     if root & 0xf0 != ROOT_FIRST {
         return Err(Error::BadRoot(root));
     }
-    // Four of sixteen detail values are assigned (wide, schema, both, neither).
-    // The rest must be refused, which is what leaves room for the format to grow.
-    if root & !(ROOT_WIDE | ROOT_SCHEMA) != ROOT_FIRST {
+    // Wide, schema and grouped tables are assigned; the dictionary bit is not
+    // read here. The rest must be refused, which is what leaves room for the
+    // format to grow.
+    if root & !(ROOT_WIDE | ROOT_SCHEMA | ROOT_GROUPED) != ROOT_FIRST {
         return Err(Error::BadRoot(root));
     }
 
@@ -376,7 +378,7 @@ impl SpanWalker {
         node: &mut Node,
         offset: usize,
     ) -> Result<(), Error> {
-        let (rows, body) = reader.table().ok_or(Error::Truncated)?;
+        let (rows, group_rows, body) = reader.table().ok_or(Error::Truncated)?;
         let body_at = offset + reader.cursor() - body.len();
         let sub = self.sub_plan(schema, field)?;
         if self.depth == 1 {
@@ -384,10 +386,56 @@ impl SpanWalker {
         }
         self.enter()?;
         // Wide rows keep their eight-bit keys in a narrow parent's table.
-        if sub.is_wide {
-            self.wide_columns(&mut Reader8::new(body), sub, node, body_at)?;
-            self.leave();
-            return Ok(());
+        self.table_runs(body, rows, group_rows, sub, node, body_at, sub.is_wide)?;
+        self.leave();
+        Ok(())
+    }
+
+    /// A table body's spans: its columns, or for a grouped table one span per
+    /// group, from its length to its last column, holding that group's columns.
+    #[allow(clippy::too_many_arguments)]
+    fn table_runs(
+        &mut self,
+        body: &[u8],
+        rows: usize,
+        group_rows: usize,
+        sub: &Plan,
+        node: &mut Node,
+        body_at: usize,
+        wide: bool,
+    ) -> Result<(), Error> {
+        if group_rows == 0 {
+            return self.columns(body, sub, node, body_at, wide);
+        }
+        for (index, run) in Runs::new(rows, group_rows, body).enumerate() {
+            let (group_size, columns) = run?;
+            let at = body_at + (columns.as_ptr() as usize - body.as_ptr() as usize);
+            let mut group = Node {
+                name: format!("group {index}"),
+                key: -1,
+                type_name: format!("group of {group_size} rows"),
+                optional: false,
+                start: at - 4,
+                end: at + columns.len(),
+                children: Vec::new(),
+            };
+            self.columns(columns, sub, &mut group, at, wide)?;
+            node.children.push(group);
+        }
+        Ok(())
+    }
+
+    /// One span per column of a column run, keyed at eight bits if `wide`.
+    fn columns(
+        &mut self,
+        body: &[u8],
+        sub: &Plan,
+        node: &mut Node,
+        body_at: usize,
+        wide: bool,
+    ) -> Result<(), Error> {
+        if wide {
+            return self.wide_columns(&mut Reader8::new(body), sub, node, body_at);
         }
         let mut columns = Reader::new(body);
         while columns.more() {
@@ -417,9 +465,7 @@ impl SpanWalker {
                 children: Vec::new(),
             });
         }
-        columns.err()?;
-        self.leave();
-        Ok(())
+        columns.err()
     }
 
     fn wide_run(
@@ -559,15 +605,14 @@ impl SpanWalker {
         node: &mut Node,
         offset: usize,
     ) -> Result<(), Error> {
-        let (rows, mut columns) = reader.table().ok_or(Error::Truncated)?;
-        let body_end = offset + reader.cursor();
-        let body_at = body_end - columns.buf_len();
+        let (rows, group_rows, body) = reader.table().ok_or(Error::Truncated)?;
+        let body_at = offset + reader.cursor() - body.len();
         let sub = self.sub_plan(schema, field)?;
         if self.depth == 1 {
             self.rows = i32::try_from(rows).unwrap_or(i32::MAX);
         }
         self.enter()?;
-        self.wide_columns(&mut columns, sub, node, body_at)?;
+        self.table_runs(body, rows, group_rows, sub, node, body_at, true)?;
         self.leave();
         Ok(())
     }

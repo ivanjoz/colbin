@@ -32,7 +32,7 @@
 use super::{
     ELEMENT_SIZE_ESCAPE, INLINE_ELEMENT_SIZE, INT_POSITIVE_FLAG, Integer, LENGTH_WIDTH,
     MAGNITUDE_WIDTH, Mark, UINT_INLINE_MAX, UINT_WIDTH_BASE, append_array, append_count,
-    append_elements, append_magnitude, bit_length, le_uint, length_code_for, read_count,
+    append_elements, append_magnitude, bit_length, groups, le_uint, length_code_for, read_count,
     size_code_for,
 };
 use crate::Error;
@@ -1123,9 +1123,9 @@ impl<'a> Reader<'a> {
     /// Reports whether the field at the cursor is a table rather than a list. A
     /// writer chooses between them on the row count, so a reader has to ask.
     pub fn is_table(&self) -> bool {
-        self.buf
-            .get(self.at)
-            .is_some_and(|header| header & 0b1111 == NIBBLE_LENGTH | COMPOSITE_TABLE)
+        self.buf.get(self.at).is_some_and(|header| {
+            header & 0b1111 & !groups::NARROW_GROUPED == NIBBLE_LENGTH | COMPOSITE_TABLE
+        })
     }
 
     /// Returns the element count of a list or a map and a reader over what
@@ -1139,16 +1139,22 @@ impl<'a> Reader<'a> {
         Some((count, Reader::new(&body[at..])))
     }
 
-    /// Returns a table's row count and its columns' bytes, which the caller
-    /// reads at the row type's key width: four bits when that type's are, and
-    /// eight when the rows are wide, whatever this run's width is.
-    pub fn table(&mut self) -> Option<(usize, &'a [u8])> {
-        let (_, body) = self.composite(|flag| flag == COMPOSITE_TABLE)?;
-        let Some((rows, at)) = read_count(body) else {
-            self.fail(Error::Truncated);
-            return None;
-        };
-        Some((rows, &body[at..]))
+    /// Returns a table's row count, its rows per group and its body. A table
+    /// written whole has 0 rows per group and its body is the columns, which
+    /// the caller reads at the row type's key width: four bits when that type's
+    /// are, and eight when the rows are wide, whatever this run's width is. A
+    /// grouped table's body is its groups; [`super::Runs`] reads either.
+    pub fn table(&mut self) -> Option<(usize, usize, &'a [u8])> {
+        let (flag, body) = self.composite(|flag| {
+            flag == COMPOSITE_TABLE || flag == COMPOSITE_TABLE | groups::NARROW_GROUPED
+        })?;
+        match groups::table_head(body, flag & groups::NARROW_GROUPED != 0) {
+            Ok(head) => Some(head),
+            Err(err) => {
+                self.fail(err);
+                None
+            }
+        }
     }
 
     /// Returns one narrow list element's body: a length and then a key run.

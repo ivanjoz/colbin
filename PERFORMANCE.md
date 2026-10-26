@@ -464,6 +464,38 @@ Lambda Graviton2, against `da29574`: normalized encode **161 → 104 ms** (msgpa
 101 ms, 0.66× → 0.97×), 116 → 96 MB a call; the rest unchanged. Same bytes, held
 by `TestWidenedColumnsEncodeAsInt64Ones`.
 
+### Tables in row groups
+
+A table field past 4 096 rows is now written in groups of 4 096, each its own
+column run (INTERNALS §6.3, a format change: root bit 0x01). The encoder
+gathers, transposes and writes a group before it touches the next, so its
+scratch is a group's — under 1 MB where TPC-H's lineitem needed 90 MB, which
+`sync.Pool` loses at every collection and the next call allocates again — and
+the group's columns are still in cache when they are scanned and packed.
+
+Lambda, msgpack/colbin before → after, the prototype against `9aaa4e1`:
+
+| TPC-H normalized | x86 | Graviton2 |
+|---|---|---|
+| encode | 1.01× → **1.40×** (74.9 → 55.2 ms, −26%) | 1.01× → **1.22×** (102.3 → 84.4 ms, −18%) |
+| decode-fresh | 1.57× → 1.86× | 2.18× → 2.26× (−7%) |
+| decode-reuse | 1.76× → 1.93× (−4%) | 2.69× → 2.72× (−2%) |
+
+Bytes +0.04% (a group's length, its column headers, a FOR base or delta seed
+per group); 16 384- and 65 536-row groups cost +0.01% and +0.003% for less of
+the gain. Every other case has no table that long and is unchanged. Locally the
+final code against `9aaa4e1`: normalized encode −13.8% and 2.3 MB → 30 B
+allocated a call, the rest within noise. A grouped decode allocates one string
+arena per string column per group instead of per table (13 → 887 allocations
+on normalized, against msgpack's 2.25 M), for fewer bytes.
+
+**Measured with it and dropped: the list loop in the kernel.** `writeRows` calls
+the row kernel once per element of a short narrow list; a "rows mode" that
+looped over the elements inside one kernel entry, writing each length byte
+itself, was +1.5% on sales encode locally and −1.2 to −2.7% on Lambda, inside
+msgpack's own drift between builds. Not worth a second loop in two assembly
+files.
+
 ## Lessons for the next pass
 
 - **Go's inliner budget (80) is load-bearing here.** Moving the writers to
@@ -513,9 +545,8 @@ by `TestWidenedColumnsEncodeAsInt64Ones`.
   allocates nothing — TPC-H normalized encode into a reused buffer (92 MB
   against 0.1) and normalized decode-reuse (323 MB against 223), both the
   transposition scratch, which `sync.Pool` loses at every collection inside the
-  call. Bounding it needs the table written in row groups (a format change) or
-  three passes over the rows: the transform is scored on block costs that need
-  the column's minimum first.
+  call. Row groups (above) bound it: 92.5 → 0.87 MB on normalized encode, and
+  decode-reuse 323 → 213 MB, level with msgpack.
 - **Scratch at each column's native width**, with int32 AVX2 kernels; without
   them it costs more on the scans than it saves on the traffic.
 - **Unpack in assembly.** Less to win than before: the fused read no longer

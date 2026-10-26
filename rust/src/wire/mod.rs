@@ -79,11 +79,13 @@ use alloc::vec::Vec;
 
 mod bitmap;
 mod dynamic;
+mod groups;
 mod narrow;
 mod wide;
 
 pub use bitmap::{BitmapReader, BitmapWriter, MAX_BITMAP_KEY};
 pub use dynamic::{Kind, kind_of};
+pub use groups::Runs;
 pub use narrow::{Reader, Writer};
 pub use wide::{Reader8, Writer8};
 

@@ -84,7 +84,14 @@ func TestEveryCaseRoundTrips(t *testing.T) {
 			// re-encodes raw unless it is turned back on for the comparison.
 			packed := strings.HasPrefix(one.Name, "packed5.")
 			colbin.SetPacked5(packed)
-			again, err := colbin.Marshal(into)
+			// So is the group size, which the grouped cases make small.
+			var again []byte
+			marshal := func() { again, err = colbin.Marshal(into) }
+			if strings.Contains(one.Name, ".grouped ") {
+				grouped(marshal)
+			} else {
+				marshal()
+			}
 			colbin.SetPacked5(false)
 			if err != nil {
 				t.Fatalf("re-encode: %v", err)

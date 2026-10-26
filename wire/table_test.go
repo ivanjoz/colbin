@@ -31,6 +31,28 @@ func makeRows(n int) []tableRow {
 }
 
 func writeTable(buffer []byte, rows []tableRow) []byte {
+	writer := Writer8{Buffer: buffer}
+	mark := writer.OpenTable(0, len(rows))
+	writer.Buffer = writeColumns(writer.Buffer, rows)
+	writer.Close(mark)
+	return writer.Buffer
+}
+
+// writeGroupedTable is writeTable in groups of groupRows.
+func writeGroupedTable(buffer []byte, rows []tableRow, groupRows int) []byte {
+	writer := Writer8{Buffer: buffer}
+	mark := writer.OpenGroupedTable(0, len(rows), groupRows)
+	for start := 0; start < len(rows); start += groupRows {
+		var at int
+		writer.Buffer, at = OpenGroup(writer.Buffer)
+		writer.Buffer = writeColumns(writer.Buffer, rows[start:min(start+groupRows, len(rows))])
+		CloseGroup(writer.Buffer, at)
+	}
+	writer.Close(mark)
+	return writer.Buffer
+}
+
+func writeColumns(buffer []byte, rows []tableRow) []byte {
 	ids := make([]int64, len(rows))
 	users := make([]int64, len(rows))
 	amounts := make([]int64, len(rows))
@@ -40,12 +62,10 @@ func writeTable(buffer []byte, rows []tableRow) []byte {
 		amounts[index], names[index] = row.Amount, row.Name
 	}
 	writer := Writer8{Buffer: buffer}
-	mark := writer.OpenTable(0, len(rows))
 	writer.Column(0, ids)
 	writer.Column(1, users)
 	writer.Column(2, amounts)
 	writer.StringColumn(3, names)
-	writer.Close(mark)
 	return writer.Buffer
 }
 
@@ -66,11 +86,33 @@ func writeRowWise(buffer []byte, rows []tableRow) []byte {
 
 func readTable(message []byte) ([]tableRow, error) {
 	reader := NewReader8(message)
-	rows, columns, ok := reader.Table()
+	rows, groupRows, body, ok := reader.Table()
 	if !ok {
 		return nil, reader.Err()
 	}
 	out := make([]tableRow, rows)
+	if groupRows == 0 {
+		return out, readColumns(body, out)
+	}
+	for start := 0; start < rows; start += groupRows {
+		columns, rest, err := NextGroup(body)
+		if err != nil {
+			return nil, err
+		}
+		if err := readColumns(columns, out[start:min(start+groupRows, rows)]); err != nil {
+			return nil, err
+		}
+		body = rest
+	}
+	if len(body) != 0 {
+		return nil, ErrBadGroup
+	}
+	return out, nil
+}
+
+func readColumns(body []byte, out []tableRow) error {
+	columns := NewReader8(body)
+	rows := len(out)
 	for columns.More() {
 		switch columns.Key() {
 		case 0:
@@ -93,24 +135,80 @@ func readTable(message []byte) ([]tableRow, error) {
 			columns.Skip()
 		}
 	}
-	return out, columns.Err()
+	return columns.Err()
 }
 
 func TestTableRoundTrip(t *testing.T) {
 	for _, n := range []int{1, 2, 3, 10, 128, 129, 1000} {
 		rows := makeRows(n)
-		back, err := readTable(writeTable(nil, rows))
-		if err != nil {
-			t.Fatalf("n=%d: %v", n, err)
-		}
-		if len(back) != n {
-			t.Fatalf("n=%d: read %d rows", n, len(back))
-		}
-		for index := range rows {
-			if back[index] != rows[index] {
-				t.Fatalf("n=%d row %d: %+v, want %+v", n, index, back[index], rows[index])
+		// groupRows 0 is the table written whole.
+		for _, groupRows := range []int{0, 1, 7, 128, 1000} {
+			message := writeTable(nil, rows)
+			if groupRows != 0 {
+				message = writeGroupedTable(nil, rows, groupRows)
+			}
+			back, err := readTable(message)
+			if err != nil {
+				t.Fatalf("n=%d groups of %d: %v", n, groupRows, err)
+			}
+			if !slices.Equal(back, rows) {
+				t.Fatalf("n=%d groups of %d: read %+v", n, groupRows, back)
 			}
 		}
+	}
+}
+
+// A grouped table is refused, never misread, when its groups and its rows
+// disagree, and a narrow one is told from a list as a table written whole is.
+func TestGroupedTableFraming(t *testing.T) {
+	rows := makeRows(10)
+	message := writeGroupedTable(nil, rows, 4)
+	reader := NewReader8(message)
+	if !reader.IsTable() {
+		t.Fatal("a grouped table is not a table")
+	}
+	for cut := 1; cut < len(message); cut++ {
+		if _, err := readTable(message[:cut]); err == nil {
+			t.Fatalf("a grouped table cut at %d of %d read", cut, len(message))
+		}
+	}
+	// Rows per group of zero.
+	zero := slices.Clone(message)
+	zero[4] = 0
+	if _, err := readTable(zero); err == nil {
+		t.Fatal("a table of groups of no rows read")
+	}
+
+	narrow := Writer{}
+	mark := narrow.OpenGroupedTable(3, 2, 1)
+	for range 2 {
+		var at int
+		narrow.Buffer, at = OpenGroup(narrow.Buffer)
+		narrow.Column(0, []int64{5})
+		CloseGroup(narrow.Buffer, at)
+	}
+	narrow.Close(mark)
+	if narrow.Buffer[0] != 3<<4|0b1111 {
+		t.Fatalf("a narrow grouped table opens %#02x", narrow.Buffer[0])
+	}
+	read := NewReader(narrow.Buffer)
+	if !read.IsTable() {
+		t.Fatal("a narrow grouped table is not a table")
+	}
+	got, groupRows, body, ok := read.Table()
+	if !ok || got != 2 || groupRows != 1 {
+		t.Fatalf("a narrow grouped table read as %d rows in groups of %d, %v", got, groupRows, read.Err())
+	}
+	for range 2 {
+		columns, rest, err := NextGroup(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		group := NewReader(columns)
+		if group.Key() != 0 || group.Column(1, nil)[0] != 5 {
+			t.Fatalf("a group read as %x", columns)
+		}
+		body = rest
 	}
 }
 
@@ -134,7 +232,8 @@ func TestAZeroColumnIsAbsent(t *testing.T) {
 	// Only the id column carries anything: the two zero integer columns and the
 	// all-empty string column are all absent.
 	reader := NewReader8(message)
-	_, columns, _ := reader.Table()
+	_, _, body, _ := reader.Table()
+	columns := NewReader8(body)
 	keys := []uint8{}
 	for columns.More() {
 		keys = append(keys, columns.Key())

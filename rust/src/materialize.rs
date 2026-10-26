@@ -103,7 +103,8 @@ pub fn to_buffer(schema: &Schema, message: &[u8], wide: bool) -> Result<Option<V
     let at = field.sub.ok_or(Error::BadSection)?;
     let sub_plan = schema.plan(at).ok_or(Error::BadSection)?;
 
-    let (rows, gathered) = if wide {
+    // Wide rows keep their eight-bit keys in a narrow parent's table.
+    let (rows, group_rows, body) = if wide {
         let mut reader = Reader8::new(message);
         if !(reader.more() && reader.key() == field.key) {
             return Ok(None);
@@ -111,13 +112,9 @@ pub fn to_buffer(schema: &Schema, message: &[u8], wide: bool) -> Result<Option<V
         if !reader.is_table() {
             return Ok(None);
         }
-        let (rows, mut columns) = reader.table().ok_or(Error::Truncated)?;
-        if rows > MAX_ROWS {
-            return Err(Error::TooManyRows);
-        }
-        let gathered = gather_wide(sub_plan, &mut columns, rows)?;
+        let table = reader.table().ok_or(Error::Truncated)?;
         reader.err()?;
-        (rows, gathered)
+        table
     } else {
         let mut reader = Reader::new(message);
         if !(reader.more() && reader.key() == field.key) {
@@ -126,57 +123,17 @@ pub fn to_buffer(schema: &Schema, message: &[u8], wide: bool) -> Result<Option<V
         if !reader.is_table() {
             return Ok(None);
         }
-        let (rows, body) = reader.table().ok_or(Error::Truncated)?;
-        if rows > MAX_ROWS {
-            return Err(Error::TooManyRows);
-        }
-        // Wide rows keep their eight-bit keys in a narrow parent's table.
-        if sub_plan.is_wide {
-            let gathered = gather_wide(sub_plan, &mut Reader8::new(body), rows)?;
-            reader.err()?;
-            let columns = build_columns(sub_plan, &gathered, rows)?;
-            return Ok(Some(write_buffer(sub_plan, rows, &columns)));
-        }
-        let mut columns = Reader::new(body);
-        let mut gathered = Gathered::new(sub_plan.fields.len());
-        while columns.more() {
-            let Some(index) = sub_plan.field_of(columns.key()) else {
-                columns.skip();
-                columns.err()?;
-                continue;
-            };
-            let op = sub_plan.fields[index].op;
-            gathered.take(&mut columns, index, op, rows);
-            columns.err()?;
-        }
-        columns.err()?;
+        let table = reader.table().ok_or(Error::Truncated)?;
         reader.err()?;
-        (rows, gathered)
+        table
     };
-
+    if rows > MAX_ROWS {
+        return Err(Error::TooManyRows);
+    }
+    let gathered =
+        Gathered::read_table(sub_plan, rows, group_rows, body, wide || sub_plan.is_wide)?;
     let columns = build_columns(sub_plan, &gathered, rows)?;
     Ok(Some(write_buffer(sub_plan, rows, &columns)))
-}
-
-/// A table's columns under eight-bit keys, with an unknown one stepped over.
-fn gather_wide<'m>(
-    table: &Plan,
-    columns: &mut Reader8<'m>,
-    rows: usize,
-) -> Result<Gathered<'m>, Error> {
-    let mut gathered = Gathered::new(table.fields.len());
-    while columns.more() {
-        let Some(index) = table.field_of(columns.key()) else {
-            columns.skip();
-            columns.err()?;
-            continue;
-        };
-        let op = table.fields[index].op;
-        gathered.take8(columns, index, op, rows);
-        columns.err()?;
-    }
-    columns.err()?;
-    Ok(gathered)
 }
 
 /// One gathered column, transformed to the value it means — the same

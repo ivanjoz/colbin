@@ -261,7 +261,7 @@ func resolveSchema(schema *Schema, data []byte) (resolved *Schema, body []byte, 
 	}
 	section, body, wide, ok := rootParts(data)
 	if !ok {
-		if data[0] == rootStructNarrowSchema || data[0] == rootStructWideSchema {
+		if root := data[0] &^ rootGrouped; root == rootStructNarrowSchema || root == rootStructWideSchema {
 			return nil, nil, false, errShortSection
 		}
 		return nil, nil, false, fmt.Errorf(
@@ -722,9 +722,8 @@ func (w *walker) structList(count int, elements *wire.Reader8, plan *typePlan) {
 //
 // So a table costs its whole self in memory for the length of the walk, and the
 // alternative — one pass over the message per row — is worse by the row count.
-// The peak is the same buffer `scratch` already holds on the encode side, except
-// that it is every column at once rather than one at a time, and it is
-// documented rather than hidden.
+// A grouped table (wire/groups.go) costs a group: its groups are walked one
+// after another into the same columns.
 //
 // The row count is the message's claim, and nothing in the message bounds it:
 // an absent column is a column of zeros. Both this walk and the typed decoder
@@ -751,62 +750,33 @@ func newTableColumns(fields int) *tableColumns {
 // the row type's width — which, as for a narrow list's elements, the schema
 // says and the wire does not.
 func (w *walker) narrowTable(reader *wire.Reader, field *planField) {
-	rows, body, ok := reader.Table()
+	rows, groupRows, body, ok := reader.Table()
 	if !ok {
 		w.fail(reader.Err())
 		return
 	}
-	sub := field.sub
-	if sub == nil {
+	if field.sub == nil {
 		w.fail(errNoSubSchema)
 		return
 	}
-	if sub.isWide {
-		columns := wire.NewReader8(body)
-		w.structTable(rows, &columns, sub)
-		return
-	}
-	if err := takeRows(&w.rowsLeft, rows, len(sub.fields)); err != nil {
-		w.fail(err)
-		return
-	}
-	columns := wire.NewReader(body)
-	gathered := newTableColumns(len(sub.fields))
-	for columns.More() {
-		index := sub.findIndex(columns.Key())
-		if index < 0 {
-			if !columns.Skip() {
-				w.fail(columns.Err())
-				return
-			}
-			continue
-		}
-		if sub.fields[index].op == opString {
-			gathered.strings[index] = columns.StringsBytes(nil)
-		} else {
-			gathered.ints[index] = columns.Column(rows, nil)
-		}
-		gathered.present[index] = true
-	}
-	if err := columns.Err(); err != nil {
-		w.fail(err)
-		return
-	}
-	w.tableRows(sub, gathered, rows)
+	w.table(field.sub, rows, groupRows, body, field.sub.isWide)
 }
 
 func (w *walker) wideTable(reader *wire.Reader8, field *planField) {
-	rows, columns, ok := reader.Table()
+	rows, groupRows, body, ok := reader.Table()
 	if !ok {
 		w.fail(reader.Err())
 		return
 	}
-	w.structTable(rows, &columns, field.sub)
+	if field.sub == nil {
+		w.fail(errNoSubSchema)
+		return
+	}
+	w.table(field.sub, rows, groupRows, body, true)
 }
 
-// structTable walks a table whose columns are keyed at eight bits: under a wide
-// parent, under a narrow one whose rows are wide, or reached by a dynamic value
-// through a TYPED tag.
+// structTable walks a table a dynamic value reached through a TYPED tag, whose
+// columns are keyed at eight bits and never grouped.
 func (w *walker) structTable(rows int, columns *wire.Reader8, sub *typePlan) {
 	if sub == nil {
 		w.fail(errNoSubSchema)
@@ -816,37 +786,115 @@ func (w *walker) structTable(rows int, columns *wire.Reader8, sub *typePlan) {
 		w.fail(err)
 		return
 	}
-	gathered := newTableColumns(len(sub.fields))
-	for columns.More() {
-		index := sub.findIndex(columns.Key())
-		if index < 0 {
-			if !columns.Skip() {
-				w.fail(columns.Err())
-				return
-			}
-			continue
-		}
-		if sub.fields[index].op == opString {
-			gathered.strings[index] = columns.StringsBytes(nil)
-		} else {
-			gathered.ints[index] = columns.Column(rows, nil)
-		}
-		gathered.present[index] = true
-	}
-	if err := columns.Err(); err != nil {
-		w.fail(err)
-		return
-	}
-	w.tableRows(sub, gathered, rows)
-}
-
-// tableRows is the transpose itself.
-func (w *walker) tableRows(sub *typePlan, gathered *tableColumns, rows int) {
 	if !w.enter() {
 		return
 	}
 	defer w.leave()
 	w.to.beginArray()
+	gathered := newTableColumns(len(sub.fields))
+	if err := gathered.read8(columns, sub, rows); err != nil {
+		w.fail(err)
+		return
+	}
+	w.tableRows(sub, gathered, rows)
+	if w.err == nil {
+		w.to.endArray()
+	}
+}
+
+// table walks a table's body: its column run, keyed at eight bits if wide, or
+// for a grouped table (groupRows not 0) each group's in turn, as one array.
+func (w *walker) table(sub *typePlan, rows, groupRows int, body []byte, wide bool) {
+	if err := takeRows(&w.rowsLeft, rows, len(sub.fields)); err != nil {
+		w.fail(err)
+		return
+	}
+	if !w.enter() {
+		return
+	}
+	defer w.leave()
+	w.to.beginArray()
+	gathered := newTableColumns(len(sub.fields))
+	if groupRows == 0 {
+		if err := gathered.read(body, sub, rows, wide); err != nil {
+			w.fail(err)
+			return
+		}
+		w.tableRows(sub, gathered, rows)
+	}
+	for start := 0; groupRows != 0 && start < rows && w.err == nil; start += groupRows {
+		columns, rest, err := wire.NextGroup(body)
+		if err != nil {
+			w.fail(err)
+			return
+		}
+		size := min(groupRows, rows-start)
+		if err := gathered.read(columns, sub, size, wide); err != nil {
+			w.fail(err)
+			return
+		}
+		w.tableRows(sub, gathered, size)
+		body = rest
+	}
+	if groupRows != 0 && len(body) != 0 {
+		w.fail(wire.ErrBadGroup)
+	}
+	if w.err == nil {
+		w.to.endArray()
+	}
+}
+
+// read decodes a column run of rows rows into the columns, over what the last
+// group left in them.
+func (gathered *tableColumns) read(body []byte, sub *typePlan, rows int, wide bool) error {
+	if wide {
+		columns := wire.NewReader8(body)
+		return gathered.read8(&columns, sub, rows)
+	}
+	clear(gathered.present)
+	columns := wire.NewReader(body)
+	for columns.More() {
+		index := sub.findIndex(columns.Key())
+		if index < 0 {
+			if !columns.Skip() {
+				return columns.Err()
+			}
+			continue
+		}
+		if sub.fields[index].op == opString {
+			gathered.strings[index] = columns.StringsBytes(gathered.strings[index][:0])
+		} else {
+			gathered.ints[index] = columns.Column(rows, gathered.ints[index])
+		}
+		gathered.present[index] = true
+	}
+	return columns.Err()
+}
+
+// read8 is read for a column run keyed at eight bits.
+func (gathered *tableColumns) read8(columns *wire.Reader8, sub *typePlan, rows int) error {
+	clear(gathered.present)
+	for columns.More() {
+		index := sub.findIndex(columns.Key())
+		if index < 0 {
+			if !columns.Skip() {
+				return columns.Err()
+			}
+			continue
+		}
+		if sub.fields[index].op == opString {
+			gathered.strings[index] = columns.StringsBytes(gathered.strings[index][:0])
+		} else {
+			gathered.ints[index] = columns.Column(rows, gathered.ints[index])
+		}
+		gathered.present[index] = true
+	}
+	return columns.Err()
+}
+
+// tableRows is the transpose itself: rows objects, without the array around
+// them, which a grouped table writes once for all its groups.
+func (w *walker) tableRows(sub *typePlan, gathered *tableColumns, rows int) {
 	for row := range rows {
 		if w.err != nil {
 			return
@@ -868,7 +916,6 @@ func (w *walker) tableRows(sub *typePlan, gathered *tableColumns, rows int) {
 		}
 		w.to.endObject()
 	}
-	w.to.endArray()
 }
 
 // elementAt reads a column at a row, and answers zero past its end. A column

@@ -8,11 +8,13 @@ package wire
 //	struct  [key:4][1 1 0 k8]    [length] [key run]
 //	list    [key:4][1 1 0 0]     [length] [count] ( [len] [body] )*
 //	table   [key:4][1 1 0 1]     [length] [rows]  column run
+//	        [key:4][1 1 1 1]     [length] [rows] [groupRows] group*
 //	map     [key:4][1 1 0 0]     [length] [count] ( key value )*
 //
 // The flag bit f0 tells apart only what the schema cannot: a struct's own key
 // width, and whether a []Struct went out as a list or a table. A struct and a
-// map are other Go types, so their flags overlap nothing. f1 is refused.
+// map are other Go types, so their flags overlap nothing. f1 is set only on a
+// table whose rows are in groups (groups.go), and refused everywhere else.
 //
 // A table's column run uses the row type's key width, which the reader takes
 // from the schema as it does a list element's shape: a four-bit integer column
@@ -259,9 +261,10 @@ func (r *Reader) StructBody() (body []byte, wideKeys, ok bool) {
 	return body, flags == narrowWideKeys, ok
 }
 
-// IsTable reports whether the field at the cursor is a table rather than a list.
+// IsTable reports whether the field at the cursor is a table rather than a list,
+// grouped or not.
 func (r *Reader) IsTable() bool {
-	return r.at < len(r.buffer) && r.buffer[r.at]&0b1111 == nibbleLength|narrowTable
+	return r.at < len(r.buffer) && r.buffer[r.at]&0b1111&^narrowGrouped == nibbleLength|narrowTable
 }
 
 // List returns a list's element count and a reader over its elements. The count
@@ -285,27 +288,33 @@ func (r *Reader) counted(minSize int) (int, Reader, bool) {
 	return count, Reader{buffer: body[at:]}, true
 }
 
-// Table returns a table's row count and its column run, whose key width the
-// caller knows from the row type: NewReader or NewReader8 over it accordingly.
+// Table returns a table's row count, its rows per group and its body. A table
+// written whole has groupRows 0 and its body is the column run, whose key width
+// the caller knows from the row type: NewReader or NewReader8 over it
+// accordingly. A grouped one's body is its groups, for NextGroup (groups.go).
 //
 // The row count is not bounded by the message — an absent column is a column of
 // zeros, so a table of a million rows can be a few bytes — and a caller that
 // allocates for it must budget rows itself.
-func (r *Reader) Table() (rows int, columns []byte, ok bool) {
-	body, flags, ok := r.compositeBody()
+func (r *Reader) Table() (rows, groupRows int, body []byte, ok bool) {
+	nibble, start, size, ok := r.field()
 	if !ok {
-		return 0, nil, false
+		return 0, 0, nil, false
 	}
-	if flags != narrowTable {
+	if nibble&^flagBits != nibbleLength {
+		r.fail(ErrBadEscape)
+		return 0, 0, nil, false
+	}
+	if nibble&narrowTable == 0 {
 		r.fail(ErrBadDescriptor)
-		return 0, nil, false
+		return 0, 0, nil, false
 	}
-	rows, at, ok := readCount(body)
-	if !ok {
-		r.fail(ErrTruncated)
-		return 0, nil, false
+	rows, groupRows, body, err := tableHead(r.buffer[start:start+size], nibble&narrowGrouped != 0)
+	if err != nil {
+		r.fail(err)
+		return 0, 0, nil, false
 	}
-	return rows, body[at:], true
+	return rows, groupRows, body, true
 }
 
 // Element returns one narrow list element's body: a length and then a key run.

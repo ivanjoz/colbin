@@ -29,7 +29,7 @@ use crate::plan::{
     OP_UINT16, OP_UINT32, OP_UINT64, Plan, PlanField,
 };
 use crate::section::Schema;
-use crate::wire::{Kind, Reader, Reader8};
+use crate::wire::{Kind, Reader, Reader8, Runs};
 
 /// Whether a map kind is one the format accepts as a key.
 ///
@@ -829,40 +829,47 @@ impl<'s> Walker<'s> {
 
     fn narrow_table(&mut self, reader: &mut Reader<'_>, field: &PlanField) -> Result<(), Error> {
         let at = field.sub.ok_or(Error::BadSection)?;
-        let (rows, body) = reader.table().ok_or(Error::Truncated)?;
+        let (rows, group_rows, body) = reader.table().ok_or(Error::Truncated)?;
         // The columns are keyed at the row type's width, which for wide rows is
         // not this run's. See `codec::write_table`.
-        if self.plan_at(at)?.is_wide {
-            return self.struct_table(at, rows, &mut Reader8::new(body));
-        }
-        if rows > MAX_ROWS {
-            return Err(Error::TooManyRows);
-        }
-        let mut columns = Reader::new(body);
-        let plan = self.plan_at(at)?;
-        let mut gathered = Gathered::new(plan.fields.len());
-        while columns.more() {
-            let Some(index) = plan.field_of(columns.key()) else {
-                columns.skip();
-                columns.err()?;
-                continue;
-            };
-            let op = plan.fields[index].op;
-            gathered.take(&mut columns, index, op, rows);
-            columns.err()?;
-        }
-        columns.err()?;
-        self.table_rows(at, &gathered, rows)
+        let wide = self.plan_at(at)?.is_wide;
+        self.table(at, rows, group_rows, body, wide)
     }
 
     fn wide_table(&mut self, reader: &mut Reader8<'_>, field: &PlanField) -> Result<(), Error> {
         let at = field.sub.ok_or(Error::BadSection)?;
-        let (rows, mut columns) = reader.table().ok_or(Error::Truncated)?;
-        self.struct_table(at, rows, &mut columns)
+        let (rows, group_rows, body) = reader.table().ok_or(Error::Truncated)?;
+        self.table(at, rows, group_rows, body, true)
     }
 
-    /// An opened table's columns, for the reason [`Walker::struct_list`] is
-    /// split out: a dynamic value reaches the same columns through a TYPED tag.
+    /// A table's body as one array: its columns, keyed at eight bits if `wide`,
+    /// or for a grouped table each group's in turn, so that a group's columns
+    /// are all it holds at once.
+    fn table(
+        &mut self,
+        at: u32,
+        rows: usize,
+        group_rows: usize,
+        body: &[u8],
+        wide: bool,
+    ) -> Result<(), Error> {
+        if rows > MAX_ROWS {
+            return Err(Error::TooManyRows);
+        }
+        self.enter()?;
+        self.to.begin_array();
+        for run in Runs::new(rows, group_rows, body) {
+            let (rows, columns) = run?;
+            let gathered = Gathered::read(self.plan_at(at)?, columns, rows, wide)?;
+            self.table_rows(at, &gathered, rows)?;
+        }
+        self.to.end_array();
+        self.leave();
+        Ok(())
+    }
+
+    /// A table a dynamic value reached through a TYPED tag, for the reason
+    /// [`Walker::struct_list`] is split out. It is never grouped.
     fn struct_table(
         &mut self,
         at: u32,
@@ -885,13 +892,17 @@ impl<'s> Walker<'s> {
             columns.err()?;
         }
         columns.err()?;
-        self.table_rows(at, &gathered, rows)
-    }
-
-    /// The transpose itself.
-    fn table_rows(&mut self, plan_at: u32, gathered: &Gathered, rows: usize) -> Result<(), Error> {
         self.enter()?;
         self.to.begin_array();
+        self.table_rows(at, &gathered, rows)?;
+        self.to.end_array();
+        self.leave();
+        Ok(())
+    }
+
+    /// The transpose itself: `rows` objects, without the array around them,
+    /// which a grouped table writes once for all its groups.
+    fn table_rows(&mut self, plan_at: u32, gathered: &Gathered, rows: usize) -> Result<(), Error> {
         let plan = self.plan_at(plan_at)?;
         for row in 0..rows {
             self.to.begin_object();
@@ -916,8 +927,6 @@ impl<'s> Walker<'s> {
             }
             self.to.end_object();
         }
-        self.to.end_array();
-        self.leave();
         Ok(())
     }
 
@@ -1000,6 +1009,78 @@ impl<'a> Gathered<'a> {
             self.ints[index] = read_column8(columns, op, rows);
         }
         self.present[index] = true;
+    }
+
+    /// Gathers one column run of `rows` rows, keyed at eight bits if `wide`,
+    /// stepping over a column the plan does not declare.
+    pub(crate) fn read(
+        plan: &Plan,
+        body: &'a [u8],
+        rows: usize,
+        wide: bool,
+    ) -> Result<Self, Error> {
+        let mut gathered = Self::new(plan.fields.len());
+        if wide {
+            let mut columns = Reader8::new(body);
+            while columns.more() {
+                if let Some(index) = plan.field_of(columns.key()) {
+                    gathered.take8(&mut columns, index, plan.fields[index].op, rows);
+                } else {
+                    columns.skip();
+                }
+                columns.err()?;
+            }
+            return Ok(gathered);
+        }
+        let mut columns = Reader::new(body);
+        while columns.more() {
+            if let Some(index) = plan.field_of(columns.key()) {
+                gathered.take(&mut columns, index, plan.fields[index].op, rows);
+            } else {
+                columns.skip();
+            }
+            columns.err()?;
+        }
+        Ok(gathered)
+    }
+
+    /// Gathers a whole table body, each group's rows after the one before's, so
+    /// that a grouped table reads as the table it was cut from. A column a
+    /// group leaves out is zeros, or empty strings, for that group's rows.
+    #[cfg(feature = "materialize")]
+    pub(crate) fn read_table(
+        plan: &Plan,
+        rows: usize,
+        group_rows: usize,
+        body: &'a [u8],
+        wide: bool,
+    ) -> Result<Self, Error> {
+        if group_rows == 0 {
+            return Self::read(plan, body, rows, wide);
+        }
+        let mut whole = Self::new(plan.fields.len());
+        let mut start = 0;
+        for run in Runs::new(rows, group_rows, body) {
+            let (size, columns) = run?;
+            let group = Self::read(plan, columns, size, wide)?;
+            for (index, field) in plan.fields.iter().enumerate() {
+                if !group.present[index] && !whole.present[index] {
+                    continue;
+                }
+                whole.present[index] = true;
+                if field.op == OP_STRING {
+                    let strings = &mut whole.strings[index];
+                    strings.resize(start, &[]);
+                    strings.extend(group.strings[index].iter().take(size));
+                } else {
+                    let ints = &mut whole.ints[index];
+                    ints.resize(start, 0);
+                    ints.extend(group.ints[index].iter().take(size));
+                }
+            }
+            start += size;
+        }
+        Ok(whole)
     }
 }
 

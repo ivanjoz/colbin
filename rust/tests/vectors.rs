@@ -237,6 +237,16 @@ fn check_into<T: Colbin + PartialEq + core::fmt::Debug>(name: &str, value: &T, d
     );
 }
 
+/// Asserts the decode direction alone, for a message this port reads and
+/// writes differently.
+fn check_decode<T: Colbin + PartialEq + core::fmt::Debug>(name: &str, value: &T) {
+    assert_eq!(
+        &T::decode(&message(name)).expect("decode"),
+        value,
+        "{name}: this port decoded something else"
+    );
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -456,6 +466,23 @@ fn composite_cases() {
         &Ledger {
             id: 4,
             lines: wide_lines(3),
+        },
+    );
+    // Go writes a long table in groups, which this port reads and does not
+    // write: only the decode direction holds.
+    check_decode(
+        "order.grouped table",
+        &Order {
+            id: 7,
+            lines: lines(10),
+            ..Order::colbin_zero()
+        },
+    );
+    check_decode(
+        "ledger.grouped wide rows",
+        &Ledger {
+            id: 8,
+            lines: wide_lines(10),
         },
     );
 }

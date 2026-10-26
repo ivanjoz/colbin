@@ -163,12 +163,16 @@ func readNarrow(t *testing.T, r Reader, depth int) {
 				entries.ElementInt()
 			}
 		case 22:
-			rows, body, ok := r.Table()
-			if ok && rows <= fuzzRows {
-				columns := NewReader(body)
-				for steps := 0; columns.More() && steps <= len(body); steps++ {
+			rows, groupRows, body, ok := r.Table()
+			if !ok || rows > fuzzRows {
+				break
+			}
+			runs, sizes := tableRuns(rows, groupRows, body)
+			for index, run := range runs {
+				columns := NewReader(run)
+				for steps := 0; columns.More() && steps <= len(run); steps++ {
 					if columns.Key()%2 == 0 {
-						columns.Column(rows, nil)
+						columns.Column(sizes[index], nil)
 					} else {
 						columns.Strings(nil)
 					}
@@ -183,6 +187,25 @@ func readNarrow(t *testing.T, r Reader, depth int) {
 			}
 		}
 	}
+}
+
+// tableRuns is a table body's column runs and the rows each holds: the body
+// itself for a table written whole, and as many groups as read for a grouped
+// one.
+func tableRuns(rows, groupRows int, body []byte) ([][]byte, []int) {
+	if groupRows == 0 {
+		return [][]byte{body}, []int{rows}
+	}
+	var runs [][]byte
+	var sizes []int
+	for start := 0; start < rows; start += groupRows {
+		run, rest, err := NextGroup(body)
+		if err != nil {
+			break
+		}
+		runs, sizes, body = append(runs, run), append(sizes, min(groupRows, rows-start)), rest
+	}
+	return runs, sizes
 }
 
 func readBody(t *testing.T, body []byte, wide bool, depth int) {
@@ -311,11 +334,16 @@ func readWide(t *testing.T, r Reader8, depth int) {
 				entries.ElementInt()
 			}
 		case 21:
-			rows, columns, ok := r.Table()
-			if ok && rows <= fuzzRows {
-				for steps := 0; columns.More() && steps <= len(columns.buffer); steps++ {
+			rows, groupRows, body, ok := r.Table()
+			if !ok || rows > fuzzRows {
+				break
+			}
+			runs, sizes := tableRuns(rows, groupRows, body)
+			for index, run := range runs {
+				columns := NewReader8(run)
+				for steps := 0; columns.More() && steps <= len(run); steps++ {
 					if columns.Key()%2 == 0 {
-						columns.Column(rows, nil)
+						columns.Column(sizes[index], nil)
 					} else {
 						columns.Strings(nil)
 					}

@@ -39,6 +39,7 @@ import (
 
 	"github.com/ivanjoz/colbin"
 	"github.com/ivanjoz/colbin/corpus"
+	"github.com/ivanjoz/colbin/internal/wirefmt"
 )
 
 // --- the types ---------------------------------------------------------------
@@ -361,7 +362,23 @@ func types() []typeCase {
 		describe("corpus-category", "three fields, two of them small integers", &generated.Categories[0]),
 		describe("corpus-sale-list", "a sale whose detail is under the table threshold", shortSale),
 		describe("corpus-sale-table", "a sale whose detail is transposed into columns", longSale),
+		grouped(func() typeCase {
+			return describe("table-grouped", "a table cut into groups of four rows, the last holding the rest",
+				&Sheet{ID: 9, Cells: makeCells(10)})
+		}),
+		grouped(func() typeCase {
+			return describe("table-grouped-wide-rows", "a grouped table of wide rows, each group's columns at eight-bit keys",
+				&Ledger{ID: 10, Cells: makeWideCells(10)})
+		}),
 	}
+}
+
+// grouped describes a case with tables grouped past four rows, so that a
+// grouped table is small enough to check in. Go groups past 4096 otherwise.
+func grouped(describe func() typeCase) typeCase {
+	defer func(was int) { wirefmt.TableGroupRows = was }(wirefmt.TableGroupRows)
+	wirefmt.TableGroupRows = 4
+	return describe()
 }
 
 // packedTypes is the same shape as types(), with the opt-in string encoding on.

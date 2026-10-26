@@ -389,10 +389,21 @@ func (r *Reader8) ElementMap() (int, Reader8, bool) {
 }
 
 // ElementTable returns the row count and a reader over a key-less table's
-// columns.
+// columns. A dynamic value's table is never grouped, and one that is is
+// refused.
 func (r *Reader8) ElementTable() (int, Reader8, bool) {
 	r.at--
-	return r.Table()
+	rows, groupRows, columns, ok := r.Table()
+	if !ok {
+		return 0, Reader8{}, false
+	}
+	if groupRows != 0 {
+		r.fail(ErrBadDescriptor)
+		return 0, Reader8{}, false
+	}
+	// The columns are keyed, so unlike a list's elements they read as an
+	// ordinary run and need no cursor offset.
+	return rows, Reader8{buffer: columns}, true
 }
 
 // SkipElement steps over one key-less value of any kind, which is what lets a

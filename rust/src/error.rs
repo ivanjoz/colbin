@@ -44,6 +44,9 @@ pub enum Error {
     /// than a proof: a constant column is nine bytes for any length, so the
     /// bound cannot come from the bytes left.
     TooManyRows,
+    /// A grouped table whose groups do not add up to its rows: no rows per
+    /// group, a group that runs past the table, or groups left over.
+    BadGroup,
     /// The schema puts a field type where a value belongs.
     UnwalkableOp(u8),
     /// A float that JSON has no spelling for. Writing `null` instead would turn
@@ -110,6 +113,9 @@ impl fmt::Display for Error {
             }
             Self::TooManyRows => {
                 out.write_str("colbin: a table claims more rows than a decode will allocate for")
+            }
+            Self::BadGroup => {
+                out.write_str("colbin: a grouped table's groups do not match its rows")
             }
             Self::UnwalkableOp(op) => {
                 write!(
