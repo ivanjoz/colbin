@@ -49,11 +49,14 @@ package codec
 
 import (
 	"encoding"
+	"encoding/binary"
 	"fmt"
 	"math"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"unsafe"
 
 	"github.com/ivanjoz/colbin/wire"
@@ -156,7 +159,18 @@ func appendAnyReflect(writer *wire.Writer8, value reflect.Value, buf *scratch) {
 		writer.ElementFloat64(value.Float())
 	case reflect.String:
 		writer.ElementString(value.String())
-	case reflect.Pointer, reflect.Interface:
+	case reflect.Interface:
+		// Back to the type switch: an interface's Interface is the value it
+		// holds, copied out without an allocation, and a map[string]any element
+		// read reflectively is one. Followed by Elem instead, every value under
+		// it stayed reflective, and a document's keys went through sort.Slice
+		// on reflect.Values.
+		if value.CanInterface() {
+			appendAnyValue(writer, value.Interface(), buf)
+			return
+		}
+		fallthrough
+	case reflect.Pointer:
 		if value.IsNil() {
 			writer.ElementNull()
 			return
@@ -390,27 +404,129 @@ func appendAnyStringMap(writer *wire.Writer8, value map[string]any, buf *scratch
 	}
 	defer buf.leave()
 	mark := writer.OpenElementMap(len(value))
-	for _, key := range sortedKeys(value) {
-		if buf.err != nil {
-			break
-		}
-		writer.ElementString(key)
-		appendAnyValue(writer, value[key], buf)
-	}
+	appendAnyEntries(writer, value, buf)
 	writer.Close(mark)
 }
 
-// sortedKeys is why a map is written in order. Go's map iteration is
-// deliberately random, so without this the same value encodes to different bytes
+// appendAnyEntries writes a map[string]any's entries, in key order.
+//
+// In order is why a map is written the same way twice. Go's map iteration is
+// deliberately random, so without it the same value encodes to different bytes
 // every time — which rules out a golden vector, an ETag, and any two ports
 // agreeing about a map at all.
-func sortedKeys(value map[string]any) []string {
-	keys := make([]string, 0, len(value))
-	for key := range value {
-		keys = append(keys, key)
+func appendAnyEntries(writer *wire.Writer8, value map[string]any, buf *scratch) {
+	start, count, ordered := buf.pushEntries(value)
+	for index := range count {
+		if buf.err != nil {
+			break
+		}
+		// By index into the stacks, and not a slice of them: a map in a value
+		// pushes its own entries, which can move them.
+		at := index
+		if ordered {
+			at = int(buf.columns.order[start+index] & orderIndex)
+		}
+		entry := &buf.columns.entries[start+at]
+		writer.ElementString(entry.key)
+		appendAnyValue(writer, entry.value, buf)
 	}
-	sort.Strings(keys)
-	return keys
+	buf.columns.entries = buf.columns.entries[:start]
+	buf.columns.order = buf.columns.order[:start]
+}
+
+// anyEntry is a map entry on its way out, its value taken in the iteration so
+// that the write does not look it up again.
+type anyEntry struct {
+	key   string
+	value any
+}
+
+// A map's order is its entries' sort keys: the key's first six bytes, big-endian
+// so that a number orders the way the bytes do, above the entry's index. Sorting
+// those is sorting integers, with no call per comparison and eight bytes a move;
+// the keys whose first six bytes tie are put in order after, a run at a time.
+// Sorting the strings was half of a document's encode.
+const (
+	orderIndexBits = 16
+	orderIndex     = 1<<orderIndexBits - 1
+)
+
+// pushEntries pushes a map's entries onto the pooled stack of them, and their
+// order onto its own, and answers where they start, how many there are, and
+// whether the order says it: a map past orderIndex entries is sorted in place
+// instead. Pooled because a document is maps inside maps, and a slice of keys
+// made for each of them was most of its allocations.
+func (buf *scratch) pushEntries(value map[string]any) (start, count int, ordered bool) {
+	columns := buf.reserve(0, false)
+	start = len(columns.entries)
+	for key, element := range value {
+		columns.entries = append(columns.entries, anyEntry{key, element})
+	}
+	entries := columns.entries[start:]
+	count = len(entries)
+	columns.usedEntries = max(columns.usedEntries, len(columns.entries))
+	// The order stack is as long as the entries one, so that a map's order
+	// starts where its entries do: a large map holds its place in it unused.
+	columns.order = slices.Grow(columns.order, count)
+	if count > orderIndex+1 {
+		columns.order = columns.order[:start+count]
+		slices.SortFunc(entries, func(a, b anyEntry) int { return strings.Compare(a.key, b.key) })
+		return start, count, false
+	}
+	for index := range entries {
+		columns.order = append(columns.order, uint64(index))
+	}
+	orderEntries(columns.order[start:], entries, 0)
+	return start, count, true
+}
+
+// orderEntries sorts order, whose entries' keys agree on their first depth
+// bytes, by the six bytes after, and each run that ties on those by the six
+// after that: a configuration's keys share stems — "react/" on twenty-seven of
+// one document's thirty-nine — and an insertion sort of a run that long was
+// most of the sort. Keys that tie to their end, or past a depth no key stem
+// reaches, are put in order whole.
+func orderEntries(order []uint64, entries []anyEntry, depth int) {
+	longest := 0
+	for index, sort := range order {
+		key := entries[sort&orderIndex].key
+		longest = max(longest, len(key))
+		var head [8]byte
+		if depth < len(key) {
+			copy(head[:6], key[depth:])
+		}
+		order[index] = binary.BigEndian.Uint64(head[:]) | sort&orderIndex
+	}
+	slices.Sort(order)
+	for run := 0; run < len(order); {
+		end := run + 1
+		for end < len(order) && order[end]>>orderIndexBits == order[run]>>orderIndexBits {
+			end++
+		}
+		switch {
+		case end-run == 1:
+		case longest <= depth+6 || depth >= 60:
+			sortTied(order[run:end], entries)
+		default:
+			orderEntries(order[run:end], entries, depth+6)
+		}
+		run = end
+	}
+}
+
+// sortTied orders a run of entries by the whole key: keys that differ only past
+// where orderEntries looks, or only in trailing zero bytes, which it reads as
+// the end of a key. A few keys at most, so an insertion sort.
+func sortTied(order []uint64, entries []anyEntry) {
+	for index := 1; index < len(order); index++ {
+		moving := order[index]
+		key := entries[moving&orderIndex].key
+		at := index
+		for ; at > 0 && entries[order[at-1]&orderIndex].key > key; at-- {
+			order[at] = order[at-1]
+		}
+		order[at] = moving
+	}
 }
 
 // appendAnyMap writes any other map: the keys have to be renderable as names,
@@ -594,7 +710,11 @@ func appendStructsElement(
 	defer buf.leave()
 	if plan.canTable && slice.len >= tableThreshold {
 		mark := writer.OpenElementTable(slice.len)
-		appendColumns(writer, plan, slice, stride, buf, nil)
+		// A writer of its own, as appendTableColumns has: the column writers
+		// pass theirs through interfaces, and the caller's would escape.
+		own := &wire.Writer8{Buffer: writer.Buffer}
+		appendColumns(own, plan, slice, stride, buf, nil)
+		writer.Buffer = own.Buffer
 		writer.Close(mark)
 		return
 	}
@@ -619,7 +739,7 @@ func readAnyValue(reader *wire.Reader8, buf *scratch) any {
 		reader.Fail(err)
 		return nil
 	}
-	out := anySink{}
+	out := anySink{strings: &buf.strings}
 	// The walk inherits the typed decode's depth and row budget, so that a
 	// dynamic value is bounded by what is left of the message's rather than
 	// starting afresh.
@@ -631,6 +751,33 @@ func readAnyValue(reader *wire.Reader8, buf *scratch) any {
 		return nil
 	}
 	return out.root
+}
+
+// readAnyDocument reads a map[string]any field's count entries: one walk for
+// all of them, into a map made at that size. Each entry was a walk of its own
+// and a sink and a walker allocated for it, set into the map through reflect.
+func readAnyDocument(entries *wire.Reader8, count int, at unsafe.Pointer, buf *scratch) error {
+	plans, err := buf.structPlans()
+	if err != nil {
+		return err
+	}
+	document := make(map[string]any, count)
+	out := anySink{strings: &buf.strings}
+	walk := walker{to: &out, plans: plans, depth: buf.depth, rowsLeft: buf.rowsLeft}
+	for range count {
+		key := entries.ElementStringIn(&buf.strings)
+		if err := entries.Err(); err != nil {
+			return err
+		}
+		walk.dynamicValue(entries)
+		if walk.err != nil {
+			return walk.err
+		}
+		document[key], out.root = out.root, nil
+	}
+	buf.rowsLeft = walk.rowsLeft
+	*(*map[string]any)(at) = document
+	return nil
 }
 
 // readAnyList decodes a `[]any` field, whose payload is a LIST of dynamic
@@ -720,7 +867,7 @@ func (w *walker) dynamicList(reader *wire.Reader8) {
 		return
 	}
 	defer w.leave()
-	w.to.beginArray()
+	w.to.beginArray(count)
 	for range count {
 		w.dynamicValue(&elements)
 		if w.err != nil {
@@ -741,7 +888,7 @@ func (w *walker) dynamicMap(reader *wire.Reader8) {
 		return
 	}
 	defer w.leave()
-	w.to.beginObject()
+	w.to.beginObject(count)
 	for range count {
 		if !w.dynamicKey(&entries) {
 			return

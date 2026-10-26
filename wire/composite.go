@@ -331,6 +331,12 @@ func (r *Reader8) ElementString() string {
 	return r.String()
 }
 
+// ElementStringIn is ElementString with the copy made in a. See StringIn.
+func (r *Reader8) ElementStringIn(a *Arena) string {
+	r.at--
+	return r.StringIn(a)
+}
+
 // IsTable reports whether the field at the cursor is a table rather than a list.
 // A writer chooses between them on the row count, so a reader has to ask.
 func (r *Reader8) IsTable() bool {

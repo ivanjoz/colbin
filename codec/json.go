@@ -117,7 +117,9 @@ func takeRows(left *int, rows, columns int) error {
 // sink is where a walk puts what it finds. A JSON sink appends text; an `any`
 // sink builds maps and slices. Nothing about the wire reaches this far.
 type sink interface {
-	beginObject()
+	// beginObject and beginArray take the entries or elements to come when the
+	// message says, for the any sink to make room for, and 0 when it does not.
+	beginObject(size int)
 	key(name string)
 	// keyBytes is key for a name the walk is holding as a sub-slice of the
 	// message, which every entry of a dynamic map is. It is textBytes' reason:
@@ -125,7 +127,7 @@ type sink interface {
 	// string at all.
 	keyBytes(name []byte)
 	endObject()
-	beginArray()
+	beginArray(size int)
 	endArray()
 
 	null()
@@ -377,7 +379,7 @@ func (w *walker) narrowRun(plan *typePlan, body []byte) {
 		return
 	}
 	defer w.leave()
-	w.to.beginObject()
+	w.to.beginObject(0)
 	w.narrowFields(plan, body)
 	if w.err == nil {
 		w.to.endObject()
@@ -416,7 +418,7 @@ func (w *walker) wideRun(plan *typePlan, body []byte) {
 		return
 	}
 	defer w.leave()
-	w.to.beginObject()
+	w.to.beginObject(0)
 	w.wideFields(plan, body)
 	if w.err == nil {
 		w.to.endObject()
@@ -541,7 +543,7 @@ func (w *walker) zeroStruct(plan *typePlan) {
 	}
 	defer w.leave()
 	var none fieldSet
-	w.to.beginObject()
+	w.to.beginObject(0)
 	w.absent(plan, &none)
 	w.to.endObject()
 }
@@ -627,7 +629,7 @@ func errUnwalkableOp(op fieldOp) error {
 // cannot take one.
 
 func signedArray[T wire.Integer](w *walker, values []T) {
-	w.to.beginArray()
+	w.to.beginArray(0)
 	for _, value := range values {
 		w.to.signed(int64(value))
 	}
@@ -635,7 +637,7 @@ func signedArray[T wire.Integer](w *walker, values []T) {
 }
 
 func unsignedArray[T wire.Integer](w *walker, values []T) {
-	w.to.beginArray()
+	w.to.beginArray(0)
 	for _, value := range values {
 		w.to.unsigned(uint64(value))
 	}
@@ -643,7 +645,7 @@ func unsignedArray[T wire.Integer](w *walker, values []T) {
 }
 
 func (w *walker) textArray(values [][]byte) {
-	w.to.beginArray()
+	w.to.beginArray(0)
 	for _, value := range values {
 		w.to.textBytes(value)
 	}
@@ -670,7 +672,7 @@ func (w *walker) narrowList(reader *wire.Reader, field *planField) {
 		return
 	}
 	defer w.leave()
-	w.to.beginArray()
+	w.to.beginArray(0)
 	for range count {
 		body, ok := elements.Element()
 		if !ok {
@@ -712,7 +714,7 @@ func (w *walker) structList(count int, elements *wire.Reader8, plan *typePlan) {
 		return
 	}
 	defer w.leave()
-	w.to.beginArray()
+	w.to.beginArray(0)
 	for range count {
 		body, wideKeys, ok := elements.ElementStructBody()
 		if !ok {
@@ -968,7 +970,7 @@ func (w *walker) structTable(rows int, columns *wire.Reader8, sub *typePlan) {
 		return
 	}
 	defer w.leave()
-	w.to.beginArray()
+	w.to.beginArray(0)
 	gathered := newTableColumns(len(sub.fields), w.dicts, &w.rowsLeft)
 	if err := gathered.read8(columns, sub, rows); err != nil {
 		w.fail(err)
@@ -991,7 +993,7 @@ func (w *walker) table(sub *typePlan, rows, groupRows int, body []byte, wide boo
 		return
 	}
 	defer w.leave()
-	w.to.beginArray()
+	w.to.beginArray(0)
 	gathered := newTableColumns(len(sub.fields), w.dicts, &w.rowsLeft)
 	if groupRows == 0 {
 		if err := gathered.read(body, sub, rows, wide); err != nil {
@@ -1079,7 +1081,7 @@ func (w *walker) tableRows(sub *typePlan, gathered *tableColumns, rows int) {
 		if w.err != nil {
 			return
 		}
-		w.to.beginObject()
+		w.to.beginObject(0)
 		w.rowFields(sub, gathered, row)
 		w.to.endObject()
 	}
@@ -1162,9 +1164,9 @@ func (w *walker) listRows(field *planField, gathered *tableColumns, index, row i
 	defer w.leave()
 	elements, start := gathered.lists[index], gathered.cursor[index]
 	gathered.cursor[index] += n
-	w.to.beginArray()
+	w.to.beginArray(0)
 	for element := start; element < start+n && w.err == nil; element++ {
-		w.to.beginObject()
+		w.to.beginObject(0)
 		w.rowFields(field.sub, elements, element)
 		w.to.endObject()
 	}
@@ -1237,7 +1239,7 @@ func (w *walker) narrowMap(reader *wire.Reader, field *planField) {
 		return
 	}
 	defer w.leave()
-	w.to.beginObject()
+	w.to.beginObject(0)
 	for range count {
 		switch field.keyKind {
 		case mapString:
@@ -1295,7 +1297,7 @@ func (w *walker) wideMap(reader *wire.Reader8, field *planField) {
 		return
 	}
 	defer w.leave()
-	w.to.beginObject()
+	w.to.beginObject(0)
 	for range count {
 		switch field.keyKind {
 		case mapString:

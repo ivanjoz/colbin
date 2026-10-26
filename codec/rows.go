@@ -57,6 +57,9 @@ const (
 	rowStruct
 	rowStructs
 	rowField // anything else, through writeFields
+	// rowPointer is a pointer to a scalar: nothing at all when nil, which is
+	// what a pointer field of a document mostly is, and appendPointer when not.
+	rowPointer
 )
 
 type rowOp struct {
@@ -117,7 +120,7 @@ func compileRows(plan *typePlan) *rowProgram {
 				program.singles = make([]*typePlan, len(plan.fields))
 			}
 			program.singles[index] = &typePlan{fields: plan.fields[index : index+1 : index+1]}
-		} else if kind != rowStruct && kind != rowStructs {
+		} else if kind != rowStruct && kind != rowStructs && kind != rowPointer {
 			spelled = true
 		}
 		op.kind = kind
@@ -242,6 +245,8 @@ func rowKind(field *planField) (uint8, bool) {
 		return rowStruct, true
 	case opStructs:
 		return rowStructs, true
+	case opPointer:
+		return rowPointer, true
 	}
 	return 0, false
 }
@@ -327,6 +332,15 @@ func (program *rowProgram) write(writer *wire.Writer, record unsafe.Pointer, buf
 			}
 			copyShort(unsafe.Add(out, at), unsafe.StringData(value), size)
 			at += size
+			continue
+		case rowPointer:
+			if *(*unsafe.Pointer)(from) == nil {
+				continue
+			}
+			writer.Buffer = buffer[:at]
+			appendPointer(writer, &program.plan.fields[op.field], from, false)
+			buffer = slices.Grow(writer.Buffer, program.reserve)
+			at, out = len(buffer), unsafe.Pointer(unsafe.SliceData(buffer))
 			continue
 		default:
 			// A composite, or a field the program does not spell: through the

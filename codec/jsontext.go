@@ -57,7 +57,7 @@ func (s *jsonSink) beforeValue() {
 	s.stack[top].first = false
 }
 
-func (s *jsonSink) beginObject() {
+func (s *jsonSink) beginObject(int) {
 	s.beforeValue()
 	s.buffer = append(s.buffer, '{')
 	s.push(true)
@@ -68,7 +68,7 @@ func (s *jsonSink) endObject() {
 	s.pop()
 }
 
-func (s *jsonSink) beginArray() {
+func (s *jsonSink) beginArray(int) {
 	s.beforeValue()
 	s.buffer = append(s.buffer, '[')
 	s.push(false)

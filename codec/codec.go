@@ -808,12 +808,14 @@ func writePlan(writer *wire.Writer, plan *typePlan, record unsafe.Pointer, buf *
 	if !buf.enter() {
 		return
 	}
-	defer buf.leave()
 	if program := plan.rows; program != nil && !program.wide && useRowPrograms && !Packed5() {
 		program.write(writer, record, buf)
-		return
+	} else {
+		writeFields(writer, plan, record, buf)
 	}
-	writeFields(writer, plan, record, buf)
+	// Not deferred: nothing between panics, and the defer was five of a
+	// four-level document's sixty-five nanoseconds.
+	buf.leave()
 }
 
 // errNotValueOp is a switch over value ops meeting one that is not, which only a

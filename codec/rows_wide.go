@@ -98,6 +98,15 @@ func (program *rowProgram) writeWide(writer *wire.Writer8, record unsafe.Pointer
 			copyShort(unsafe.Add(out, at), unsafe.StringData(value), size)
 			at += size
 			continue
+		case rowPointer:
+			if *(*unsafe.Pointer)(from) == nil {
+				continue
+			}
+			writer.Buffer = buffer[:at]
+			appendPointerWide(writer, &program.plan.fields[op.field], from, false)
+			buffer = slices.Grow(writer.Buffer, program.reserve)
+			at, out = len(buffer), unsafe.Pointer(unsafe.SliceData(buffer))
+			continue
 		default:
 			writer.Buffer = buffer[:at]
 			field := &program.plan.fields[op.field]

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -560,5 +561,45 @@ func TestCodecAppendReportsADynamicFailure(t *testing.T) {
 	}
 	if _, err := codec.Encode(&bad); err == nil {
 		t.Fatal("Encode encoded a chan")
+	}
+}
+
+// A dynamic map goes out in key order, which orderEntries finds by six bytes of
+// key at a time: keys that share a stem, that differ past it, that differ only
+// in trailing zero bytes, the empty key, and a map too large for the order's
+// index all have to come out as sort.Strings has them.
+func TestADynamicMapGoesOutInKeyOrder(t *testing.T) {
+	stems := map[string]any{"": 0}
+	for index := range 40 {
+		stems[fmt.Sprintf("react/rule-%d", index)] = index
+		stems[fmt.Sprintf("@typescript-eslint/no-%d-something-long", index)] = index
+	}
+	for _, key := range []string{"a", "a\x00", "a\x00\x00", "ab", "abcdef", "abcdef\x00", "abcdefg", "abcdeg"} {
+		stems[key] = key
+	}
+	large := map[string]any{}
+	for index := range orderIndex + 10 {
+		large[fmt.Sprintf("key-%x", index*7919)] = index
+	}
+	for _, value := range []map[string]any{{}, {"one": 1}, stems, large} {
+		var buf scratch
+		start, count, _ := buf.pushEntries(value)
+		have := make([]string, 0, count)
+		for index := range count {
+			at := index
+			if count <= orderIndex+1 {
+				at = int(buf.columns.order[start+index] & orderIndex)
+			}
+			have = append(have, buf.columns.entries[start+at].key)
+		}
+		buf.release()
+		want := make([]string, 0, len(value))
+		for key := range value {
+			want = append(want, key)
+		}
+		slices.Sort(want)
+		if !slices.Equal(have, want) {
+			t.Fatalf("%d keys out of order", len(value))
+		}
 	}
 }

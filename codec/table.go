@@ -179,6 +179,12 @@ type columnBuffers struct {
 	usedNullStrings                   int
 	// lists is the list columns' scratch, a level per depth. See listcolumn.go.
 	lists []listBuffers
+	// entries is the entries of the dynamic maps being written, a stack of
+	// them, order their order, and usedEntries the most entries has held. See
+	// pushEntries.
+	entries     []anyEntry
+	order       []uint64
+	usedEntries int
 }
 
 var columnPool sync.Pool // *columnBuffers
@@ -230,6 +236,11 @@ func (buf *scratch) release() {
 	// when the buffer last came back.
 	clear(columns.strings[:min(columns.usedStrings, cap(columns.strings))])
 	clear(columns.nullStrings[:min(columns.usedNullStrings, cap(columns.nullStrings))])
+	clear(columns.entries[:columns.usedEntries])
+	columns.entries, columns.order, columns.usedEntries = columns.entries[:0], columns.order[:0], 0
+	if !keepPooled(cap(columns.entries), 0) {
+		columns.entries, columns.order = nil, nil
+	}
 	if !keepPooled(cap(columns.nullInts), len(columns.nullInts)) {
 		columns.nullInts = nil
 	}
@@ -352,7 +363,7 @@ func appendTableField(writer *wire.Writer8, field *planField, at unsafe.Pointer,
 		return
 	}
 	mark := writer.OpenTable(field.key, slice.len)
-	appendColumns(writer, field.sub, slice, field.stride, buf, buf.dict)
+	writer.Buffer = appendTableColumns(writer.Buffer, field, slice, true, buf)
 	writer.Close(mark)
 }
 

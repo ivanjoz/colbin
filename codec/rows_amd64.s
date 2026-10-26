@@ -276,6 +276,13 @@ list:
 	// length form's flags, the length in bytes, and the elements at that width.
 	// A list past 0xFFFF bytes, or one the room to limit does not hold with
 	// reserve after it, is the caller's.
+	CMPL  DX, $16                // rowPointer: a nil one is nothing, any
+	JNE   int32s                 // other the caller's
+	CMPQ  (R14), $0
+	JEQ   next
+	JMP   finish
+
+int32s:
 	CMPL  DX, $12                // rowInt32s; anything past it is the caller's
 	JNE   finish
 	MOVQ  8(R14), CX             // the count
@@ -566,6 +573,13 @@ wboolean:
 	JMP     wnext
 
 wtext:
+	CMPL  DX, $16                // rowPointer: a nil one is nothing
+	JNE   wstring
+	CMPQ  (R14), $0
+	JEQ   wnext
+	JMP   wfinish
+
+wstring:
 	CMPL  DX, $11
 	JNE   wfinish
 	MOVQ  8(R14), CX

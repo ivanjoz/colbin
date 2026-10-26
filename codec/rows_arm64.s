@@ -289,6 +289,13 @@ finish:
 list:
 	// An []int32, as on amd64: the width from the OR of the values folded to
 	// their magnitude, the length form, the length in bytes, the elements.
+	CMP  $16, R8                 // rowPointer: a nil one is nothing, any
+	BNE  int32s                  // other the caller's
+	MOVD (R10), R12
+	CBZ  R12, next
+	B    finish
+
+int32s:
 	CMP  $12, R8                 // rowInt32s; anything past it is the caller's
 	BNE  finish
 	MOVD 8(R10), R12             // the count
@@ -564,6 +571,13 @@ wboolean:
 	B     wnext
 
 wtext:
+	CMP  $16, R8                 // rowPointer: a nil one is nothing
+	BNE  wstring
+	MOVD (R10), R12
+	CBZ  R12, wnext
+	B    wfinish
+
+wstring:
 	CMP  $11, R8
 	BNE  wfinish
 	MOVD 8(R10), R12

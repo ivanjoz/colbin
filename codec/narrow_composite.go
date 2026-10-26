@@ -32,9 +32,19 @@ func appendNarrowStruct(writer *wire.Writer, field *planField, at unsafe.Pointer
 		writer.Close(mark)
 		return
 	}
+	// writePlan by hand: a document is structs inside structs, and its frame
+	// was a level's cost as much as the level's fields were.
+	if !buf.enter() {
+		return
+	}
 	mark := writer.OpenStruct(field.key)
-	writePlan(writer, field.sub, at, buf)
+	if program := field.sub.rows; program != nil && !program.wide && useRowPrograms && !Packed5() {
+		program.write(writer, at, buf)
+	} else {
+		writeFields(writer, field.sub, at, buf)
+	}
 	writer.Close(mark)
+	buf.leave()
 }
 
 // appendNarrowPointerStruct is appendPointerStructField at four key bits.
@@ -221,7 +231,11 @@ func appendNarrowMap(writer *wire.Writer, field *planField, at unsafe.Pointer, b
 	}
 	defer buf.leave()
 	if field.typedMap != nil {
-		field.typedMap.appendNarrow(writer, field.key, at)
+		// A writer of its own: one handed to a func value escapes, and the
+		// caller's would then be allocated on every encode, maps or not.
+		own := &wire.Writer{Buffer: writer.Buffer}
+		field.typedMap.appendNarrow(own, field.key, at)
+		writer.Buffer = own.Buffer
 		return
 	}
 	holder := structHolder(field)
