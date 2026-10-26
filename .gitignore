@@ -54,3 +54,6 @@ js/src/generated/
 # licence without this repository carrying two of them.
 js/LICENSE
 plan/
+
+# Fuzz corpora and other test data live in the benchmarks repo.
+testdata/
