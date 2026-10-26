@@ -948,16 +948,20 @@ typed decoder, the Go JSON walk and the Rust walk spend the same budget.
 ## 14. The Rust crate (`rust/`)
 
 The same format, `no_std` + `alloc` unless `std` is on, with `#![forbid(unsafe_code)]`
-and no runtime dependencies.
+and no runtime dependencies. It reads and writes everything the Go format has
+(the gaps are in §20); `rust/vectors/vectors.json` is the corpus Go writes and
+`rust/tests/` reads.
 
 | module | role |
 |---|---|
 | `wire/narrow.rs`, `wire/wide.rs`, `wire/mod.rs` | the two framings and the shared value codecs |
-| `wire/dynamic.rs` | dynamic values and TYPED, read only |
-| `column.rs`, `packed5.rs` | the column codec and packed5 |
+| `wire/dynamic.rs`, `wire/compact.rs` | dynamic values and TYPED, and the compact dynamic documents (§9.1), read only |
+| `wire/root.rs` | the root byte a typed narrow message has no need of: `0xD0` only when its key run begins in the root range |
+| `wire/nullable.rs`, `wire/dictionary.rs`, `wire/listcolumn.rs` | the readers of nullable, dictionary and list columns |
+| `column.rs`, `packed5.rs` | the column codec (decimal ALP columns included) and packed5 |
 | `plan.rs` | op and map-kind numbers, `Plan`, `PlanField` |
 | `section.rs` | parse a schema section; build one (`encode`) |
-| `walk.rs` | a message to JSON against a section — envelopes unwrapped, pages merged |
+| `walk.rs` | a message to JSON against a section (`message_to_json` reads the root, section and dictionaries) — envelopes unwrapped, pages merged, nullable, dictionary, paged and list columns, dynamic documents |
 | `json.rs`, `json/parse.rs` | a sink that writes what `encoding/json` writes; an exact scanner (integers exact, floats correctly rounded) |
 | `infer.rs`, `build.rs`, `verify.rs`, `diag.rs` | JSON text → colbin: infer a schema, write the body, optionally read it back and compare (`encode`) |
 | `materialize.rs` | a table → the flat typed buffer of §16.3 (`materialize`) |
@@ -970,6 +974,11 @@ and no runtime dependencies.
 | `encode` | the JSON scanner, inference, build, self-check | on |
 | `materialize` | the flat typed buffer | on |
 | `derive` | `#[derive(Colbin)]` | off |
+
+**Root.** A typed narrow message has no root byte: a first byte outside
+`0xD0..=0xDF`, or an empty message, is its key run. `walk::split_root` is the one
+place that cuts a message at its root, and `decode`, `materialize` and `inspect`
+all use it. A reader that indexes byte 0 as a root is wrong for the narrow case.
 
 **JSON → colbin** (`build::encode`) is the one thing the Rust side does that Go
 has no counterpart for. Its rules — what a document infers to, what is refused,
@@ -1009,8 +1018,8 @@ traps: a failure returns −1 and leaves a JSON diagnostic for `last_error()`.
 |---|---|
 | `alloc(n)`, `result_ptr()` | the input buffer, the output buffer |
 | `set_schema(len)` | parse a section and hold it; 0 clears |
-| `decode(len)` | a message → JSON text; a message's own section wins over the held one |
-| `materialize(len)` | a table → the flat buffer; 0 means "not this shape" |
+| `decode(len)` | a message → JSON text (`walk::message_to_json`); a message's own section wins over the held one |
+| `materialize(len)` | a table → the flat buffer; 0 means "not this shape", which includes nullable, dictionary, paged and list columns and the dictionary and dynamic roots |
 | `encode(len, flags)` | JSON → colbin; flags 1 self-describing, 2 verify, 4 pack strings |
 | `section()` | the section the last `encode` built |
 | `inspect_message(len)` | spans, `inspect` builds only |
@@ -1187,6 +1196,14 @@ What the code does not do yet, or does inconsistently:
   map's elements take their types from the schema and need a second element
   reader. Wide maps, including maps of structs, render. `inspect.rs` steps over
   narrow maps instead, and does not merge pages.
+- **Rust has no typed encode or decode of list columns, paged tables or
+  dictionary columns**: the derive and `build.rs` write and read nullable columns,
+  and the walk renders all of them (the corpus covers it), but a struct with a
+  list column, a page or a dictionary column cannot be derived.
+- **Rust does not decode a dictionary-section root (`D2`/`DA`) into a typed
+  value**, only to JSON through the walk.
+- **`materialize` falls back to the JSON path** for a table with a nullable,
+  dictionary, paged or list column; the fast path covers plain columns only.
 - **`hasDynamic` is not transitive**: only an `any` field of the root type (or its
   pages) makes `MarshalSelfDescribing` take the TYPED path; an `any` in a nested
   struct writes its structs as maps of field names.

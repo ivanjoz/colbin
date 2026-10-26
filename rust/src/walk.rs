@@ -102,13 +102,16 @@ pub fn message_to_json(held: Option<&Schema>, message: &[u8]) -> Result<Vec<u8>,
     }
 }
 
+/// A message's dictionaries: per dictionary, its entries.
+type Dictionaries = Vec<Vec<Vec<u8>>>;
+
 /// Reads the dictionary section at the front of `data` and returns its
 /// dictionaries and the body after it:
 ///
 /// ```text
 /// section := [byteLength] [dictCount] ( [entryCount] ( [size] [bytes] )* )*
 /// ```
-fn parse_dictionaries(data: &[u8]) -> Result<(Vec<Vec<Vec<u8>>>, &[u8]), Error> {
+fn parse_dictionaries(data: &[u8]) -> Result<(Dictionaries, &[u8]), Error> {
     let section_error = Error::BadDictionary;
     let (size, width) = wire::read_count(data).ok_or(Error::BadDictionary)?;
     if size > data.len() - width {
@@ -1526,6 +1529,7 @@ impl<'a> Gathered<'a> {
 
     /// Reads the table at the cursor as field `index`'s page, a table of the same
     /// rows.
+    #[allow(clippy::too_many_arguments)]
     fn take_page(
         &mut self,
         schema: &Schema,
@@ -1551,6 +1555,7 @@ impl<'a> Gathered<'a> {
 
     /// Gathers one column run of `rows` rows of plan `at`, keyed at eight bits if
     /// `wide`, stepping over a column the plan does not declare.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn read(
         &mut self,
         schema: &Schema,

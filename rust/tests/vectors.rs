@@ -691,7 +691,7 @@ fn maybe_rows(rows: usize) -> MaybeRows {
                 flag: Some(index % 3 == 0),
                 count: (index % 2 == 0).then(|| (index * 7 % 5) as i32),
                 name: (index % 3 != 1).then(|| format!("name-{index}")),
-                price: (index % 4 != 3).then(|| index as f64 * 1.25),
+                price: (index % 4 != 3).then_some(index as f64 * 1.25),
                 never: None,
             })
             .collect(),

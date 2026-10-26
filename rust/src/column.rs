@@ -561,147 +561,6 @@ pub fn decode_array<T: Signed>(buf: &[u8], n: usize, out: &mut [T]) -> Result<us
     Ok(position)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Every width, at every partial-block length, read back both with slack
-    /// after the run and with the buffer ending exactly at it — so the one-load
-    /// path and the gather path must agree.
-    #[test]
-    fn pack_run_round_trips_at_every_width() {
-        for w in 0..=64_usize {
-            for count in [1, 2, 7, 63, 64, 65, 127, 128] {
-                let mask = if w == 0 {
-                    0
-                } else {
-                    ((1_u64 << (w - 1)) << 1).wrapping_sub(1)
-                };
-                let block: Vec<u64> = (0..count)
-                    .map(|index| (0x9E37_79B9_7F4A_7C15_u64.wrapping_mul(index as u64 + 1)) & mask)
-                    .collect();
-                let mut packed = Vec::new();
-                pack_run(&mut packed, &block, w);
-                assert_eq!(
-                    packed.len(),
-                    block_bytes(count, w),
-                    "width {w}, count {count}"
-                );
-
-                let mut exact = alloc::vec![0_u64; count];
-                unpack_run(&packed, &mut exact, w);
-                assert_eq!(exact, block, "exact buffer, width {w}, count {count}");
-
-                let mut slack = packed.clone();
-                slack.extend_from_slice(&[0_u8; 8]);
-                let mut loaded = alloc::vec![0_u64; count];
-                unpack_run(&slack, &mut loaded, w);
-                assert_eq!(loaded, block, "slack buffer, width {w}, count {count}");
-            }
-        }
-    }
-
-    /// The arithmetic the whole layout rests on.
-    #[test]
-    fn a_full_block_is_a_whole_number_of_bytes() {
-        for w in 0..=64 {
-            assert_eq!(BLOCK_SIZE * w % 8, 0);
-            assert_eq!(block_bytes(BLOCK_SIZE, w), 16 * w);
-        }
-    }
-
-    fn round_trip<T: Signed + PartialEq + core::fmt::Debug>(vals: &[T]) -> usize {
-        let mut buf = Vec::new();
-        append_array(&mut buf, vals);
-        let mut out = alloc::vec![T::from_i64(0); vals.len()];
-        let read = decode_array(&buf, vals.len(), &mut out).expect("decode");
-        assert_eq!(out, vals);
-        assert_eq!(read, buf.len(), "the decode consumed the whole column");
-        buf.len()
-    }
-
-    #[test]
-    fn round_trips_every_shape() {
-        round_trip::<i64>(&[]);
-        round_trip(&[0_i64]);
-        round_trip(&[i64::MIN, i64::MAX, 0, -1, 1]);
-        round_trip(&(0..1000_i64).collect::<Vec<_>>()); // delta
-        round_trip(&[7_i64; 500]); // constant
-        round_trip(&alloc::vec![0_i64; 256]); // width 0
-        round_trip(
-            &(0..300)
-                .map(|i| 1_700_000_000_000 + i * 37)
-                .collect::<Vec<i64>>(),
-        );
-        round_trip(&[i8::MIN, i8::MAX, 0, -1]);
-        round_trip(&[i16::MIN, i16::MAX, 0, -1]);
-        round_trip(&[i32::MIN, i32::MAX, 0, -1]);
-    }
-
-    /// No other transform may produce a shorter encoding than the one chosen.
-    #[test]
-    fn the_transform_choice_is_optimal() {
-        let shapes: Vec<Vec<i64>> = alloc::vec![
-            (1..900).collect(),
-            (0..500).map(|i| 1_700_000_000 + i).collect(),
-            (0..500).map(|i| (i * 7919) % 50000).collect(),
-            alloc::vec![42; 300],
-            alloc::vec![0; 300],
-            (0..300).map(|i| -i).collect(),
-        ];
-        for shape in shapes {
-            let mut chosen = Vec::new();
-            append_array(&mut chosen, &shape);
-            let minimum = *shape.iter().min().expect("non-empty");
-            for (transform, base, zz) in [
-                (TR_RAW, 0, false),
-                (TR_RAW, 0, true),
-                (TR_FOR, minimum, false),
-                (TR_DELTA, 0, true),
-            ] {
-                if transform == TR_DELTA && shape.len() < 2 {
-                    continue;
-                }
-                let candidate = 1 + blocked_cost(&shape, transform, base, zz);
-                assert!(
-                    chosen.len() <= candidate,
-                    "chose {} bytes where transform {transform} would take {candidate}",
-                    chosen.len()
-                );
-            }
-        }
-    }
-
-    /// The +0.1% bound: one byte per block over the raw element width.
-    #[test]
-    fn never_exceeds_the_element_width_by_more_than_a_block_header() {
-        let random: Vec<i64> = (0..1024)
-            .map(|index: u64| {
-                (0x2545_F491_4F6C_DD1D_u64.wrapping_mul(index.wrapping_add(1)) >> 1) as i64
-            })
-            .collect();
-        let mut buf = Vec::new();
-        append_array(&mut buf, &random);
-        let blocks = random.len().div_ceil(BLOCK_SIZE);
-        assert!(buf.len() <= random.len() * 8 + blocks + 9);
-    }
-
-    /// Arbitrary and truncated input must be refused rather than panicked on.
-    #[test]
-    fn garbage_never_panics() {
-        let mut buf = Vec::new();
-        append_array(&mut buf, &(0..400_i64).collect::<Vec<_>>());
-        for cut in 0..buf.len() {
-            let mut out = alloc::vec![0_i64; 400];
-            let _ = decode_array(&buf[..cut], 400, &mut out);
-        }
-        for byte in 0..=255_u8 {
-            let mut out = alloc::vec![0_i64; 8];
-            let _ = decode_array(&[byte; 12], 8, &mut out);
-        }
-    }
-}
-
 // --- decimal columns --------------------------------------------------------
 //
 // A float64 column whose values are decimals, as nearly every double that came
@@ -937,4 +796,145 @@ fn decode_inner(buf: &[u8], n: usize, out: &mut [i64]) -> Result<usize, Error> {
         return Err(Error::BadColumnHeader);
     }
     decode_array(buf, n, out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every width, at every partial-block length, read back both with slack
+    /// after the run and with the buffer ending exactly at it — so the one-load
+    /// path and the gather path must agree.
+    #[test]
+    fn pack_run_round_trips_at_every_width() {
+        for w in 0..=64_usize {
+            for count in [1, 2, 7, 63, 64, 65, 127, 128] {
+                let mask = if w == 0 {
+                    0
+                } else {
+                    ((1_u64 << (w - 1)) << 1).wrapping_sub(1)
+                };
+                let block: Vec<u64> = (0..count)
+                    .map(|index| (0x9E37_79B9_7F4A_7C15_u64.wrapping_mul(index as u64 + 1)) & mask)
+                    .collect();
+                let mut packed = Vec::new();
+                pack_run(&mut packed, &block, w);
+                assert_eq!(
+                    packed.len(),
+                    block_bytes(count, w),
+                    "width {w}, count {count}"
+                );
+
+                let mut exact = alloc::vec![0_u64; count];
+                unpack_run(&packed, &mut exact, w);
+                assert_eq!(exact, block, "exact buffer, width {w}, count {count}");
+
+                let mut slack = packed.clone();
+                slack.extend_from_slice(&[0_u8; 8]);
+                let mut loaded = alloc::vec![0_u64; count];
+                unpack_run(&slack, &mut loaded, w);
+                assert_eq!(loaded, block, "slack buffer, width {w}, count {count}");
+            }
+        }
+    }
+
+    /// The arithmetic the whole layout rests on.
+    #[test]
+    fn a_full_block_is_a_whole_number_of_bytes() {
+        for w in 0..=64 {
+            assert_eq!(BLOCK_SIZE * w % 8, 0);
+            assert_eq!(block_bytes(BLOCK_SIZE, w), 16 * w);
+        }
+    }
+
+    fn round_trip<T: Signed + PartialEq + core::fmt::Debug>(vals: &[T]) -> usize {
+        let mut buf = Vec::new();
+        append_array(&mut buf, vals);
+        let mut out = alloc::vec![T::from_i64(0); vals.len()];
+        let read = decode_array(&buf, vals.len(), &mut out).expect("decode");
+        assert_eq!(out, vals);
+        assert_eq!(read, buf.len(), "the decode consumed the whole column");
+        buf.len()
+    }
+
+    #[test]
+    fn round_trips_every_shape() {
+        round_trip::<i64>(&[]);
+        round_trip(&[0_i64]);
+        round_trip(&[i64::MIN, i64::MAX, 0, -1, 1]);
+        round_trip(&(0..1000_i64).collect::<Vec<_>>()); // delta
+        round_trip(&[7_i64; 500]); // constant
+        round_trip(&alloc::vec![0_i64; 256]); // width 0
+        round_trip(
+            &(0..300)
+                .map(|i| 1_700_000_000_000 + i * 37)
+                .collect::<Vec<i64>>(),
+        );
+        round_trip(&[i8::MIN, i8::MAX, 0, -1]);
+        round_trip(&[i16::MIN, i16::MAX, 0, -1]);
+        round_trip(&[i32::MIN, i32::MAX, 0, -1]);
+    }
+
+    /// No other transform may produce a shorter encoding than the one chosen.
+    #[test]
+    fn the_transform_choice_is_optimal() {
+        let shapes: Vec<Vec<i64>> = alloc::vec![
+            (1..900).collect(),
+            (0..500).map(|i| 1_700_000_000 + i).collect(),
+            (0..500).map(|i| (i * 7919) % 50000).collect(),
+            alloc::vec![42; 300],
+            alloc::vec![0; 300],
+            (0..300).map(|i| -i).collect(),
+        ];
+        for shape in shapes {
+            let mut chosen = Vec::new();
+            append_array(&mut chosen, &shape);
+            let minimum = *shape.iter().min().expect("non-empty");
+            for (transform, base, zz) in [
+                (TR_RAW, 0, false),
+                (TR_RAW, 0, true),
+                (TR_FOR, minimum, false),
+                (TR_DELTA, 0, true),
+            ] {
+                if transform == TR_DELTA && shape.len() < 2 {
+                    continue;
+                }
+                let candidate = 1 + blocked_cost(&shape, transform, base, zz);
+                assert!(
+                    chosen.len() <= candidate,
+                    "chose {} bytes where transform {transform} would take {candidate}",
+                    chosen.len()
+                );
+            }
+        }
+    }
+
+    /// The +0.1% bound: one byte per block over the raw element width.
+    #[test]
+    fn never_exceeds_the_element_width_by_more_than_a_block_header() {
+        let random: Vec<i64> = (0..1024)
+            .map(|index: u64| {
+                (0x2545_F491_4F6C_DD1D_u64.wrapping_mul(index.wrapping_add(1)) >> 1) as i64
+            })
+            .collect();
+        let mut buf = Vec::new();
+        append_array(&mut buf, &random);
+        let blocks = random.len().div_ceil(BLOCK_SIZE);
+        assert!(buf.len() <= random.len() * 8 + blocks + 9);
+    }
+
+    /// Arbitrary and truncated input must be refused rather than panicked on.
+    #[test]
+    fn garbage_never_panics() {
+        let mut buf = Vec::new();
+        append_array(&mut buf, &(0..400_i64).collect::<Vec<_>>());
+        for cut in 0..buf.len() {
+            let mut out = alloc::vec![0_i64; 400];
+            let _ = decode_array(&buf[..cut], 400, &mut out);
+        }
+        for byte in 0..=255_u8 {
+            let mut out = alloc::vec![0_i64; 8];
+            let _ = decode_array(&[byte; 12], 8, &mut out);
+        }
+    }
 }

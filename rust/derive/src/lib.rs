@@ -989,11 +989,6 @@ impl Shape {
                 quote!(#call(&mut r))
             }
             Self::Map => {
-                let counted = if wide {
-                    quote!(r.map())
-                } else {
-                    quote!(r.map())
-                };
                 let read = if wide {
                     quote!(read_element8)
                 } else {
@@ -1001,7 +996,7 @@ impl Shape {
                 };
                 quote! {{
                     let mut map: #ty = ::core::default::Default::default();
-                    if let ::core::option::Option::Some((count, mut entries)) = #counted {
+                    if let ::core::option::Option::Some((count, mut entries)) = r.map() {
                         for _ in 0..count {
                             let key = ::colbin::MapValue::#read(&mut entries);
                             let value = ::colbin::MapValue::#read(&mut entries);
