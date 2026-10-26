@@ -98,6 +98,11 @@ func appendListColumn(
 	for row := range rows {
 		held := (*sliceHeader)(unsafe.Add(base, uintptr(row)*stride))
 		bytes := uintptr(held.len) * field.stride
+		if bytes == 0 {
+			// An empty list at the end would put the destination one past the
+			// buffer, which checkptr rejects.
+			continue
+		}
 		copy(unsafe.Slice((*byte)(unsafe.Add(elements, at)), bytes), unsafe.Slice((*byte)(held.data), bytes))
 		at += bytes
 	}
