@@ -441,6 +441,16 @@ func (w *Writer) Column(key uint8, values []int64) {
 	w.Close(mark)
 }
 
+// Column32 is Column for a column held as int32.
+func (w *Writer) Column32(key uint8, values []int32) {
+	if allZero(values) {
+		return
+	}
+	mark := w.openNarrowSized(key, 0, len(values))
+	w.Buffer = column.AppendArray(w.Buffer, values)
+	w.Close(mark)
+}
+
 // StringColumn writes a string column under key, for a narrow-keyed table. It is
 // Writer8.StringColumn with four key bits: a column of nothing but empty strings
 // is omitted at both widths, since its absence already says so.
@@ -449,6 +459,16 @@ func (w *Writer) StringColumn(key uint8, values []string) {
 		return
 	}
 	w.Strings(key, values)
+}
+
+// StringColumnPayload is StringColumn for a caller that has added up the
+// payload while it gathered the values. A column of empty strings has
+// exactly a byte of size for each, and is omitted.
+func (w *Writer) StringColumnPayload(key uint8, values []string, payload int) {
+	if payload == len(values) {
+		return
+	}
+	w.StringsPayload(key, values, payload)
 }
 
 // Column reads a column written by Column. The row count comes from the table,

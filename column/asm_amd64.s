@@ -455,3 +455,178 @@ stepsLoop:
 	VMOVDQU  Y0, (DI)
 	VZEROUPPER
 	RET
+
+// The same two kernels over int32 input, for a column kept at its own width: each
+// load sign-extends four values from sixteen bytes, so everything after the load
+// is what the int64 kernel does, and the input is half the bytes. The residuals
+// are still stored as 64 bits, which is what the packer reads.
+
+// func scanVec32(values *int32, blocks, size int, out *int64)
+TEXT ·scanVec32(SB), NOSPLIT, $0-32
+	MOVQ    values+0(FP), SI
+	MOVQ    blocks+8(FP), BX
+	MOVQ    size+16(FP), R10
+	MOVQ    out+24(FP), DI
+	VPXOR   Y3, Y3, Y3
+
+scanBlock:
+	VPBROADCASTD (SI), X0
+	VPMOVSXDQ    X0, Y0
+	VMOVDQU      Y0, Y1
+	VMOVDQU      Y0, Y10
+	VMOVDQU      Y0, Y11
+	VPXOR        Y2, Y2, Y2
+	MOVQ         R10, CX
+	CMPQ         CX, $8
+	JB           scanSingle
+
+scanPairs:
+	VPMOVSXDQ   (SI), Y4       // a
+	VPMOVSXDQ   16(SI), Y6     // and the vector after a
+	VPMOVSXDQ   4(SI), Y8      // the values after a
+	VPMOVSXDQ   20(SI), Y9
+	VPCMPGTQ  Y4, Y0, Y5     // minimum > a
+	VPCMPGTQ  Y6, Y10, Y7
+	VPBLENDVB Y5, Y4, Y0, Y0
+	VPBLENDVB Y7, Y6, Y10, Y10
+	VPCMPGTQ  Y1, Y4, Y5     // a > maximum
+	VPCMPGTQ  Y11, Y6, Y7
+	VPBLENDVB Y5, Y4, Y1, Y1
+	VPBLENDVB Y7, Y6, Y11, Y11
+	VPSUBQ    Y4, Y8, Y8     // d = next - a
+	VPSUBQ    Y6, Y9, Y9
+	VPSLLQ    $1, Y8, Y12    // zigzag(d)
+	VPSLLQ    $1, Y9, Y13
+	VPCMPGTQ  Y8, Y3, Y8
+	VPCMPGTQ  Y9, Y3, Y9
+	VPXOR     Y8, Y12, Y12
+	VPXOR     Y9, Y13, Y13
+	VPOR      Y13, Y12, Y12
+	VPOR      Y12, Y2, Y2
+	ADDQ      $32, SI
+	SUBQ      $8, CX
+	CMPQ      CX, $8
+	JAE       scanPairs
+
+scanSingle:
+	TESTQ     CX, CX
+	JZ        scanFold
+	VPMOVSXDQ   (SI), Y4
+	VPMOVSXDQ   4(SI), Y8
+	VPCMPGTQ  Y4, Y0, Y5
+	VPBLENDVB Y5, Y4, Y0, Y0
+	VPCMPGTQ  Y1, Y4, Y5
+	VPBLENDVB Y5, Y4, Y1, Y1
+	VPSUBQ    Y4, Y8, Y8
+	VPSLLQ    $1, Y8, Y12
+	VPCMPGTQ  Y8, Y3, Y8
+	VPXOR     Y8, Y12, Y12
+	VPOR      Y12, Y2, Y2
+	ADDQ      $16, SI
+
+scanFold:
+	// The two minimums and maximums into one, then their four lanes into
+	// one, a half and then a quarter at a time; the steps' OR likewise.
+	VPCMPGTQ     Y10, Y0, Y8
+	VPBLENDVB    Y8, Y10, Y0, Y0
+	VPCMPGTQ     Y1, Y11, Y8
+	VPBLENDVB    Y8, Y11, Y1, Y1
+	VEXTRACTI128 $1, Y0, X4
+	VPCMPGTQ     X4, X0, X8
+	VPBLENDVB    X8, X4, X0, X0
+	VPSHUFD      $0x4E, X0, X4
+	VPCMPGTQ     X4, X0, X8
+	VPBLENDVB    X8, X4, X0, X0
+	VMOVQ        X0, (DI)
+	VEXTRACTI128 $1, Y1, X4
+	VPCMPGTQ     X1, X4, X8
+	VPBLENDVB    X8, X4, X1, X1
+	VPSHUFD      $0x4E, X1, X4
+	VPCMPGTQ     X1, X4, X8
+	VPBLENDVB    X8, X4, X1, X1
+	VMOVQ        X1, 8(DI)
+	VEXTRACTI128 $1, Y2, X4
+	VPOR         X4, X2, X2
+	VPSHUFD      $0x4E, X2, X4
+	VPOR         X4, X2, X2
+	VMOVQ        X2, 16(DI)
+	ADDQ         $24, DI
+	DECQ         BX
+	JNZ          scanBlock
+
+	VZEROUPPER
+	RET
+
+
+// func residualsVec32(values *int32, n int, base int64, mode int, dst *uint64, out *[4]uint64)
+TEXT ·residualsVec32(SB), NOSPLIT, $0-48
+	MOVQ    values+0(FP), SI
+	MOVQ    n+8(FP), CX
+	MOVQ    base+16(FP), AX
+	MOVQ    mode+24(FP), BX
+	MOVQ    dst+32(FP), DI
+	MOVQ    out+40(FP), DX
+	MOVQ    AX, X2
+	VPBROADCASTQ X2, Y2
+	VPXOR   Y0, Y0, Y0
+	VPXOR   Y3, Y3, Y3
+	CMPQ    BX, $1
+	JEQ     residualsZigzag
+	CMPQ    BX, $2
+	JEQ     residualsFrame
+	CMPQ    BX, $3
+	JEQ     residualsDelta
+
+residualsRaw:
+	VPMOVSXDQ (SI), Y4
+	VMOVDQU Y4, (DI)
+	VPOR    Y4, Y0, Y0
+	ADDQ    $16, SI
+	ADDQ    $32, DI
+	SUBQ    $4, CX
+	JNZ     residualsRaw
+	JMP     residualsDone
+
+residualsZigzag:
+	VPMOVSXDQ  (SI), Y4
+	VPSLLQ   $1, Y4, Y6
+	VPCMPGTQ Y4, Y3, Y7
+	VPXOR    Y7, Y6, Y6
+	VMOVDQU  Y6, (DI)
+	VPOR     Y6, Y0, Y0
+	ADDQ     $16, SI
+	ADDQ     $32, DI
+	SUBQ     $4, CX
+	JNZ      residualsZigzag
+	JMP      residualsDone
+
+residualsFrame:
+	VPMOVSXDQ (SI), Y4
+	VPSUBQ  Y2, Y4, Y5
+	VMOVDQU Y5, (DI)
+	VPOR    Y5, Y0, Y0
+	ADDQ    $16, SI
+	ADDQ    $32, DI
+	SUBQ    $4, CX
+	JNZ     residualsFrame
+	JMP     residualsDone
+
+residualsDelta:
+	VPMOVSXDQ  4(SI), Y4
+	VPMOVSXDQ  (SI), Y5
+	VPSUBQ   Y5, Y4, Y6
+	VPSLLQ   $1, Y6, Y7
+	VPCMPGTQ Y6, Y3, Y8
+	VPXOR    Y8, Y7, Y7
+	VMOVDQU  Y7, (DI)
+	VPOR     Y7, Y0, Y0
+	ADDQ     $16, SI
+	ADDQ     $32, DI
+	SUBQ     $4, CX
+	JNZ      residualsDelta
+
+residualsDone:
+	VMOVDQU Y0, (DX)
+	VZEROUPPER
+	RET
+

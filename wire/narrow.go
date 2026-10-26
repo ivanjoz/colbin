@@ -421,6 +421,22 @@ func (w *Writer) Strings(key uint8, values []string) {
 	for _, value := range values {
 		payload += elementSizeBytes(len(value)) + len(value)
 	}
+	w.stringsSized(key, values, payload)
+}
+
+// StringsPayload is Strings for a caller that already added up the elements:
+// payload is each value's length plus its size's bytes (StringPayload).
+func (w *Writer) StringsPayload(key uint8, values []string, payload int) {
+	if len(values) == 0 {
+		return
+	}
+	w.stringsSized(key, values, payload)
+}
+
+// StringPayload is what one element takes: its size and its bytes.
+func StringPayload(size int) int { return elementSizeBytes(size) + size }
+
+func (w *Writer) stringsSized(key uint8, values []string, payload int) {
 	w.Buffer = wirefmt.AppendLength(append(w.Buffer, key<<4|nibbleLength), payload)
 	w.Buffer = appendStringElements(w.Buffer, values, payload)
 }

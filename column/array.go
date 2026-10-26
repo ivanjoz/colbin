@@ -244,8 +244,12 @@ func appendLong[T Signed](out []byte, vals []T) []byte {
 	var constant, deltaOverflows bool
 	var best, frame, steps int
 	wide, isWide := any(vals).([]int64)
-	scanned := isWide && useSIMD && forcedTransform < 0
+	narrow, isNarrow := any(vals).([]int32)
+	isNarrow = isNarrow && narrowKernels && useSIMD
+	scanned := (isWide && useSIMD || isNarrow) && forcedTransform < 0
 	switch {
+	case scanned && isNarrow:
+		minimum, constant, deltaOverflows, best, frame, steps = scanSIMD32(narrow)
 	case scanned:
 		// Both scans in one; see scanSIMD.
 		minimum, constant, deltaOverflows, best, frame, steps = scanSIMD(wide)
@@ -300,9 +304,16 @@ func appendBlocks[T Signed](out []byte, vals []T, transform uint8, base int64, z
 	var scratch [blockSize]uint64
 	n := residualsUnder(transform, len(vals))
 	wide, isWide := any(vals).([]int64)
+	narrow, isNarrow := any(vals).([]int32)
+	isNarrow = isNarrow && narrowKernels && useSIMD
 	for start := 0; start < n; start += blockSize {
 		end := min(start+blockSize, n)
 		block := scratch[:end-start]
+		if isNarrow {
+			w := bits.Len64(residualsSIMD32(narrow[start:], transform, base, zz, block))
+			out = packRun(append(out, byte(w)), block, w)
+			continue
+		}
 		if isWide && useSIMD {
 			// The residuals and the OR their width is taken from, in one go.
 			w := bits.Len64(residualsSIMD(wide[start:], transform, base, zz, block))

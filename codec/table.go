@@ -120,12 +120,17 @@ type scratch struct {
 // a thousand rows needs 24 KB of it, which a handle encoding one message after
 // another would otherwise allocate per call.
 type columnBuffers struct {
-	ints    []int64
+	ints []int64
+	// ints32 is an encode's integer columns that fit an int32, kept at that
+	// width: half the bytes to write, scan and pack from.
+	ints32  []int32
 	strings []string
-	decoded []decodedColumn
+	// payloads is a table's string columns' list sizes, summed as they are gathered.
+	payloads []int
+	decoded  []decodedColumn
 	// usedInts and usedStrings are the most of each buffer the current message
 	// has reserved, which is what release judges a large buffer by.
-	usedInts, usedStrings int
+	usedInts, usedStrings, usedInts32 int
 }
 
 var columnPool sync.Pool // *columnBuffers
@@ -169,11 +174,14 @@ func (buf *scratch) release() {
 	if !keepPooled(cap(columns.strings), columns.usedStrings) {
 		columns.strings = nil
 	}
+	if !keepPooled(cap(columns.ints32), columns.usedInts32) {
+		columns.ints32 = nil
+	}
 	// The strings are the caller's, and a pooled buffer must not keep them
 	// alive. Only what this message reserved can hold any: the rest was cleared
 	// when the buffer last came back.
 	clear(columns.strings[:min(columns.usedStrings, cap(columns.strings))])
-	columns.usedInts, columns.usedStrings = 0, 0
+	columns.usedInts, columns.usedStrings, columns.usedInts32 = 0, 0, 0
 	columnPool.Put(columns)
 }
 
@@ -284,7 +292,7 @@ func appendTableField(writer *wire.Writer8, field *planField, at unsafe.Pointer,
 func appendColumns(
 	writer *wire.Writer8, plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratch, dict *dictionaries,
 ) {
-	ints, strings := gatherTable(plan, slice, stride, buf)
+	narrow, ints, strings, payloads := gatherTable(plan, slice, stride, buf)
 	rows := slice.len
 	var choices []dictColumn
 	if dict != nil {
@@ -298,12 +306,19 @@ func appendColumns(
 				choices = choices[1:]
 				if !choice.refused {
 					writer.DictColumn(column.key, choice.number, choice.ids)
+					payloads = payloads[1:]
 					strings = strings[rows:]
 					continue
 				}
 			}
-			writer.StringColumn(column.key, strings[:rows:rows])
+			writer.StringColumnPayload(column.key, strings[:rows:rows], payloads[0])
+			payloads = payloads[1:]
 			strings = strings[rows:]
+			continue
+		}
+		if column.op.fitsInt32() {
+			writer.Column32(column.key, narrow[:rows:rows])
+			narrow = narrow[rows:]
 			continue
 		}
 		writer.Column(column.key, ints[:rows:rows])
@@ -328,28 +343,105 @@ const gatherChunk = 32
 // times, and the gathering was most of a table's encode. In chunks, a chunk's
 // rows are read from memory once and each column is gathered out of cache —
 // still with one specialised loop per column, never a dispatch per value.
-func gatherTable(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratch) ([]int64, []string) {
+func gatherTable(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratch) ([]int32, []int64, []string, []int) {
 	rows := slice.len
-	intColumns, stringColumns := plan.columnCounts()
-	columns := buf.reserveTable(rows*intColumns, rows*stringColumns)
-	ints := columns.ints[:rows*intColumns]
+	_, stringColumns := plan.columnCounts()
+	narrowColumns, wideColumns := plan.intWidths()
+	columns := buf.reserveTable(rows*wideColumns, rows*stringColumns)
+	columns.usedInts32 = max(columns.usedInts32, rows*narrowColumns)
+	if cap(columns.ints32) < rows*narrowColumns {
+		columns.ints32 = make([]int32, 0, rows*narrowColumns)
+	}
+	narrow := columns.ints32[:rows*narrowColumns]
+	ints := columns.ints[:rows*wideColumns]
 	strings := columns.strings[:rows*stringColumns]
+	if cap(columns.payloads) < stringColumns {
+		columns.payloads = make([]int, stringColumns)
+	}
+	payloads := columns.payloads[:stringColumns]
+	clear(payloads)
+	var sink byte
 	for start := 0; start < rows; start += gatherChunk {
 		end := min(start+gatherChunk, rows)
+		if ahead := start + prefetchDist*gatherChunk; ahead+gatherChunk <= rows {
+			from := unsafe.Add(slice.data, uintptr(ahead)*stride)
+			for off := uintptr(0); off < gatherChunk*stride; off += 64 {
+				sink += *(*byte)(unsafe.Add(from, off))
+			}
+		}
 		chunk := sliceHeader{data: unsafe.Add(slice.data, uintptr(start)*stride), len: end - start}
-		intAt, stringAt := 0, 0
+		narrowAt, wideAt, stringAt, stringColumn := 0, 0, 0, 0
 		for index := range plan.fields {
 			column := &plan.fields[index]
-			if column.op == opString {
-				gatherStrings(strings[stringAt+start:stringAt+end], &chunk, stride, column.offset)
+			switch {
+			case column.op == opString:
+				payloads[stringColumn] += gatherStrings(strings[stringAt+start:stringAt+end], &chunk, stride, column.offset)
 				stringAt += rows
-				continue
+				stringColumn++
+			case column.op.fitsInt32():
+				gatherInts32(narrow[narrowAt+start:narrowAt+end], &chunk, stride, column)
+				narrowAt += rows
+			default:
+				gatherInts(ints[wideAt+start:wideAt+end], &chunk, stride, column)
+				wideAt += rows
 			}
-			gatherInts(ints[intAt+start:intAt+end], &chunk, stride, column)
-			intAt += rows
 		}
 	}
-	return ints, strings
+	prefetchSink = sink
+	return narrow, ints, strings, payloads
+}
+
+var prefetchSink byte
+
+// prefetchDist is how many chunks ahead gatherTable touches the rows it will
+// gather, which the hardware prefetcher does not bring in fast enough from
+// rows a few cache lines wide.
+const prefetchDist = 8
+
+// intWidths is how many of a row type's integer columns are held as int32 and
+// how many as int64.
+func (plan *typePlan) intWidths() (narrow, wide int) {
+	for index := range plan.fields {
+		switch op := plan.fields[index].op; {
+		case op == opString:
+		case op.fitsInt32():
+			narrow++
+		default:
+			wide++
+		}
+	}
+	return narrow, wide
+}
+
+// gatherInts32 is gatherInts for the ops that fit an int32.
+func gatherInts32(dst []int32, slice *sliceHeader, stride uintptr, column *planField) {
+	dst = dst[:slice.len]
+	base := unsafe.Add(slice.data, column.offset)
+	switch column.op {
+	case opBool:
+		gather32(dst, base, stride, func(v bool) int32 {
+			if v {
+				return 1
+			}
+			return 0
+		})
+	case opInt8:
+		gather32(dst, base, stride, func(v int8) int32 { return int32(v) })
+	case opInt16:
+		gather32(dst, base, stride, func(v int16) int32 { return int32(v) })
+	case opInt32:
+		gather32(dst, base, stride, func(v int32) int32 { return v })
+	case opUint8:
+		gather32(dst, base, stride, func(v uint8) int32 { return int32(v) })
+	case opUint16:
+		gather32(dst, base, stride, func(v uint16) int32 { return int32(v) })
+	}
+}
+
+func gather32[T any](dst []int32, base unsafe.Pointer, stride uintptr, widen func(T) int32) {
+	for row := range dst {
+		dst[row] = widen(*(*T)(unsafe.Add(base, uintptr(row)*stride)))
+	}
 }
 
 // columnCounts is how many of a row type's fields go out as integer columns
@@ -417,13 +509,18 @@ func gather[T any](dst []int64, base unsafe.Pointer, stride uintptr, widen func(
 	}
 }
 
-func gatherStrings(dst []string, slice *sliceHeader, stride, offset uintptr) []string {
+// gatherStrings reads one string field out of every row and returns what the
+// values will take as a list's elements, so the column writer need not walk
+// them again: each value's length plus a byte of size, or the escape and four.
+func gatherStrings(dst []string, slice *sliceHeader, stride, offset uintptr) (payload int) {
 	dst = dst[:slice.len]
 	base := unsafe.Add(slice.data, offset)
 	for row := range dst {
-		dst[row] = *(*string)(unsafe.Add(base, uintptr(row)*stride))
+		value := *(*string)(unsafe.Add(base, uintptr(row)*stride))
+		dst[row] = value
+		payload += wire.StringPayload(len(value))
 	}
-	return dst
+	return payload
 }
 
 // readTableField reads a table back into a slice of structs, one column at a

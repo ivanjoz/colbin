@@ -511,12 +511,21 @@ func (w *Writer8) Strings(key uint8, values []string) {
 	}
 	payload := 0
 	for _, value := range values {
-		if len(value) <= inlineElementSize {
-			payload += 1 + len(value)
-		} else {
-			payload += 5 + len(value)
-		}
+		payload += StringPayload(len(value))
 	}
+	w.stringsSized(key, values, payload)
+}
+
+// StringsPayload is Strings for a caller that already added up the elements
+// with StringPayload.
+func (w *Writer8) StringsPayload(key uint8, values []string, payload int) {
+	if len(values) == 0 {
+		return
+	}
+	w.stringsSized(key, values, payload)
+}
+
+func (w *Writer8) stringsSized(key uint8, values []string, payload int) {
 	// The declared length covers the count as well as the elements, which is
 	// what makes a skip uniform across every composite: two bytes of framing,
 	// the length field, and then exactly that many bytes.

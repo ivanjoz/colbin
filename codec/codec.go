@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
+	"github.com/ivanjoz/colbin/column"
 	"github.com/ivanjoz/colbin/wire"
 )
 
@@ -37,6 +38,19 @@ import (
 // a string as an integer without anything looking wrong. New ops go on the end
 // and none of these ever moves. TestFieldOpsArePinned is what catches it.
 type fieldOp uint8
+
+// fitsInt32 is whether a scalar op's values all fit an int32, so that a table
+// column of it can be gathered and encoded at that width.
+func (op fieldOp) fitsInt32() bool {
+	if !column.NarrowKernels {
+		return false
+	}
+	switch op {
+	case opBool, opInt8, opInt16, opInt32, opUint8, opUint16:
+		return true
+	}
+	return false
+}
 
 const (
 	opBool fieldOp = iota

@@ -123,7 +123,7 @@ func appendNarrowTable(writer *wire.Writer, field *planField, at unsafe.Pointer,
 		writer.Close(mark)
 		return
 	}
-	ints, strings := gatherTable(field.sub, slice, field.stride, buf)
+	narrow, ints, strings, payloads := gatherTable(field.sub, slice, field.stride, buf)
 	rows := slice.len
 	var choices []dictColumn
 	if buf.dict != nil {
@@ -137,12 +137,19 @@ func appendNarrowTable(writer *wire.Writer, field *planField, at unsafe.Pointer,
 				choices = choices[1:]
 				if !choice.refused {
 					writer.DictColumn(column.key, choice.number, choice.ids)
+					payloads = payloads[1:]
 					strings = strings[rows:]
 					continue
 				}
 			}
-			writer.StringColumn(column.key, strings[:rows:rows])
+			writer.StringColumnPayload(column.key, strings[:rows:rows], payloads[0])
+			payloads = payloads[1:]
 			strings = strings[rows:]
+			continue
+		}
+		if column.op.fitsInt32() {
+			writer.Column32(column.key, narrow[:rows:rows])
+			narrow = narrow[rows:]
 			continue
 		}
 		writer.Column(column.key, ints[:rows:rows])

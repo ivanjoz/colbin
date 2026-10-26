@@ -242,6 +242,58 @@ micro-benchmark only), 16 inside noise, **32 the best**, and **64 the same as
   1.02–1.15× (66 MB). That, not colbin's reuse, is why the table below has
   colbin losing encode into a reused buffer and winning into a fresh one.
 
+## The third pass: table encode against msgpack
+
+Started from TPC-H normalized encode into a reused buffer, where colbin (80 ms,
+SF 0.1, one E-core) trailed tinylib/msgp (77 ms). A/B against the commit before,
+alone on a core, bytes identical throughout.
+
+**Kept**
+
+- **Sum a string column's payload while gathering it** (`gatherStrings`,
+  `StringColumnPayload`). `Strings` and `allEmpty` had walked 58 MB of header
+  scratch a second time, from memory, only to add up lengths. **−10%.** An
+  all-empty column is `payload == rows`.
+- **Touch the rows 8 chunks ahead in `gatherTable`.** Plain loads, no assembly,
+  so arm64 gets it too. The hardware prefetcher did not keep up with 144-byte
+  rows on an E-core. **−6.4%** more; any distance from 2 to 32 chunks is the same.
+- **Integer columns that fit an int32 are gathered and scanned as int32 on
+  amd64** (`scanVec32`, `residualsVec32`: the int64 kernels with a sign-extending
+  load). **−3.0%** (p=0.033, n=12). Same bytes as the int64 column, held by
+  `TestAppendArrayInt32MatchesInt64`.
+
+After them: 64 ms against msgpack's 74 ms, alone on a core.
+
+**Tried and reverted**
+
+- **A 64-byte copy for every string up to 64 bytes**, with a page-boundary guard
+  so the over-read cannot fault: **+2.8%**. The string kernel is bound by memory,
+  not by its length branches; the over-read touches extra lines.
+- **Also prefetching the line of each string's last byte**: **+1.7%**.
+- **`gatherChunk` at 16 or 64** with the prefetch: 16 is +3%, 64 the same as 32.
+- **String headers in a scratch the collector does not scan** (`uintptr` pairs, so
+  nothing to `clear` on release): −0.7%, p=0.06, n=10. Not worth the `unsafe`.
+- **Encoding strings while gathering**, into a buffer per column: **+3.9%**, and
+  +1.6% with the string bytes touched further ahead.
+- **Copying every row's strings to their place in the message in one pass**, with
+  the integer columns encoded first to a side buffer so the layout is known:
+  **+19%**. It halved `copyElements` (a row's strings are usually one allocation,
+  and the column-at-a-time copy re-reads those lines once per string column), but
+  the line fetches moved into the touch loop and a second pass over the rows was
+  added. On an E-core the limit is how many misses it keeps in flight, not how
+  many passes it makes.
+- **NEON int32 kernels** (`statsVec`, `blockSetsVec`, `stepsVec`,
+  `residualsVec` over int32, held to the int64 bytes in 2826 cases on Graviton3):
+  **~3% slower** on Lambda arm64 (58.3 against 56.7 ms, msgpack steady at 62.4).
+  The sign extension costs what the halved input saves, so arm64 keeps int64.
+
+Not tried: statistics computed in the gather (one column read saved, about as
+much scalar work added), and encoding columns in parallel, which the harness's
+`GOMAXPROCS=1` cannot show.
+
+`GOARCH=386 go vet ./codec` fails on `dictionary_test.go:274`, where the constant
+`2654435761` overflows `int`; it is from the dictionary commit, not this pass.
+
 ## Lessons for the next pass
 
 - **Go's inliner budget (80) is load-bearing here.** Moving the writers to

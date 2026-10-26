@@ -40,6 +40,6 @@ func BenchmarkGatherTable(b *testing.B) {
 	slice := (*sliceHeader)(unsafe.Pointer(&rows))
 	b.ResetTimer()
 	for b.Loop() {
-		gatherTable(plan, slice, unsafe.Sizeof(rows[0]), &buf)
+		_, _, _, _ = gatherTable(plan, slice, unsafe.Sizeof(rows[0]), &buf)
 	}
 }

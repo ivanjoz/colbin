@@ -51,9 +51,19 @@ func (w *Writer8) Column(key uint8, values []int64) {
 	w.Close(mark)
 }
 
+// Column32 is Column for a column held as int32.
+func (w *Writer8) Column32(key uint8, values []int32) {
+	if allZero(values) {
+		return
+	}
+	mark := w.openSized(key, classCol, 0, len(values))
+	w.Buffer = column.AppendArray(w.Buffer, values)
+	w.Close(mark)
+}
+
 // allZero reports whether a column has nothing to write, which an empty one
 // does not either.
-func allZero(values []int64) bool {
+func allZero[T int32 | int64](values []T) bool {
 	for _, value := range values {
 		if value != 0 {
 			return false
@@ -74,6 +84,16 @@ func (w *Writer8) StringColumn(key uint8, values []string) {
 		return
 	}
 	w.Strings(key, values)
+}
+
+// StringColumnPayload is StringColumn for a caller that summed the payload
+// as it gathered the values (StringPayload). A column of empty strings has
+// exactly a byte of size for each, and is omitted.
+func (w *Writer8) StringColumnPayload(key uint8, values []string, payload int) {
+	if payload == len(values) {
+		return
+	}
+	w.StringsPayload(key, values, payload)
 }
 
 // allEmpty is allZero for a string column.

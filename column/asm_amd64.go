@@ -39,6 +39,62 @@ func hasAVX2() bool {
 //go:noescape
 func scanVec(values *int64, blocks, size int, out *int64)
 
+// scanVec32 is scanVec over int32 values.
+//
+//go:noescape
+func scanVec32(values *int32, blocks, size int, out *int64)
+
+// residualsVec32 is residualsVec over int32 values.
+//
+//go:noescape
+func residualsVec32(values *int32, n int, base int64, mode int, dst *uint64, out *[4]uint64)
+
+// narrowKernels is whether []int32 columns have kernels of their own.
+const narrowKernels = true
+
+// NarrowKernels is narrowKernels for the codec: a table keeps an integer column at
+// int32 only where there are kernels for it, since widening one for the int64
+// kernels costs the pass the narrow scratch saves.
+const NarrowKernels = narrowKernels
+
+// scanCall is the scan kernel for T's width.
+func scanCall[T int32 | int64](values *T, blocks, size int, out *int64) {
+	switch pointer := any(values).(type) {
+	case *int64:
+		scanVec(pointer, blocks, size, out)
+	case *int32:
+		scanVec32(pointer, blocks, size, out)
+	}
+}
+
+// scanSIMD32 is scanSIMD for a column of int32.
+func scanSIMD32(vals []int32) (int64, bool, bool, int, int, int) { return scanSIMD(vals) }
+
+// residualsSIMD32 is residualsSIMD for a column of int32.
+func residualsSIMD32(vals []int32, transform uint8, base int64, zz bool, block []uint64) uint64 {
+	var set uint64
+	full := len(block) &^ 3
+	if full > 0 {
+		var lanes [4]uint64
+		residualsVec32(&vals[0], full, base, residualMode(transform, zz), &block[0], &lanes)
+		set = lanes[0] | lanes[1] | lanes[2] | lanes[3]
+	}
+	for index := full; index < len(block); index++ {
+		var residual uint64
+		switch value := int64(vals[index]); transform {
+		case trFOR:
+			residual = uint64(value) - uint64(base)
+		case trDelta:
+			residual = zigzag(int64(vals[index+1]) - value)
+		default:
+			residual = encode(value, zz)
+		}
+		block[index] = residual
+		set |= residual
+	}
+	return set
+}
+
 // scanChunk is how many blocks one scanVec call summarises.
 const scanChunk = 32
 
@@ -56,7 +112,7 @@ const scanChunk = 32
 // Nor does it test every step for overflow: a step is at most the column's
 // range, so none can overflow unless the range does, and only then, which
 // takes values more than 2^63 apart, are the steps tested one by one.
-func scanSIMD(vals []int64) (minimum int64, constant, deltaOverflows bool, raw, frame, steps int) {
+func scanSIMD[T int32 | int64](vals []T) (minimum int64, constant, deltaOverflows bool, raw, frame, steps int) {
 	n := len(vals)
 	blocks := (n + blockSize - 1) / blockSize
 	var spare [512]int64
@@ -64,7 +120,7 @@ func scanSIMD(vals []int64) (minimum int64, constant, deltaOverflows bool, raw, 
 	if blocks > len(spare) {
 		highs = make([]int64, 0, blocks)
 	}
-	minimum = vals[0]
+	minimum = int64(vals[0])
 	maximum := minimum
 	var plain, zigzagged, stepsCost int // raw unzigzagged and zigzagged, and delta's blocks
 	add := func(low, high int64, stepSet uint64, count, stepCount int) {
@@ -83,7 +139,7 @@ func scanSIMD(vals []int64) (minimum int64, constant, deltaOverflows bool, raw, 
 	whole := (n - 1) / blockSize
 	for block := 0; block < whole; {
 		count := min(scanChunk, whole-block)
-		scanVec(&vals[block*blockSize], count, blockSize, &summaries[0][0])
+		scanCall(&vals[block*blockSize], count, blockSize, &summaries[0][0])
 		for _, summary := range summaries[:count] {
 			add(summary[0], summary[1], uint64(summary[2]), blockSize, blockSize)
 		}
@@ -93,19 +149,19 @@ func scanSIMD(vals []int64) (minimum int64, constant, deltaOverflows bool, raw, 
 	// The last block: the kernel as far as its steps run to whole vectors,
 	// and the rest one value at a time.
 	start := whole * blockSize
-	low, high := vals[start], vals[start]
+	low, high := int64(vals[start]), int64(vals[start])
 	var stepSet uint64
 	at := start
 	if size := (n - 1 - start) &^ 3; size > 0 {
-		scanVec(&vals[start], 1, size, &summaries[0][0])
+		scanCall(&vals[start], 1, size, &summaries[0][0])
 		low, high, stepSet = summaries[0][0], summaries[0][1], uint64(summaries[0][2])
 		at += size
 	}
 	for ; at < n; at++ {
-		value := vals[at]
+		value := int64(vals[at])
 		low, high = min(low, value), max(high, value)
 		if at+1 < n {
-			next := vals[at+1]
+			next := int64(vals[at+1])
 			stepSet |= zigzag(next - value)
 		}
 	}
@@ -113,7 +169,7 @@ func scanSIMD(vals []int64) (minimum int64, constant, deltaOverflows bool, raw, 
 
 	if uint64(maximum)-uint64(minimum) > math.MaxInt64 {
 		for index := 1; index < n && !deltaOverflows; index++ {
-			deltaOverflows = subOverflows(vals[index], vals[index-1])
+			deltaOverflows = subOverflows(int64(vals[index]), int64(vals[index-1]))
 		}
 	}
 	constant = minimum == maximum
