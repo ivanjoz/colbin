@@ -30,7 +30,9 @@ func Append(dst []byte, v any) ([]byte, error) { return codec.Append(dst, v) }
 //
 // Every field of dst is set, including the ones the message omitted: an omitted
 // key means the value was zero, so the destination is cleared first rather than
-// left holding whatever it had.
+// left holding whatever it had. A slice in dst lends its array, as in
+// encoding/json: a list that fits in its capacity is decoded into it, so a slice
+// taken from dst before the call sees its elements overwritten.
 func Unmarshal(data []byte, dst any) error { return codec.Unmarshal(data, dst) }
 
 // FieldIDs reports the id of every field, counting from one as the tags do, for

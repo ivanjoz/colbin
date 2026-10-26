@@ -182,6 +182,9 @@ type typePlan struct {
 	ids  []uint16
 	// rows is the plan compiled for writePlan, or nil. See rows.go.
 	rows *rowProgram
+	// reset clears a record and keeps its slices' arrays, or is nil when the
+	// type is cleared whole. See reset.go.
+	reset *resetProgram
 }
 
 var planCache sync.Map // reflect.Type -> *typePlan or error
@@ -368,6 +371,7 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 	}
 	plan.envelope = isEnvelope(structType)
 	plan.finish()
+	plan.reset = compileReset(structType)
 	return plan, nil
 }
 
@@ -844,6 +848,10 @@ func Marshal(v any) ([]byte, error) {
 // key means the value was zero, so the destination is cleared first rather than
 // left holding whatever it had. A message that is not one — no root descriptor
 // this version writes — leaves dst untouched.
+//
+// A slice in dst lends its array: a list that fits in its capacity is decoded
+// into it, as encoding/json does, so a slice taken from dst before the call sees
+// its elements overwritten. A field the message omits is still nil.
 func Unmarshal(data []byte, dst any) error {
 	pointer := reflect.ValueOf(dst)
 	if pointer.Kind() != reflect.Pointer || pointer.IsNil() {
@@ -862,8 +870,15 @@ func Unmarshal(data []byte, dst any) error {
 		}
 		return errBadRoot(data, value.Type())
 	}
-	value.SetZero()
-	return unmarshalBody(body, section, wide, plan, unsafe.Pointer(value.UnsafeAddr()), value.Type())
+	record := unsafe.Pointer(value.UnsafeAddr())
+	if !plan.reset.holds(record) {
+		value.SetZero()
+		return unmarshalBody(body, section, wide, plan, record, value.Type())
+	}
+	plan.reset.reset(record)
+	err = unmarshalBody(body, section, wide, plan, record, value.Type())
+	plan.reset.settle(record)
+	return err
 }
 
 // unmarshalBody decodes a message body into an already-zeroed record, at the
@@ -1103,7 +1118,7 @@ func (codec *Codec[T]) Encode(value *T) ([]byte, error) {
 
 // Unmarshal decodes a message into value, zeroing it first: a key the message
 // omits means the field was zero. A message that is not one leaves value
-// untouched.
+// untouched. A slice in value lends its array, as in the package Unmarshal.
 func (codec *Codec[T]) Unmarshal(data []byte, value *T) error {
 	section, body, wide, ok := rootParts(data)
 	if !ok {
@@ -1113,7 +1128,13 @@ func (codec *Codec[T]) Unmarshal(data []byte, value *T) error {
 		}
 		return errBadRoot(data, codec.what)
 	}
-	*value = *new(T)
+	reset := codec.plan.reset
+	held := reset.holds(unsafe.Pointer(value))
+	if held {
+		reset.reset(unsafe.Pointer(value))
+	} else {
+		*value = *new(T)
+	}
 	// unmarshalBody's dispatch, repeated here to save its frame: a nanosecond of
 	// a 28 ns flat decode.
 	var err error
@@ -1121,6 +1142,9 @@ func (codec *Codec[T]) Unmarshal(data []byte, value *T) error {
 		err = unmarshalWide(body, section, codec.plan, unsafe.Pointer(value))
 	} else {
 		err = unmarshalNarrow(body, codec.plan, unsafe.Pointer(value))
+	}
+	if held {
+		reset.settle(unsafe.Pointer(value))
 	}
 	if err != nil {
 		return errDecoding(codec.what, err)

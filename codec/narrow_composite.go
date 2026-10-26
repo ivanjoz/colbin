@@ -312,7 +312,7 @@ func readNarrowStructs(reader *wire.Reader, field *planField, at unsafe.Pointer,
 	if !ok {
 		return
 	}
-	newSlice(field, at, count)
+	settle := newSlice(field, at, count) && field.sub.reset.keeps()
 	data := (*sliceHeader)(at).data
 	for index := range count {
 		body, ok := elements.Element()
@@ -320,8 +320,11 @@ func readNarrowStructs(reader *wire.Reader, field *planField, at unsafe.Pointer,
 			reader.Fail(elements.Err())
 			return
 		}
-		readNarrowBody(reader, body, field.sub.isWide, field.sub,
-			unsafe.Add(data, uintptr(index)*field.stride), buf)
+		element := unsafe.Add(data, uintptr(index)*field.stride)
+		readNarrowBody(reader, body, field.sub.isWide, field.sub, element, buf)
+		if settle {
+			field.sub.reset.settle(element)
+		}
 		if reader.Err() != nil {
 			return
 		}
@@ -345,7 +348,7 @@ func readNarrowTable(reader *wire.Reader, field *planField, at unsafe.Pointer, b
 		reader.Fail(err)
 		return
 	}
-	newSlice(field, at, rows)
+	reused := newSlice(field, at, rows)
 	table := startTable(field, (*sliceHeader)(at).data, rows, buf)
 	columns := wire.NewReader(body)
 	for columns.More() {
@@ -380,6 +383,7 @@ func readNarrowTable(reader *wire.Reader, field *planField, at unsafe.Pointer, b
 		}
 	}
 	table.finish()
+	field.sub.reset.settleRows(reused, (*sliceHeader)(at).data, rows, field.stride)
 	reader.Fail(columns.Err())
 }
 

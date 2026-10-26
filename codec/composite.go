@@ -188,7 +188,7 @@ func readStructsField(reader *wire.Reader8, field *planField, at unsafe.Pointer,
 	if !ok {
 		return
 	}
-	newSlice(field, at, count)
+	settle := newSlice(field, at, count) && field.sub.reset.keeps()
 	data := (*sliceHeader)(at).data
 	for index := range count {
 		body, wideKeys, ok := elements.ElementStructBody()
@@ -196,8 +196,11 @@ func readStructsField(reader *wire.Reader8, field *planField, at unsafe.Pointer,
 			reader.Fail(elements.Err())
 			return
 		}
-		readBody(reader, body, wideKeys, field.sub,
-			unsafe.Add(data, uintptr(index)*field.stride), buf)
+		element := unsafe.Add(data, uintptr(index)*field.stride)
+		readBody(reader, body, wideKeys, field.sub, element, buf)
+		if settle {
+			field.sub.reset.settle(element)
+		}
 		if reader.Err() != nil {
 			return
 		}
@@ -219,16 +222,27 @@ func readStructsField(reader *wire.Reader8, field *planField, at unsafe.Pointer,
 // backing array reachable while the elements are written into it. A failure part
 // way therefore leaves a slice whose tail is zero, which is why a caller must
 // check Err before reading one.
-func newSlice(field *planField, at unsafe.Pointer, count int) {
+//
+// A field that kept its array through a reset (reset.go) and has room for count
+// is decoded into it instead, each element cleared by the element type's program,
+// and newSlice reports true: the caller then settles each element once it is
+// read.
+func newSlice(field *planField, at unsafe.Pointer, count int) (reused bool) {
 	if count == 0 {
 		slice := reflect.MakeSlice(field.sliceType, 0, 0)
 		*(*sliceHeader)(at) = sliceHeader{data: slice.UnsafePointer()}
-		return
+		return false
+	}
+	if kept := (*sliceHeader)(at); kept.cap >= count && field.sub.reset != nil {
+		kept.len = count
+		field.sub.reset.resetRows(kept.data, count, field.stride)
+		return true
 	}
 	*(*sliceHeader)(at) = sliceHeader{}
 	slice := reflect.NewAt(field.sliceType, at).Elem()
 	slice.Grow(count)
 	slice.SetLen(count)
+	return false
 }
 
 // readRun fills a record from a key run, which is what a nested struct's body

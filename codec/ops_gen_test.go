@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"go/format"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -280,9 +281,12 @@ func synced(call string) string {
 }
 
 func readArm(out *bytes.Buffer, row valueOp) {
-	value := "reader." + row.read
+	// A list appends to the field cut to zero, which is nil after a plain clear
+	// and the array the field kept after a reset. See reset.go.
+	kept := fmt.Sprintf("(*(*%s)(at))[:0]", goTypeName(row))
+	value := "reader." + strings.Replace(row.read, "(nil)", "("+kept+")", 1)
 	if row.op == opBytes {
-		value = fmt.Sprintf("append([]byte(nil), %s...)", value)
+		value = fmt.Sprintf("append(%s, %s...)", kept, value)
 	}
 	fmt.Fprintf(out, "case %s:\n*(*%s)(at) = %s\n", opName(row.op), goTypeName(row), value)
 }

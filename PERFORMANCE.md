@@ -294,6 +294,43 @@ much scalar work added), and encoding columns in parallel, which the harness's
 `GOARCH=386 go vet ./codec` fails on `dictionary_test.go:274`, where the constant
 `2654435761` overflows `int`; it is from the dictionary commit, not this pass.
 
+## The fourth pass: a decode into a used value
+
+A decode cleared its destination with `*value = *new(T)`, and `newSlice`
+cleared the field before growing it, so a decode into the same value every time
+allocated as much as one into a new value: sales 10k allocations and 2.6 MB a
+call where msgpack, which reslices what the value holds, made none. Measured on
+the laptop A/B against `bf7151f`, alone on a core, bytes unchanged.
+
+**Kept**
+
+- **Slices lend their arrays to the next decode** (`reset.go`). A type is
+  cleared by a program built once from its layout: plain bytes in runs, a typed
+  store per string, pointer and interface, and each slice cut to length zero
+  with its capacity kept. A list or table that fits is decoded into it, its rows
+  cleared by the element's program (one `clear` for a row without pointers), and
+  a list of integers or strings appends to the field cut to zero. `settle` sets
+  what the message did not carry back to nil, so a decode into a used value is
+  `DeepEqual` to one into a new value, held by a test that also interleaves
+  broken messages. It is encoding/json's rule: a slice taken from the value
+  before the decode sees its elements overwritten. Decode-reuse: sales −21 to
+  −23% (allocations 10k → 0), dataset −28%, TPC-H normalized −45% (131 → 40 MB),
+  TPC-H nested 152k → 2.3k allocations and no change in time, reading −12 to
+  −18% (1 → 0 allocations).
+- **A list of integers grows once to its length** (`appendArray`), not by
+  doubling.
+
+**Tried and changed**
+
+- **The root cleared by its program on every decode** cost reading's
+  decode-fresh +8%: a step per field against one clear. **Saving the root's
+  slices on the stack, clearing whole and restoring them** cost the same. What
+  shipped clears a root whole unless one of its slices has capacity, which a new
+  value never does: decode-fresh +1.5%, inside layout noise.
+
+After it, against msgpack on the laptop: sales decode-reuse 6.1 against 7.6 ms,
+dataset 9.5 against 14.2 ms, reading 123 against 124 ns.
+
 ## Lessons for the next pass
 
 - **Go's inliner budget (80) is load-bearing here.** Moving the writers to

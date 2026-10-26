@@ -285,23 +285,23 @@ func readScalars(reader *wire.Reader, plan *typePlan, record unsafe.Pointer) {
 		case opString:
 			*(*string)(at) = reader.String()
 		case opBytes:
-			*(*[]byte)(at) = append([]byte(nil), reader.Bytes()...)
+			*(*[]byte)(at) = append((*(*[]byte)(at))[:0], reader.Bytes()...)
 		case opInt8s:
-			*(*[]int8)(at) = reader.Int8s(nil)
+			*(*[]int8)(at) = reader.Int8s((*(*[]int8)(at))[:0])
 		case opInt16s:
-			*(*[]int16)(at) = reader.Int16s(nil)
+			*(*[]int16)(at) = reader.Int16s((*(*[]int16)(at))[:0])
 		case opInt32s:
-			*(*[]int32)(at) = reader.Int32s(nil)
+			*(*[]int32)(at) = reader.Int32s((*(*[]int32)(at))[:0])
 		case opInt64s:
-			*(*[]int64)(at) = reader.Ints(nil)
+			*(*[]int64)(at) = reader.Ints((*(*[]int64)(at))[:0])
 		case opUint16s:
-			*(*[]uint16)(at) = reader.Uint16s(nil)
+			*(*[]uint16)(at) = reader.Uint16s((*(*[]uint16)(at))[:0])
 		case opUint32s:
-			*(*[]uint32)(at) = reader.Uint32s(nil)
+			*(*[]uint32)(at) = reader.Uint32s((*(*[]uint32)(at))[:0])
 		case opUint64s:
-			*(*[]uint64)(at) = reader.Uint64s(nil)
+			*(*[]uint64)(at) = reader.Uint64s((*(*[]uint64)(at))[:0])
 		case opStrings:
-			*(*[]string)(at) = reader.Strings(nil)
+			*(*[]string)(at) = reader.Strings((*(*[]string)(at))[:0])
 		default:
 			reader.Fail(errNotValueOp(field.op))
 		}
@@ -337,23 +337,23 @@ func readValue(reader *wire.Reader, op fieldOp, at unsafe.Pointer) bool {
 	case opString:
 		*(*string)(at) = reader.String()
 	case opBytes:
-		*(*[]byte)(at) = append([]byte(nil), reader.Bytes()...)
+		*(*[]byte)(at) = append((*(*[]byte)(at))[:0], reader.Bytes()...)
 	case opInt8s:
-		*(*[]int8)(at) = reader.Int8s(nil)
+		*(*[]int8)(at) = reader.Int8s((*(*[]int8)(at))[:0])
 	case opInt16s:
-		*(*[]int16)(at) = reader.Int16s(nil)
+		*(*[]int16)(at) = reader.Int16s((*(*[]int16)(at))[:0])
 	case opInt32s:
-		*(*[]int32)(at) = reader.Int32s(nil)
+		*(*[]int32)(at) = reader.Int32s((*(*[]int32)(at))[:0])
 	case opInt64s:
-		*(*[]int64)(at) = reader.Ints(nil)
+		*(*[]int64)(at) = reader.Ints((*(*[]int64)(at))[:0])
 	case opUint16s:
-		*(*[]uint16)(at) = reader.Uint16s(nil)
+		*(*[]uint16)(at) = reader.Uint16s((*(*[]uint16)(at))[:0])
 	case opUint32s:
-		*(*[]uint32)(at) = reader.Uint32s(nil)
+		*(*[]uint32)(at) = reader.Uint32s((*(*[]uint32)(at))[:0])
 	case opUint64s:
-		*(*[]uint64)(at) = reader.Uint64s(nil)
+		*(*[]uint64)(at) = reader.Uint64s((*(*[]uint64)(at))[:0])
 	case opStrings:
-		*(*[]string)(at) = reader.Strings(nil)
+		*(*[]string)(at) = reader.Strings((*(*[]string)(at))[:0])
 	default:
 		return false
 	}
@@ -393,23 +393,23 @@ func readField(reader *wire.Reader, field *planField, record unsafe.Pointer, buf
 	case opString:
 		*(*string)(at) = reader.StringIn(&buf.strings)
 	case opBytes:
-		*(*[]byte)(at) = append([]byte(nil), reader.Bytes()...)
+		*(*[]byte)(at) = append((*(*[]byte)(at))[:0], reader.Bytes()...)
 	case opInt8s:
-		*(*[]int8)(at) = reader.Int8s(nil)
+		*(*[]int8)(at) = reader.Int8s((*(*[]int8)(at))[:0])
 	case opInt16s:
-		*(*[]int16)(at) = reader.Int16s(nil)
+		*(*[]int16)(at) = reader.Int16s((*(*[]int16)(at))[:0])
 	case opInt32s:
-		*(*[]int32)(at) = reader.Int32s(nil)
+		*(*[]int32)(at) = reader.Int32s((*(*[]int32)(at))[:0])
 	case opInt64s:
-		*(*[]int64)(at) = reader.Ints(nil)
+		*(*[]int64)(at) = reader.Ints((*(*[]int64)(at))[:0])
 	case opUint16s:
-		*(*[]uint16)(at) = reader.Uint16s(nil)
+		*(*[]uint16)(at) = reader.Uint16s((*(*[]uint16)(at))[:0])
 	case opUint32s:
-		*(*[]uint32)(at) = reader.Uint32s(nil)
+		*(*[]uint32)(at) = reader.Uint32s((*(*[]uint32)(at))[:0])
 	case opUint64s:
-		*(*[]uint64)(at) = reader.Uint64s(nil)
+		*(*[]uint64)(at) = reader.Uint64s((*(*[]uint64)(at))[:0])
 	case opStrings:
-		*(*[]string)(at) = reader.Strings(nil)
+		*(*[]string)(at) = reader.Strings((*(*[]string)(at))[:0])
 	case opStruct:
 		readNarrowStruct(reader, field, at, buf)
 	case opStructs:
@@ -704,23 +704,23 @@ func readScalarsWide(reader *wire.Reader8, plan *typePlan, record unsafe.Pointer
 		case opString:
 			*(*string)(at) = reader.String()
 		case opBytes:
-			*(*[]byte)(at) = append([]byte(nil), reader.Bytes()...)
+			*(*[]byte)(at) = append((*(*[]byte)(at))[:0], reader.Bytes()...)
 		case opInt8s:
-			*(*[]int8)(at) = reader.Int8s(nil)
+			*(*[]int8)(at) = reader.Int8s((*(*[]int8)(at))[:0])
 		case opInt16s:
-			*(*[]int16)(at) = reader.Int16s(nil)
+			*(*[]int16)(at) = reader.Int16s((*(*[]int16)(at))[:0])
 		case opInt32s:
-			*(*[]int32)(at) = reader.Int32s(nil)
+			*(*[]int32)(at) = reader.Int32s((*(*[]int32)(at))[:0])
 		case opInt64s:
-			*(*[]int64)(at) = reader.Ints(nil)
+			*(*[]int64)(at) = reader.Ints((*(*[]int64)(at))[:0])
 		case opUint16s:
-			*(*[]uint16)(at) = reader.Uint16s(nil)
+			*(*[]uint16)(at) = reader.Uint16s((*(*[]uint16)(at))[:0])
 		case opUint32s:
-			*(*[]uint32)(at) = reader.Uint32s(nil)
+			*(*[]uint32)(at) = reader.Uint32s((*(*[]uint32)(at))[:0])
 		case opUint64s:
-			*(*[]uint64)(at) = reader.Uint64s(nil)
+			*(*[]uint64)(at) = reader.Uint64s((*(*[]uint64)(at))[:0])
 		case opStrings:
-			*(*[]string)(at) = reader.Strings(nil)
+			*(*[]string)(at) = reader.Strings((*(*[]string)(at))[:0])
 		default:
 			reader.Fail(errNotValueOp(field.op))
 		}
@@ -756,23 +756,23 @@ func readValueWide(reader *wire.Reader8, op fieldOp, at unsafe.Pointer) bool {
 	case opString:
 		*(*string)(at) = reader.String()
 	case opBytes:
-		*(*[]byte)(at) = append([]byte(nil), reader.Bytes()...)
+		*(*[]byte)(at) = append((*(*[]byte)(at))[:0], reader.Bytes()...)
 	case opInt8s:
-		*(*[]int8)(at) = reader.Int8s(nil)
+		*(*[]int8)(at) = reader.Int8s((*(*[]int8)(at))[:0])
 	case opInt16s:
-		*(*[]int16)(at) = reader.Int16s(nil)
+		*(*[]int16)(at) = reader.Int16s((*(*[]int16)(at))[:0])
 	case opInt32s:
-		*(*[]int32)(at) = reader.Int32s(nil)
+		*(*[]int32)(at) = reader.Int32s((*(*[]int32)(at))[:0])
 	case opInt64s:
-		*(*[]int64)(at) = reader.Ints(nil)
+		*(*[]int64)(at) = reader.Ints((*(*[]int64)(at))[:0])
 	case opUint16s:
-		*(*[]uint16)(at) = reader.Uint16s(nil)
+		*(*[]uint16)(at) = reader.Uint16s((*(*[]uint16)(at))[:0])
 	case opUint32s:
-		*(*[]uint32)(at) = reader.Uint32s(nil)
+		*(*[]uint32)(at) = reader.Uint32s((*(*[]uint32)(at))[:0])
 	case opUint64s:
-		*(*[]uint64)(at) = reader.Uint64s(nil)
+		*(*[]uint64)(at) = reader.Uint64s((*(*[]uint64)(at))[:0])
 	case opStrings:
-		*(*[]string)(at) = reader.Strings(nil)
+		*(*[]string)(at) = reader.Strings((*(*[]string)(at))[:0])
 	default:
 		return false
 	}
@@ -812,23 +812,23 @@ func readWideField(reader *wire.Reader8, field *planField, record unsafe.Pointer
 	case opString:
 		*(*string)(at) = reader.StringIn(&buf.strings)
 	case opBytes:
-		*(*[]byte)(at) = append([]byte(nil), reader.Bytes()...)
+		*(*[]byte)(at) = append((*(*[]byte)(at))[:0], reader.Bytes()...)
 	case opInt8s:
-		*(*[]int8)(at) = reader.Int8s(nil)
+		*(*[]int8)(at) = reader.Int8s((*(*[]int8)(at))[:0])
 	case opInt16s:
-		*(*[]int16)(at) = reader.Int16s(nil)
+		*(*[]int16)(at) = reader.Int16s((*(*[]int16)(at))[:0])
 	case opInt32s:
-		*(*[]int32)(at) = reader.Int32s(nil)
+		*(*[]int32)(at) = reader.Int32s((*(*[]int32)(at))[:0])
 	case opInt64s:
-		*(*[]int64)(at) = reader.Ints(nil)
+		*(*[]int64)(at) = reader.Ints((*(*[]int64)(at))[:0])
 	case opUint16s:
-		*(*[]uint16)(at) = reader.Uint16s(nil)
+		*(*[]uint16)(at) = reader.Uint16s((*(*[]uint16)(at))[:0])
 	case opUint32s:
-		*(*[]uint32)(at) = reader.Uint32s(nil)
+		*(*[]uint32)(at) = reader.Uint32s((*(*[]uint32)(at))[:0])
 	case opUint64s:
-		*(*[]uint64)(at) = reader.Uint64s(nil)
+		*(*[]uint64)(at) = reader.Uint64s((*(*[]uint64)(at))[:0])
 	case opStrings:
-		*(*[]string)(at) = reader.Strings(nil)
+		*(*[]string)(at) = reader.Strings((*(*[]string)(at))[:0])
 	case opStruct:
 		readStructField(reader, field, at, buf)
 	case opStructs:

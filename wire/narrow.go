@@ -52,6 +52,7 @@ import (
 	"errors"
 	"math"
 	"math/bits"
+	"slices"
 
 	"github.com/ivanjoz/colbin/internal/wirefmt"
 )
@@ -1086,6 +1087,10 @@ func isSigned[T Integer]() bool {
 // wide VEC carries. Generic over the element type and touching no pointer, so it
 // is safe to reach from anywhere.
 func appendArray[T Integer](dst []T, elements []byte, width int, positive bool) []T {
+	if width > 0 && len(elements) != 0 {
+		// Room for every element at once, rather than growing as append does.
+		dst = slices.Grow(dst, len(elements)/width)
+	}
 	if positive {
 		return appendMagnitudes(dst, elements, width)
 	}

@@ -543,7 +543,7 @@ func readColumns(columns *wire.Reader8, field *planField, at unsafe.Pointer, row
 		columns.Fail(err)
 		return
 	}
-	newSlice(field, at, rows)
+	reused := newSlice(field, at, rows)
 	table := startTable(field, (*sliceHeader)(at).data, rows, buf)
 	for columns.More() {
 		column := field.sub.find(columns.Key())
@@ -575,6 +575,7 @@ func readColumns(columns *wire.Reader8, field *planField, at unsafe.Pointer, row
 		}
 	}
 	table.finish()
+	field.sub.reset.settleRows(reused, (*sliceHeader)(at).data, rows, field.stride)
 }
 
 var errColumnLength = errors.New("colbin: a table column holds a different number of values than the table has rows")
