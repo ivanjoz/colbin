@@ -353,25 +353,25 @@ text, _ = colbin.ToJSON(nil, standalone)
 
 | | JSON | protobuf | colbin | colbin + packed5 | colbin/JSON |
 |---|---:|---:|---:|---:|---:|
-| Reading | 110 | 32 | 27 | 27 | 87 |
-| Order | 198 | 49 | 46 | 44 | 121 |
+| Reading | 110 | 32 | 26 | 26 | 86 |
+| Order | 198 | 49 | 45 | 44 | 120 |
 | Product | 148 | 81 | 81 | 72 | 137 |
-| Metrics | 88 645 | 26 000 | 3 979 | 3 979 | 4 017 |
-| Sales | 186 938 | 34 168 | 26 875 | 26 875 | 27 058 |
-| Dataset | 317 364 | 80 503 | 49 434 | 47 992 | 49 882 |
+| Metrics | 88 645 | 26 000 | 3 975 | 3 975 | 4 013 |
+| Sales | 186 938 | 34 168 | 26 992 | 26 992 | 27 175 |
+| Dataset | 317 364 | 80 503 | 49 597 | 48 159 | 50 045 |
 
 | gzip | JSON | colbin | colbin/JSON |
 |---|---:|---:|---:|
-| Metrics | 9 548 | 2 638 | 2 675 |
-| Sales | 20 702 | 17 393 | 17 546 |
-| Dataset | 38 029 | 27 509 | 27 849 |
+| Metrics | 9 548 | 2 636 | 2 675 |
+| Sales | 20 702 | 17 499 | 17 650 |
+| Dataset | 38 029 | 27 764 | 28 095 |
 
 **Reading the size tables:**
 - **Single flat records.** colbin and protobuf are within a few bytes. Both
   omit zeros and write one key per present field, and the difference is
   colbin's one-byte K4 header against protobuf's tag varint.
 - **Lists of records.** The difference is the table layout: the 2 000 metric
-  rows take 26 000 B in protobuf and 3 979 B in colbin.
+  rows take 26 000 B in protobuf and 3 975 B in colbin.
 - **Sales** gains less than Metrics because only sales with 8 or more lines
   are written as tables (see the corpus split below).
 - **colbin/JSON** costs the size of its section.
@@ -382,30 +382,30 @@ text, _ = colbin.ToJSON(nil, standalone)
 
 | encode | JSON | protobuf | colbin | colbin + packed5 | colbin/JSON |
 |---|---:|---:|---:|---:|---:|
-| Reading | 414 ns | 118 ns | 40 ns | 50 ns | 134 ns |
-| Order | 700 ns | 267 ns | 122 ns | 145 ns | 273 ns |
-| Product | 416 ns | 168 ns | 44 ns | 129 ns | 230 ns |
-| Metrics | 236 µs | 179 µs | 30 µs | 30 µs | 38 µs |
-| Sales | 467 µs | 227 µs | 95 µs | 94 µs | 154 µs |
-| Dataset | 886 µs | 480 µs | 141 µs | 166 µs | 228 µs |
+| Reading | 500 ns | 123 ns | 24 ns | 50 ns | 228 ns |
+| Order | 822 ns | 259 ns | 113 ns | 187 ns | 278 ns |
+| Product | 509 ns | 163 ns | 46 ns | 130 ns | 260 ns |
+| Metrics | 304 µs | 176 µs | 7 µs | 7 µs | 11 µs |
+| Sales | 560 µs | 216 µs | 44 µs | 64 µs | 78 µs |
+| Dataset | 961 µs | 464 µs | 63 µs | 110 µs | 123 µs |
 
 | decode (into the Go type) | JSON | protobuf | colbin | colbin + packed5 | colbin/JSON |
 |---|---:|---:|---:|---:|---:|
-| Reading | 958 ns | 172 ns | 64 ns | 63 ns | 65 ns |
-| Order | 1 717 ns | 540 ns | 279 ns | 337 ns | 288 ns |
-| Product | 882 ns | 389 ns | 210 ns | 419 ns | 204 ns |
-| Metrics | 546 µs | 213 µs | 31 µs | 29 µs | 30 µs |
-| Sales | 1 187 µs | 250 µs | 140 µs | 144 µs | 140 µs |
-| Dataset | 2 023 µs | 564 µs | 229 µs | 278 µs | 236 µs |
+| Reading | 1 159 ns | 194 ns | 70 ns | 70 ns | 78 ns |
+| Order | 1 842 ns | 580 ns | 381 ns | 382 ns | 378 ns |
+| Product | 990 ns | 446 ns | 247 ns | 482 ns | 248 ns |
+| Metrics | 576 µs | 221 µs | 25 µs | 25 µs | 25 µs |
+| Sales | 1 124 µs | 264 µs | 121 µs | 123 µs | 121 µs |
+| Dataset | 2 005 µs | 600 µs | 203 µs | 259 µs | 206 µs |
 
 | to JSON text | colbin, section held | colbin/JSON | `json.Marshal` from the structs |
 |---|---:|---:|---:|
-| Reading | 332 ns | 864 ns | 414 ns |
-| Order | 573 ns | 1 289 ns | 700 ns |
-| Product | 488 ns | 1 014 ns | 416 ns |
-| Metrics | 162 µs | 168 µs | 236 µs |
-| Sales | 429 µs | 450 µs | 467 µs |
-| Dataset | 707 µs | 718 µs | 886 µs |
+| Reading | 404 ns | 1 000 ns | 500 ns |
+| Order | 719 ns | 1 592 ns | 822 ns |
+| Product | 603 ns | 1 222 ns | 509 ns |
+| Metrics | 197 µs | 200 µs | 304 µs |
+| Sales | 481 µs | 493 µs | 560 µs |
+| Dataset | 877 µs | 888 µs | 961 µs |
 
 **Reading the time tables:**
 - **colbin/JSON decodes** at plain colbin's speed, because the section is
@@ -425,7 +425,7 @@ layouts appear in one dataset:
 
 | 300 sales, 1 514 lines | sales | lines | bytes per line |
 |---|---:|---:|---:|
-| list (< 8 lines) | 246 | 820 | 21.9 |
+| list (< 8 lines) | 246 | 820 | 22.0 |
 | table (≥ 8 lines) | 54 | 694 | 12.8 |
 
 ### In the browser
@@ -437,8 +437,8 @@ records under Node 24 (`bun run bench` in `js/`):
 
 | | wire | gzip | to objects |
 |---|---:|---:|---:|
-| JSON + `JSON.parse` | 106 670 B | 12 124 B | 0.26 ms |
-| colbin + `codec.unmarshal` | 30 475 B | 3 250 B | 0.14 ms |
+| JSON + `JSON.parse` | 106 670 B | 12 124 B | 0.32 ms |
+| colbin + `codec.unmarshal` | 30 413 B | 3 182 B | 0.16 ms |
 
 ### Reproducing
 
