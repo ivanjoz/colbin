@@ -406,6 +406,28 @@ ns, same bytes), with nothing for the user to run. Held by
 `TestFlatRootWritesTheWalksBytes` at every buffer capacity, and run on arm64
 hardware (Lambda) with a mutation caught.
 
+### A flat root read in the plan's order
+
+A flat decode was `readScalars` — `find` per key, a switch per field — behind
+the reset program: `holds`, `reset` and `settle` were 14% of reading's
+decode-reuse and the lookup 17%. `readFlat` walks the program's ops in order
+instead, as the encoder wrote them: each op is the next field's or absent, and
+an absent one is zeroed in place, so the record is never cleared first and a
+list is read into the array its field already has. Anything else — a key out
+of order or unknown, a packed string, a form it does not read, a body cut
+short — is false, and the caller decodes the body again through the walk, so
+what is accepted or refused does not change. Pure Go: no kernel was needed.
+
+It is taken only for a plan that is every field of its type (`flatReads`): a
+field outside the plan is one the clear zeroed and a flat read never reaches.
+
+Reading, alone on a P-core: decode-reuse 84.1 → 54.8 ns (−35%, msgpack 74.2),
+decode-fresh 130.2 → 109.2 ns (−16%, msgpack 121.1). Faster than `Generate`'s
+reuse-aware decode (40.2 against 44.6 ns in a loop). Held by
+`TestFlatReadDecodesWhatTheWalkDoes`: the encoder's messages, the same cut,
+flipped, spliced, random bytes and another type's, each through both paths
+from a used record.
+
 ### int32 scratch on arm64
 
 The harness collects before every sample, so `sync.Pool` has dropped a TPC-H

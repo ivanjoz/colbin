@@ -5,8 +5,10 @@ import (
 	"math"
 	"math/rand/v2"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
+	"unsafe"
 )
 
 // The row program must write writeFields' bytes for every field it spells and
@@ -461,5 +463,78 @@ func TestFlatRootWritesTheWalksBytes(t *testing.T) {
 		if err := Unmarshal(want, &back); err != nil {
 			t.Fatalf("trial %d: %v", trial, err)
 		}
+	}
+}
+
+// rowsFlatHidden has a field outside its plan, which a decode clears and a
+// flat read would not reach: it must not take readFlat.
+type rowsFlatHidden struct {
+	A      int64 `cb:"1"`
+	hidden int64
+}
+
+// A flat read decodes what the generic walk does, into a used record, for
+// every message: the encoder's, and the same cut short, with a byte changed,
+// with its fields swapped or repeated, from another type, and random bytes.
+// What it refuses the walk decodes again, so the errors must agree too.
+func TestFlatReadDecodesWhatTheWalkDoes(t *testing.T) {
+	if MustCodec[rowsFlat]().plan.flatReads == nil {
+		t.Fatal("rowsFlat does not read flat")
+	}
+	if MustCodec[rowsFlatHidden]().plan.flatReads != nil {
+		t.Fatal("a type with a field outside its plan reads flat")
+	}
+	random := rand.New(rand.NewPCG(25, 26))
+	codec := MustCodec[rowsFlat]()
+	decode := func(message []byte, used rowsFlat, flat bool) (rowsFlat, error, error) {
+		useRowPrograms = flat
+		defer func() { useRowPrograms = true }()
+		value := used
+		value.L = slices.Clone(used.L)
+		viaCodec := codec.Unmarshal(message, &value)
+		again := used
+		again.L = slices.Clone(used.L)
+		viaPackage := Unmarshal(message, &again)
+		if !reflect.DeepEqual(value, again) {
+			t.Fatalf("Codec.Unmarshal %+v, Unmarshal %+v", value, again)
+		}
+		return value, viaCodec, viaPackage
+	}
+	check := func(trial int, what string, message []byte, used rowsFlat) {
+		t.Helper()
+		want, wantErr, _ := decode(message, used, false)
+		got, gotErr, gotPackageErr := decode(message, used, true)
+		if (wantErr != nil) != (gotErr != nil) || (wantErr != nil) != (gotPackageErr != nil) {
+			t.Fatalf("trial %d, %s: walk %v, flat %v / %v\n%x", trial, what, wantErr, gotErr, gotPackageErr, message)
+		}
+		if wantErr == nil && !reflect.DeepEqual(got, want) {
+			t.Fatalf("trial %d, %s: walk %+v\nflat %+v\n%x", trial, what, want, got, message)
+		}
+	}
+	for trial := range 3000 {
+		value, used := makeRowsFlat(random), makeRowsFlat(random)
+		message := must(codec.Encode(&value))
+		check(trial, "as written", message, used)
+		if into := used; !codec.plan.flatReads.readFlat(message[1:], unsafe.Pointer(&into)) {
+			t.Fatalf("trial %d: the encoder's own message was refused\n%+v", trial, value)
+		}
+		check(trial, "cut short", message[:random.IntN(len(message))], used)
+		changed := slices.Clone(message)
+		changed[1+random.IntN(len(changed)-1)] ^= byte(1 << random.IntN(8))
+		check(trial, "a byte changed", changed, used)
+		// The fields of another record, in another order or twice.
+		other := makeRowsFlat(random)
+		mixed := must(codec.Encode(&other))
+		cut := 1 + random.IntN(len(message))
+		check(trial, "two records spliced", append(slices.Clone(mixed), message[1:cut]...), used)
+		noise := make([]byte, random.IntN(40))
+		for index := range noise {
+			noise[index] = byte(random.Uint32())
+		}
+		check(trial, "random", append([]byte{rootStructNarrow}, noise...), used)
+		// rowsEvery's keys read as rowsFlat's: every form against every op.
+		every := makeRowsEvery(random)
+		every.M, every.P, every.Sub = nil, nil, nil
+		check(trial, "another type", must(Marshal(&every)), used)
 	}
 }

@@ -185,6 +185,9 @@ type typePlan struct {
 	// reset clears a record and keeps its slices' arrays, or is nil when the
 	// type is cleared whole. See reset.go.
 	reset *resetProgram
+	// flatReads is rows when a root decode can take readFlat: a flat program
+	// over every field the type has.
+	flatReads *rowProgram
 }
 
 var planCache sync.Map // reflect.Type -> *typePlan or error
@@ -372,7 +375,25 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 	plan.envelope = isEnvelope(structType)
 	plan.finish()
 	plan.reset = compileReset(structType)
+	if plan.rows != nil && plan.rows.flat && coversEveryField(structType, plan) {
+		plan.flatReads = plan.rows
+	}
 	return plan, nil
+}
+
+// coversEveryField reports whether a plan's fields are all of its struct's,
+// so that writing each of them is writing the whole record.
+func coversEveryField(structType reflect.Type, plan *typePlan) bool {
+	if structType.NumField() != len(plan.fields) {
+		return false
+	}
+	for index := range structType.NumField() {
+		offset := structType.Field(index).Offset
+		if !slices.ContainsFunc(plan.fields, func(field planField) bool { return field.offset == offset }) {
+			return false
+		}
+	}
+	return true
 }
 
 // finish resolves what a plan derives from its fields, once they and their keys
@@ -874,6 +895,9 @@ func Unmarshal(data []byte, dst any) error {
 		return errBadRoot(data, value.Type())
 	}
 	record := unsafe.Pointer(value.UnsafeAddr())
+	if program := plan.flatReads; program != nil && !wide && useRowPrograms && program.readFlat(body, record) {
+		return nil
+	}
 	if !plan.reset.holds(record) {
 		value.SetZero()
 		return unmarshalBody(body, section, wide, plan, record, value.Type())
@@ -1130,6 +1154,10 @@ func (codec *Codec[T]) Unmarshal(data []byte, value *T) error {
 			return unmarshalDictionaryAs(data, codec.plan, unsafe.Pointer(value), codec.what)
 		}
 		return errBadRoot(data, codec.what)
+	}
+	if program := codec.plan.flatReads; program != nil && !wide && useRowPrograms &&
+		program.readFlat(body, unsafe.Pointer(value)) {
+		return nil
 	}
 	reset := codec.plan.reset
 	held := reset.holds(unsafe.Pointer(value))
