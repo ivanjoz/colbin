@@ -86,11 +86,16 @@ func generateOne(out *bytes.Buffer, structType reflect.Type) error {
 	names := plan.goNames(structType)
 	writes := make([]string, len(plan.fields))
 	reads := make([]string, len(plan.fields))
+	var keeps []string
 	for index, field := range plan.fields {
 		goField, _ := structType.FieldByName(names[index])
-		writes[index], reads[index], err = generatedCalls(field, goField.Type, names[index], structType.PkgPath())
+		var keep string
+		writes[index], reads[index], keep, err = generatedCalls(field, goField.Type, names[index], structType.PkgPath())
 		if err != nil {
 			return fmt.Errorf("colbin: Generate: %s.%s: %w", name, names[index], err)
+		}
+		if keep != "" {
+			keeps = append(keeps, keep)
 		}
 	}
 
@@ -112,7 +117,8 @@ func generateOne(out *bytes.Buffer, structType reflect.Type) error {
 	fmt.Fprintf(out, "\treturn w.Buffer\n}\n\n")
 
 	fmt.Fprintf(out, "// UnmarshalColbin decodes a colbin message into v, zeroing it first:\n")
-	fmt.Fprintf(out, "// a key the message omits means the field was zero.\n")
+	fmt.Fprintf(out, "// a key the message omits means the field was zero. A slice field's array\n")
+	fmt.Fprintf(out, "// is reused for the values the message holds, as Codec.Unmarshal does.\n")
 	fmt.Fprintf(out, "func (v *%s) UnmarshalColbin(data []byte) error {\n", name)
 	fmt.Fprintf(out, "\tif len(data) == 0 {\n\t\treturn errors.New(\"colbin: an empty %s message\")\n\t}\n", name)
 	fmt.Fprintf(out, "\tswitch data[0] {\n\tcase %#02x:\n\t\tdata = data[1:]\n", root)
@@ -123,6 +129,9 @@ func generateOne(out *bytes.Buffer, structType reflect.Type) error {
 	fmt.Fprintf(out, "\t\t\treturn errors.New(\"colbin: a %s message's schema section is truncated\")\n\t\t}\n", name)
 	fmt.Fprintf(out, "\t\tdata = data[1+width+length:]\n")
 	fmt.Fprintf(out, "\tdefault:\n\t\treturn errors.New(\"colbin: not a %s-key %s message\")\n\t}\n", width, name)
+	for _, keep := range keeps {
+		fmt.Fprintf(out, "\t%s\n", keep)
+	}
 	fmt.Fprintf(out, "\t*v = %s{}\n", name)
 	fmt.Fprintf(out, "\tr := %s(data)\n", newReader)
 	fmt.Fprintf(out, "\tfor r.More() {\n\t\tswitch r.Key() {\n")
@@ -142,14 +151,19 @@ func generateOne(out *bytes.Buffer, structType reflect.Type) error {
 // A platform-width integer is generated at 64 bits, so the source is the same
 // whichever platform ran the generator, and its read is range-checked, so a
 // 32-bit build refuses a value it cannot hold rather than truncating it.
-func generatedCalls(field planField, fieldType reflect.Type, name, pkgPath string) (write, read string, err error) {
+//
+// A slice field also has a keep statement, run before the record is cleared:
+// the field's array cut to zero, which the read appends to, so that a decode
+// into a used record reuses it. A read of no values leaves the field nil, as a
+// fresh decode would, and as reset.go's settle does for Codec.Unmarshal.
+func generatedCalls(field planField, fieldType reflect.Type, name, pkgPath string) (write, read, keep string, err error) {
 	row, ok := valueOpOf(schemaOp(field.op, field.native))
 	if !ok || field.indirect {
-		return "", "", fmt.Errorf("a %s field has no generated form: Generate emits flat records", fieldType)
+		return "", "", "", fmt.Errorf("a %s field has no generated form: Generate emits flat records", fieldType)
 	}
 	same := fieldType == row.goType
 	if !same && (!fieldType.ConvertibleTo(row.goType) || !row.goType.ConvertibleTo(fieldType)) {
-		return "", "", fmt.Errorf("a %s does not convert to the %s its op reads", fieldType, goTypeName(row))
+		return "", "", "", fmt.Errorf("a %s does not convert to the %s its op reads", fieldType, goTypeName(row))
 	}
 	value := "v." + name
 	switch {
@@ -160,22 +174,34 @@ func generatedCalls(field planField, fieldType reflect.Type, name, pkgPath strin
 	}
 	write = fmt.Sprintf("w.%s(%d, %s)", row.write, field.key, value)
 	read = "r." + row.read
-	if row.op == opBytes {
-		read = "append([]byte(nil), " + read + "...)"
+	list := row.op == opBytes || strings.HasSuffix(row.read, "(nil)")
+	if list {
+		kept := "kept" + name
+		keep = fmt.Sprintf("%s := %s[:0]", kept, value)
+		if row.op == opBytes {
+			read = "append(" + kept + ", " + read + "...)"
+		} else {
+			read = "r." + strings.TrimSuffix(row.read, "(nil)") + "(" + kept + ")"
+		}
 	}
 	if same {
-		return write, fmt.Sprintf("v.%s = %s", name, read), nil
+		read = fmt.Sprintf("v.%s = %s", name, read)
+	} else {
+		local, err := localTypeName(fieldType, pkgPath)
+		if err != nil {
+			return "", "", "", err
+		}
+		if field.native {
+			return write, fmt.Sprintf(
+				"if x := %s; %s(%s(x)) == x {\n\tv.%s = %s(x)\n} else {\n\tr.Fail(wire.ErrFieldTooWide)\n}",
+				read, goTypeName(row), local, name, local), "", nil
+		}
+		read = fmt.Sprintf("v.%s = %s(%s)", name, local, read)
 	}
-	local, err := localTypeName(fieldType, pkgPath)
-	if err != nil {
-		return "", "", err
+	if list {
+		read = fmt.Sprintf("if %s; len(v.%s) == 0 {\n\tv.%s = nil\n}", read, name, name)
 	}
-	if field.native {
-		return write, fmt.Sprintf(
-			"if x := %s; %s(%s(x)) == x {\n\tv.%s = %s(x)\n} else {\n\tr.Fail(wire.ErrFieldTooWide)\n}",
-			read, goTypeName(row), local, name, local), nil
-	}
-	return write, fmt.Sprintf("v.%s = %s(%s)", name, local, read), nil
+	return write, read, keep, nil
 }
 
 // localTypeName spells a field's type from inside the generated file's package.

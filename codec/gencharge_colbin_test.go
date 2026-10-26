@@ -58,7 +58,8 @@ func (v *GenCharge) AppendColbin(dst []byte) []byte {
 }
 
 // UnmarshalColbin decodes a colbin message into v, zeroing it first:
-// a key the message omits means the field was zero.
+// a key the message omits means the field was zero. A slice field's array
+// is reused for the values the message holds, as Codec.Unmarshal does.
 func (v *GenCharge) UnmarshalColbin(data []byte) error {
 	if len(data) == 0 {
 		return errors.New("colbin: an empty GenCharge message")
@@ -123,7 +124,8 @@ func (v *GenWide) AppendColbin(dst []byte) []byte {
 }
 
 // UnmarshalColbin decodes a colbin message into v, zeroing it first:
-// a key the message omits means the field was zero.
+// a key the message omits means the field was zero. A slice field's array
+// is reused for the values the message holds, as Codec.Unmarshal does.
 func (v *GenWide) UnmarshalColbin(data []byte) error {
 	if len(data) == 0 {
 		return errors.New("colbin: an empty GenWide message")
@@ -141,6 +143,9 @@ func (v *GenWide) UnmarshalColbin(data []byte) error {
 	default:
 		return errors.New("colbin: not a wide-key GenWide message")
 	}
+	keptBlob := v.Blob[:0]
+	keptScores := v.Scores[:0]
+	keptTags := v.Tags[:0]
 	*v = GenWide{}
 	r := wire.NewReader8(data)
 	for r.More() {
@@ -156,11 +161,17 @@ func (v *GenWide) UnmarshalColbin(data []byte) error {
 		case 2:
 			v.Name = r.String()
 		case 3:
-			v.Blob = append([]byte(nil), r.Bytes()...)
+			if v.Blob = append(keptBlob, r.Bytes()...); len(v.Blob) == 0 {
+				v.Blob = nil
+			}
 		case 4:
-			v.Scores = r.Int32s(nil)
+			if v.Scores = r.Int32s(keptScores); len(v.Scores) == 0 {
+				v.Scores = nil
+			}
 		case 5:
-			v.Tags = r.Strings(nil)
+			if v.Tags = r.Strings(keptTags); len(v.Tags) == 0 {
+				v.Tags = nil
+			}
 		case 6:
 			v.Ratio = r.F64()
 		case 7:

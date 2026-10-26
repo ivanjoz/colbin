@@ -178,6 +178,50 @@ func checkGenerated[T any](t *testing.T, value *T, appendColbin func([]byte) []b
 	}
 }
 
+// A decode into a used record gives what a fresh one does, on the arrays the
+// record already had: a slice the message holds fewer values for than its
+// capacity is not reallocated, and one it holds none for is nil.
+func TestGeneratedUnmarshalReusesSlices(t *testing.T) {
+	used := GenWide{ID: 9, Name: "old", Blob: []byte{9, 9, 9}, Scores: []int32{7, 7, 7},
+		Tags: []string{"x", "y", "z"}, Ratio: 2}
+	// kept reports whether after reused before's array, wherever it could have.
+	kept := func(before, after reflect.Value) bool {
+		return after.Len() == 0 || after.Len() > before.Cap() ||
+			after.Index(0).Addr().Pointer() == before.Slice(0, 1).Index(0).Addr().Pointer()
+	}
+	for _, value := range []GenWide{
+		{ID: 1, Blob: []byte{1}, Scores: []int32{-1, 2}, Tags: []string{"a"}},
+		{Name: "only"},
+		{Blob: []byte{}, Scores: []int32{}, Tags: []string{}},
+		{Scores: []int32{3}},
+	} {
+		message := value.AppendColbin(nil)
+		before := used
+		var fresh GenWide
+		if err := fresh.UnmarshalColbin(message); err != nil {
+			t.Fatal(err)
+		}
+		if err := used.UnmarshalColbin(message); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(used, fresh) {
+			t.Fatalf("a used record decoded as %+v, a fresh one as %+v", used, fresh)
+		}
+		var reflected GenWide
+		if err := Unmarshal(message, &reflected); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(used, reflected) {
+			t.Fatalf("generated %+v, reflective %+v", used, reflected)
+		}
+		if !kept(reflect.ValueOf(before.Blob), reflect.ValueOf(used.Blob)) ||
+			!kept(reflect.ValueOf(before.Scores), reflect.ValueOf(used.Scores)) ||
+			!kept(reflect.ValueOf(before.Tags), reflect.ValueOf(used.Tags)) {
+			t.Fatalf("a slice was reallocated: %+v", used)
+		}
+	}
+}
+
 // A platform-width int is written at 64 bits and read back range-checked, so a
 // 32-bit build refuses a value it cannot hold — as the reflective decoder does —
 // and a 64-bit one takes it.
