@@ -380,6 +380,32 @@ unchanged.
 - **Integer list elements stored into room made once** (`appendElements`):
   +5% on six elements, `slices.Grow` a call where append was not.
 
+### A flat root in one kernel entry
+
+The reading record — numbers, a string, an `[]int32` and a bool — went through
+`appendScalars`' switch, because its list was a field the kernel did not spell,
+and two kernel entries around it cost more than the switch (+53% when tried).
+The kernel now writes an `[]int32` (`rowInt32s`, narrow only: the width from
+the OR of the folded values, as `appendArrayField` picks it), so a flat record
+is one entry (`appendFlat`).
+
+That needed the kernel to check its own room: it stored past the bytes it
+wrote, so its caller reserved a record's worst case first, and a buffer sized
+to the message — which `TestAppendsOntoTheCallersBuffer` holds must not be
+grown — went through a stack copy that cost a quarter of the encode. Now a
+number checks for its ten-byte store and a bool for its byte; `program.write`
+still reserves, so its checks never fail. What the kernel stops short of is
+finished on the stack and appended (`appendFlatRest`).
+
+Reading encode, alone on a P-core: 48.8 → 38.0 ns (−22%, msgpack 38.9); on
+Lambda, msgpack/colbin 0.86 → 1.01 on x86 and 0.76 → 1.04 on Graviton2. The
+list arm sits after the kernel's `RET`: between `copied` and `next` it moved the
+hot path's targets and measured +3% on sales encode, which has no list. The
+room checks cost ~0.7% there. Faster than `Generate`'s code (24.5 against 25.2
+ns, same bytes), with nothing for the user to run. Held by
+`TestFlatRootWritesTheWalksBytes` at every buffer capacity, and run on arm64
+hardware (Lambda) with a mutation caught.
+
 ### int32 scratch on arm64
 
 The harness collects before every sample, so `sync.Pool` has dropped a TPC-H

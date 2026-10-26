@@ -53,6 +53,7 @@ const (
 	rowFloat64
 	rowBool
 	rowString
+	rowInt32s // narrow only; a wide program takes it as a rowField
 	rowStruct
 	rowStructs
 	rowField // anything else, through writeFields
@@ -78,7 +79,15 @@ type rowProgram struct {
 	// numeric says every op is a number or a bool, and a record of them cannot
 	// outgrow a list element's one-byte length: what writeRows needs.
 	numeric bool
+	// flat says the kernel spells every op, so a root record is one kernel
+	// entry: what appendFlat needs.
+	flat bool
 }
+
+// flatSlack is the room appendFlat makes past the fixed-width fields' for
+// strings and lists, which the kernel writes when they fit and hands back to
+// appendFlatRest when they do not.
+const flatSlack = 64
 
 // fixedRoom is the most a numeric field writes: a header, a length byte for a
 // negative magnitude, and the magnitude stored as a whole word. A wide field's
@@ -104,6 +113,9 @@ func compileRows(plan *typePlan) *rowProgram {
 		}
 		op.offset = uint32(field.offset)
 		kind, ok := rowKind(field)
+		if kind == rowInt32s && program.wide {
+			ok = false
+		}
 		if !ok {
 			kind = rowField
 			if program.singles == nil {
@@ -123,8 +135,10 @@ func compileRows(plan *typePlan) *rowProgram {
 		return nil
 	}
 	program.numeric = !program.wide && program.reserve-8 <= wire.MaxElementSize
+	program.flat = !program.wide
 	for _, op := range program.ops {
 		program.numeric = program.numeric && op.kind <= rowBool
+		program.flat = program.flat && op.kind <= rowInt32s
 	}
 	return program
 }
@@ -146,6 +160,55 @@ func (program *rowProgram) writeRows(buffer []byte, data unsafe.Pointer, count i
 		at = end
 	}
 	return buffer[:at]
+}
+
+// appendFlat writes a flat program's record onto buffer, which holds the root
+// descriptor: one kernel entry for the whole record, which is what a flat root
+// is for — appendScalars' switch costs less than two entries. The kernel
+// checks its own room, so a buffer the caller sized to the message is written
+// in place, and appendFlatRest takes whatever it stopped short of.
+func (program *rowProgram) appendFlat(buffer []byte, record unsafe.Pointer) []byte {
+	done, end := rowKernel(&program.ops[0], len(program.ops), record,
+		unsafe.SliceData(buffer), len(buffer), cap(buffer), 0)
+	if done == len(program.ops) {
+		return buffer[:end]
+	}
+	return program.appendFlatRest(buffer[:end], record, done)
+}
+
+// flatScratch is the stack appendFlatRest writes the rest of a record on.
+const flatScratch = 256
+
+// appendFlatRest is appendFlat past the op the kernel stopped at: the rest of
+// the record written on the stack and appended, so that a buffer is grown only
+// for bytes it does not hold, never for the kernel's whole-word stores. An op
+// the stack does not hold either — a string or a list of more than its room,
+// or more than the kernel's lengths — is written through wire.
+//
+//go:noinline
+func (program *rowProgram) appendFlatRest(buffer []byte, record unsafe.Pointer, done int) []byte {
+	var scratch [flatScratch]byte
+	for done < len(program.ops) {
+		ran, end := rowKernel(&program.ops[done], len(program.ops)-done, record, &scratch[0], 0, flatScratch, 0)
+		buffer = append(buffer, scratch[:end]...)
+		if done += ran; done == len(program.ops) {
+			break
+		}
+		if ran != 0 {
+			continue
+		}
+		op := &program.ops[done]
+		from := unsafe.Add(record, op.offset)
+		writer := wire.Writer{Buffer: buffer}
+		if op.kind == rowInt32s {
+			writer.Int32s(op.key>>4, *(*[]int32)(from))
+		} else {
+			writer.String(op.key>>4, *(*string)(from))
+		}
+		buffer = writer.Buffer
+		done++
+	}
+	return buffer
 }
 
 // rowKind is the op a field compiles to, if the program spells it.
@@ -178,6 +241,8 @@ func rowKind(field *planField) (uint8, bool) {
 		return rowFloat64, true
 	case opString:
 		return rowString, true
+	case opInt32s:
+		return rowInt32s, true
 	case opStruct:
 		return rowStruct, true
 	case opStructs:
@@ -278,6 +343,8 @@ func (program *rowProgram) write(writer *wire.Writer, record unsafe.Pointer, buf
 				appendNarrowStruct(writer, field, from, buf)
 			case rowStructs:
 				appendNarrowStructs(writer, field, from, buf)
+			case rowInt32s:
+				writer.Int32s(op.key>>4, *(*[]int32)(from))
 			default:
 				writeFields(writer, program.singles[op.field], record, buf)
 			}

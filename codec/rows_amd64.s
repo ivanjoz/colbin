@@ -33,11 +33,14 @@
 // func rowKernel(ops *rowOp, n int, record unsafe.Pointer, out *byte, at, limit, reserve int) (done, end int)
 //
 // rowProgram.write's loop over the ops it spells, from ops[0] for up to n of
-// them: the integer forms, floats, bools and strings, written at out+at. It
-// stops at the first op it does not spell — a composite, a field through
-// writeFields, a string of more than 0xFFFF bytes — and at a string the room
-// up to limit does not hold with reserve to spare, and says how many it did
-// and where the bytes end. The caller has reserved reserve bytes at at.
+// them: the integer forms, floats, bools, strings and int32 lists, written at
+// out+at. It stops at the first op it does not spell — a composite, a field
+// through writeFields, a string or list of more than 0xFFFF bytes — and at the
+// first whose bytes, and for a string or a list reserve bytes after them, the
+// room up to limit does not hold, and says how many it did and where the bytes
+// end. A number counts as its ten-byte store, so a caller that has reserved
+// reserve bytes at at only ever stops it at a string or a list; appendFlat
+// reserves nothing and passes none.
 //
 // SI the ops, BX n, R8 the record, DI out, R9 at, R10 limit, R11 reserve, R12
 // the op; per op DX its kind, R13 its key and R14 the field, then AX the
@@ -62,6 +65,9 @@ loop:
 	CMPL    DX, $10              // rowBool
 	JA      text
 	JEQ     boolean
+	LEAQ    10(R9), AX           // the most a number stores, its whole word too
+	CMPQ    AX, R10
+	JA      finish
 	CMPL    DX, $3               // rowInt64, the last signed
 	JBE     signed
 	CMPL    DX, $7               // rowUint64, the last unsigned
@@ -152,14 +158,16 @@ minusOne:
 
 boolean:
 	// The key when true, counted only then: a bool is 0 or 1.
+	CMPQ    R9, R10
+	JAE     finish
 	MOVBLZX (R14), CX
 	MOVB    R13, (DI)(R9*1)
 	ADDQ    CX, R9
 	JMP     next
 
 text:
-	CMPL  DX, $11                // rowString; anything past it is the caller's
-	JNE   finish
+	CMPL  DX, $11                // rowString
+	JA    list
 	MOVQ  8(R14), CX             // the length
 	TESTQ CX, CX
 	JZ    next
@@ -261,6 +269,111 @@ finish:
 	MOVQ R12, done+56(FP)
 	MOVQ R9, end+64(FP)
 	RET
+
+list:
+	// An []int32, as wire's appendArrayField writes it: the width every
+	// element fits, from the OR of the values folded to their magnitude, in the
+	// length form's flags, the length in bytes, and the elements at that width.
+	// A list past 0xFFFF bytes, or one the room to limit does not hold with
+	// reserve after it, is the caller's.
+	CMPL  DX, $12                // rowInt32s; anything past it is the caller's
+	JNE   finish
+	MOVQ  8(R14), CX             // the count
+	TESTQ CX, CX
+	JZ    next
+	MOVQ  (R14), AX              // the elements
+	MOVQ  AX, R14
+	XORL  DX, DX
+
+fold:
+	// BX is n, free until the fold is done.
+	MOVL  (R14), R13
+	MOVL  R13, BX
+	SARL  $31, BX
+	XORL  BX, R13
+	ORL   R13, DX
+	ADDQ  $4, R14
+	DECQ  CX
+	JNZ   fold
+	MOVQ  n+8(FP), BX
+	SHLQ  $1, DX                 // the sign bit back
+	MOVL  4(SI)(R12*8), R14
+	ADDQ  R8, R14
+	MOVQ  8(R14), CX             // the count again
+	MOVQ  CX, R14
+	CMPQ  DX, $0xFF
+	JBE   listWidth
+	ADDQ  CX, R14
+	CMPQ  DX, $0xFFFF
+	MOVL  $(12|1), DX            // the length form, two-byte elements
+	JBE   listHead
+	ADDQ  R14, R14
+	MOVL  $(12|2), DX            // four-byte elements
+	JMP   listHead
+
+listWidth:
+	MOVL $12, DX                 // one-byte elements
+
+listHead:
+	// R14 the length in bytes, DX the header's low nibble.
+	CMPQ    R14, $0xFFFF
+	JA      finish
+	LEAQ    4(R9)(R14*1), R13
+	ADDQ    R11, R13
+	CMPQ    R13, R10
+	JA      finish
+	MOVBLZX 1(SI)(R12*8), R13
+	ORL     DX, R13
+	LEAQ    (DI)(R9*1), DX
+	MOVB    R13, (DX)
+	CMPQ    R14, $0xFD
+	JA      listLength16
+	MOVB    R14, 1(DX)
+	ADDQ    $2, DX
+	JMP     listBody
+
+listLength16:
+	MOVB $0xFE, 1(DX)
+	MOVW R14, 2(DX)
+	ADDQ $4, DX
+
+listBody:
+	// AX the elements, CX the count, DX where they go, R13's low bits the width.
+	ANDL $3, R13
+	CMPL R13, $1
+	JB   list1
+	JEQ  list2
+
+list4:
+	MOVL (AX), R13
+	MOVL R13, (DX)
+	ADDQ $4, AX
+	ADDQ $4, DX
+	DECQ CX
+	JNZ  list4
+	JMP  listDone
+
+list2:
+	MOVL (AX), R13
+	MOVW R13, (DX)
+	ADDQ $4, AX
+	ADDQ $2, DX
+	DECQ CX
+	JNZ  list2
+	JMP  listDone
+
+list1:
+	MOVL (AX), R13
+	MOVB R13, (DX)
+	ADDQ $4, AX
+	INCQ DX
+	DECQ CX
+	JNZ  list1
+
+listDone:
+	MOVQ DX, R9
+	SUBQ DI, R9
+	JMP  next
 
 // func rowKernelWide(ops *rowOp, n int, record unsafe.Pointer, out *byte, at, limit, reserve int) (done, end int)
 //

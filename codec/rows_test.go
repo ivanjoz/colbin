@@ -374,3 +374,92 @@ func TestNumericListsWriteTheWalksBytes(t *testing.T) {
 		}
 	}
 }
+
+// rowsFlat is a root the kernel writes whole: numbers, strings and int32
+// lists, with a bool after them that lands on the last byte.
+type rowsFlat struct {
+	U64  uint64  `cb:"1"`
+	I64  int64   `cb:"2"`
+	F64  float64 `cb:"3"`
+	S    string  `cb:"4"`
+	L    []int32 `cb:"5"`
+	I32  int32   `cb:"6"`
+	More []int32 `cb:"7"`
+	B    bool    `cb:"8"`
+}
+
+// rowsListCounts are the list lengths the length byte changes at, at each
+// element width — 0xFD bytes is the last one-byte length, 0xFFFF the last the
+// kernel writes — and around them.
+var rowsListCounts = []int{0, 1, 2, 6, 63, 64, 126, 127, 253, 254, 16383, 16384, 32767, 32768, 65535, 65536}
+
+func makeRowsFlat(random *rand.Rand) rowsFlat {
+	list := func() []int32 {
+		count := rowsListCounts[random.IntN(len(rowsListCounts))]
+		if count > 300 && random.IntN(4) != 0 {
+			count = random.IntN(20)
+		}
+		if count == 0 && random.IntN(2) == 0 {
+			return nil
+		}
+		// One width for most of the list, and the widest value at a random place.
+		widest := []int64{0, 1, 127, -128, 128, -129, 32767, -32768, 32768, -32769,
+			math.MaxInt32, math.MinInt32}[random.IntN(12)]
+		out := make([]int32, count)
+		for index := range out {
+			out[index] = int32(random.Int64N(2*max(1, widest/2+1)) - max(1, widest/2+1))
+		}
+		if count != 0 {
+			out[random.IntN(count)] = int32(widest)
+		}
+		return out
+	}
+	edge := func() int64 { return rowsEdges[random.IntN(len(rowsEdges))] }
+	text := strings.Repeat("x", rowsLengths[random.IntN(len(rowsLengths))])
+	return rowsFlat{U64: uint64(edge()), I64: edge(), F64: random.NormFloat64(), S: text,
+		L: list(), I32: int32(edge()), More: list(), B: random.IntN(2) == 0}
+}
+
+// A flat root is one kernel entry onto whatever room the caller's buffer has:
+// the walk's bytes at every capacity, and a buffer the message fits is written
+// in place rather than grown for the kernel's whole-word stores.
+func TestFlatRootWritesTheWalksBytes(t *testing.T) {
+	if program := MustCodec[rowsFlat]().plan.rows; program == nil || !program.flat {
+		t.Fatal("rowsFlat compiled to no flat program")
+	}
+	codec := MustCodec[rowsFlat]()
+	random := rand.New(rand.NewPCG(23, 24))
+	for trial := range 600 {
+		value := makeRowsFlat(random)
+		useRowPrograms = false
+		want := must(codec.Encode(&value))
+		useRowPrograms = true
+		prefix := []byte("prefix")
+		capacities := []int{0, len(want), len(want) + 1, len(want) + 8, len(want) + 400}
+		if len(want) < 300 {
+			for room := range len(want) + 24 {
+				capacities = append(capacities, room)
+			}
+		}
+		for _, room := range capacities {
+			buffer := append(make([]byte, 0, len(prefix)+room), prefix...)
+			// Append, not the codec's, which grows to its size hint up front.
+			got, err := Append(buffer, &value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got[:len(prefix)], prefix) || !bytes.Equal(got[len(prefix):], want) {
+				t.Fatalf("trial %d, room %d: %d bytes, the walk's %d\n%+v", trial, room, len(got)-len(prefix), len(want), value)
+			}
+			// The walk appends a magnitude's whole word and cuts it back, so only
+			// the kernel writes in place.
+			if useRowKernel && room >= len(want) && &got[0] != &buffer[0] {
+				t.Fatalf("trial %d: a buffer with room %d for %d bytes was grown", trial, room, len(want))
+			}
+		}
+		var back rowsFlat
+		if err := Unmarshal(want, &back); err != nil {
+			t.Fatalf("trial %d: %v", trial, err)
+		}
+	}
+}

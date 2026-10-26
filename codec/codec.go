@@ -763,6 +763,9 @@ func appendPlan(dst []byte, plan *typePlan, record unsafe.Pointer) []byte {
 		appendScalarsWide(&writer, plan, record)
 		return writer.Buffer
 	}
+	if program := plan.rows; useRowKernel && program != nil && program.flat && useRowPrograms && !Packed5() {
+		return program.appendFlat(append(dst, rootStructNarrow), record)
+	}
 	writer := wire.Writer{Buffer: append(dst, rootStructNarrow)}
 	appendScalars(&writer, plan, record)
 	return writer.Buffer

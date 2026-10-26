@@ -132,6 +132,9 @@ loop:
 	CMP  $10, R8                 // rowBool
 	BHI  text
 	BEQ  boolean
+	ADD  $10, R4, R12            // the most a number stores, its whole word too
+	CMP  R5, R12
+	BHI  finish
 	CMP  $3, R8                  // rowInt64, the last signed
 	BLS  signed
 	CMP  $7, R8                  // rowUint64, the last unsigned
@@ -225,6 +228,8 @@ minusOne:
 
 boolean:
 	// The key when true, counted only then: a bool is 0 or 1.
+	CMP   R5, R4
+	BHS   finish
 	MOVBU (R10), R12
 	ADD   R4, R3, R16
 	MOVB  R9, (R16)
@@ -232,8 +237,8 @@ boolean:
 	B     next
 
 text:
-	CMP  $11, R8                 // rowString; anything past it is the caller's
-	BNE  finish
+	CMP  $11, R8                 // rowString
+	BHI  list
 	MOVD 8(R10), R12             // the length
 	CBZ  R12, next
 	MOVD $0xFFFF, R13
@@ -280,6 +285,99 @@ finish:
 	MOVD R7, done+56(FP)
 	MOVD R4, end+64(FP)
 	RET
+
+list:
+	// An []int32, as on amd64: the width from the OR of the values folded to
+	// their magnitude, the length form, the length in bytes, the elements.
+	CMP  $12, R8                 // rowInt32s; anything past it is the caller's
+	BNE  finish
+	MOVD 8(R10), R12             // the count
+	CBZ  R12, next
+	MOVD (R10), R11              // the elements
+	MOVD ZR, R13
+	MOVD R11, R14
+	MOVD R12, R15
+
+fold:
+	MOVW (R14), R16
+	EOR  R16->63, R16, R16
+	ORR  R16, R13, R13
+	ADD  $4, R14, R14
+	SUB  $1, R15, R15
+	CBNZ R15, fold
+	LSL  $1, R13, R13            // the sign bit back
+	MOVD R12, R14                // the length in bytes
+	MOVD $12, R15                // the length form, one-byte elements
+	CMP  $0xFF, R13
+	BLS  listHead
+	ADD  R12, R14, R14
+	MOVD $13, R15                // two-byte elements
+	MOVD $0xFFFF, R16
+	CMP  R16, R13
+	BLS  listHead
+	ADD  R14, R14, R14
+	MOVD $14, R15                // four-byte elements
+
+listHead:
+	// R14 the length in bytes, R15 the header's low nibble.
+	MOVD $0xFFFF, R16
+	CMP  R16, R14
+	BHI  finish
+	ADD  R4, R14, R16
+	ADD  $4, R16, R16
+	ADD  R6, R16, R16
+	CMP  R5, R16
+	BHI  finish
+	ORR  R9, R15, R17
+	ADD  R4, R3, R16
+	MOVB R17, (R16)
+	CMP  $0xFD, R14
+	BHI  listLength16
+	MOVB R14, 1(R16)
+	ADD  $2, R16, R16
+	B    listBody
+
+listLength16:
+	MOVD $0xFE, R19
+	MOVB R19, 1(R16)
+	MOVH R14, 2(R16)
+	ADD  $4, R16, R16
+
+listBody:
+	// R11 the elements, R12 the count, R16 where they go, R15 the width's nibble.
+	CMP $13, R15
+	BLO list1
+	BEQ list2
+
+list4:
+	MOVWU (R11), R17
+	MOVW  R17, (R16)
+	ADD   $4, R11, R11
+	ADD   $4, R16, R16
+	SUB   $1, R12, R12
+	CBNZ  R12, list4
+	B     listDone
+
+list2:
+	MOVWU (R11), R17
+	MOVH  R17, (R16)
+	ADD   $4, R11, R11
+	ADD   $2, R16, R16
+	SUB   $1, R12, R12
+	CBNZ  R12, list2
+	B     listDone
+
+list1:
+	MOVWU (R11), R17
+	MOVB  R17, (R16)
+	ADD   $4, R11, R11
+	ADD   $1, R16, R16
+	SUB   $1, R12, R12
+	CBNZ  R12, list1
+
+listDone:
+	SUB R3, R16, R4
+	B   next
 
 // func rowKernelWide(ops *rowOp, n int, record unsafe.Pointer, out *byte, at, limit, reserve int) (done, end int)
 //
