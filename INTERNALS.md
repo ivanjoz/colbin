@@ -53,10 +53,11 @@ detail bits are assigned:
 |---|---|---|
 | 3 | 0x08 | the body's key run uses eight-bit keys |
 | 2 | 0x04 | a schema section (§10) comes before the body |
-| 1, 0 | — | unassigned |
+| 1 | 0x02 | a dictionary section (§6.3) comes before the body — prototype |
+| 0 | — | unassigned |
 
-So exactly four root bytes exist, and a reader refuses the other twelve values in
-the range rather than guess at them:
+So six root bytes exist, and a reader refuses the other ten values in the range
+rather than guess at them:
 
 | byte | body |
 |---|---|
@@ -64,6 +65,12 @@ the range rather than guess at them:
 | `0xD8` | wide keys |
 | `0xD4` | schema section, then narrow keys |
 | `0xDC` | schema section, then wide keys |
+| `0xD2` | dictionary section, then narrow keys |
+| `0xDA` | dictionary section, then wide keys |
+
+A reader dispatches the first four in one switch and reaches the dictionary
+roots only through the branch that would refuse the byte, so a message without
+dictionaries is read exactly as it was before they existed.
 
 The other 240 first bytes are never colbin. `colbin.IsColbin` is a range check on
 0xD0..0xDF, and an application may use any byte outside it for framing of its own
@@ -341,6 +348,37 @@ row type's width from the schema.
 An integer column whose every value is zero is not written, and its absence means
 zeros. A string column of only empty strings is omitted too, at both widths, and
 its absence means empty strings.
+
+**Dictionary columns** (prototype, `SetDictionary`, `codec/dictionary.go`). A
+string column whose values repeat can go out as ids into a dictionary the message
+holds once, ahead of its body:
+
+```
+message := [root | 0x02] [dictionary section] [body]
+section := [byteLength] [dictCount] ( [entryCount] ( [size] [bytes] )* )*
+wide:    [key] [0xB0 | lw] [length] [dict] [column codec over the ids]
+narrow:  [key | 1101]      [length] [dict] [column codec over the ids]
+```
+
+There is one dictionary per column field — a row type and a key — so tables of
+the same row type anywhere in the message share it. The writer decides per
+column: the column's new entries and its ids have to cost less than its
+strings, it may add new values for at most half its rows — and a column whose
+first 1024 rows are more than 7/8 new is given up there — and a dictionary
+holds at most 2¹⁶ entries. The writer's index is its own pair of
+open-addressed tables (`codec/dictindex.go`): a string of up to sixteen bytes
+is its own key — two words and its length — held in the slot, and a longer one
+is hashed from three words of it; a probe past 32 slots gives the column up
+rather than degrade. On amd64 and arm64 the common case — a short string the
+dictionary already holds — runs in `dictKernel` (`codec/dictkernel_amd64.s`,
+`codec/dictkernel_arm64.s`): one masked sixteen-byte load (SSE2 on amd64, an
+LDP pair on arm64), the hash and the probe, handing anything else back to Go.
+The load never starts in a page's last sixteen bytes, so it cannot fault. A
+message whose columns all decline is byte for byte what the writer produces
+with dictionaries off. A dictionary column is written even
+when every id is zero, since its absence would mean empty strings. Only the typed
+decoders read it yet; the JSON walks, `DecodeAny` and the Rust and JS readers
+refuse the root byte.
 
 On the Go side a table is gathered into one reusable column buffer (`scratch`,
 pooled up to 2¹⁶ rows) and scattered straight into the destination slice, so a

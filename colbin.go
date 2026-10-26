@@ -186,3 +186,20 @@ func SetPacked5(on bool) { codec.SetPacked5(on) }
 
 // Packed5 reports whether the packed5 string encoding is on.
 func Packed5() bool { return codec.Packed5() }
+
+// SetDictionary turns string dictionaries on or off for every encoder in the
+// process. It is **off** by default, and off it costs nothing: the encoder and
+// decoder paths are the ones they were.
+//
+// On, a table's string column whose values repeat goes out as ids into a
+// dictionary held once at the front of the message, through the column codec —
+// a few bits a row for a column of statuses or countries. The writer decides
+// per column, and writes the strings when ids would not be smaller; a message
+// that uses no dictionary is byte for byte what it would be with this off.
+//
+// A prototype: only Unmarshal and Codec.Unmarshal read a message holding a
+// dictionary. The JSON walks, DecodeAny and the Rust and JS readers refuse it.
+func SetDictionary(on bool) { codec.SetDictionary(on) }
+
+// Dictionary reports whether string dictionaries are on.
+func Dictionary() bool { return codec.Dictionary() }

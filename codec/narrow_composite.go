@@ -118,16 +118,29 @@ func appendNarrowTable(writer *wire.Writer, field *planField, at unsafe.Pointer,
 	mark := writer.OpenTable(field.key, slice.len)
 	if field.sub.isWide {
 		wide := wire.Writer8{Buffer: writer.Buffer}
-		appendColumns(&wide, field.sub, slice, field.stride, buf)
+		appendColumns(&wide, field.sub, slice, field.stride, buf, buf.dict)
 		writer.Buffer = wide.Buffer
 		writer.Close(mark)
 		return
 	}
 	ints, strings := gatherTable(field.sub, slice, field.stride, buf)
 	rows := slice.len
+	var choices []dictColumn
+	if buf.dict != nil {
+		choices = buf.dict.tableIDs(field.sub, strings, rows)
+	}
 	for index := range field.sub.fields {
 		column := &field.sub.fields[index]
 		if column.op == opString {
+			if len(choices) != 0 {
+				choice := &choices[0]
+				choices = choices[1:]
+				if !choice.refused {
+					writer.DictColumn(column.key, choice.number, choice.ids)
+					strings = strings[rows:]
+					continue
+				}
+			}
 			writer.StringColumn(column.key, strings[:rows:rows])
 			strings = strings[rows:]
 			continue
@@ -339,6 +352,12 @@ func readNarrowTable(reader *wire.Reader, field *planField, at unsafe.Pointer, b
 			continue
 		}
 		if column.op == opString {
+			if buf.dict != nil && columns.IsDictColumn() {
+				if buf.dict.readDictColumn(&columns, rows, table.stringSlot()) {
+					table.decoded(column)
+				}
+				continue
+			}
 			got := columns.Strings(table.stringSlot())
 			if len(got) != rows {
 				if columns.Err() == nil {

@@ -111,6 +111,9 @@ type scratch struct {
 	// points in codec.go hand it back. A decode records its failures on the
 	// reader instead, and mirrors them here so that enter stops it too.
 	err error
+	// dict is the message's string dictionaries, on the dictionary path only.
+	// See dictionary.go.
+	dict *dictionaries
 }
 
 // columnBuffers is the transposition buffer, pooled across messages: a table of
@@ -270,19 +273,35 @@ func (buf *scratch) reserveTable(ints, strings int) *columnBuffers {
 func appendTableField(writer *wire.Writer8, field *planField, at unsafe.Pointer, buf *scratch) {
 	slice := (*sliceHeader)(at)
 	mark := writer.OpenTable(field.key, slice.len)
-	appendColumns(writer, field.sub, slice, field.stride, buf)
+	appendColumns(writer, field.sub, slice, field.stride, buf, buf.dict)
 	writer.Close(mark)
 }
 
 // appendColumns writes a table's columns with eight-bit keys, which is every
 // table under a wide parent, one under a narrow parent whose rows are wide, and
-// one in a dynamic value.
-func appendColumns(writer *wire.Writer8, plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratch) {
+// one in a dynamic value. dict is nil but on the dictionary path, and always for
+// a dynamic value, whose tables the dynamic readers decode.
+func appendColumns(
+	writer *wire.Writer8, plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratch, dict *dictionaries,
+) {
 	ints, strings := gatherTable(plan, slice, stride, buf)
 	rows := slice.len
+	var choices []dictColumn
+	if dict != nil {
+		choices = dict.tableIDs(plan, strings, rows)
+	}
 	for index := range plan.fields {
 		column := &plan.fields[index]
 		if column.op == opString {
+			if len(choices) != 0 {
+				choice := &choices[0]
+				choices = choices[1:]
+				if !choice.refused {
+					writer.DictColumn(column.key, choice.number, choice.ids)
+					strings = strings[rows:]
+					continue
+				}
+			}
 			writer.StringColumn(column.key, strings[:rows:rows])
 			strings = strings[rows:]
 			continue
@@ -293,8 +312,12 @@ func appendColumns(writer *wire.Writer8, plan *typePlan, slice *sliceHeader, str
 }
 
 // gatherChunk is how many rows gatherTable transposes at a time: few enough
-// that their bytes stay in cache while every column is read out of them.
-const gatherChunk = 256
+// that their bytes stay in L1 while every column is read out of them, and
+// what flush scatters a decoded table back by. On a 128-byte row, 32 rows
+// gathered faster than 256 by a fifth on a P-core and a tenth on an E-core (16
+// was as good on the one and worse on the other), and on TPC-H's normalized
+// tables a fresh decode was 15% faster.
+const gatherChunk = 32
 
 // gatherTable transposes a whole table, every column, in one pass over its
 // rows. It returns the integer columns back to back, rows values each, in
@@ -434,6 +457,12 @@ func readColumns(columns *wire.Reader8, field *planField, at unsafe.Pointer, row
 			continue
 		}
 		if column.op == opString {
+			if buf.dict != nil && columns.IsDictColumn() {
+				if buf.dict.readDictColumn8(columns, rows, table.stringSlot()) {
+					table.decoded(column)
+				}
+				continue
+			}
 			got := columns.Strings(table.stringSlot())
 			if len(got) != rows {
 				if columns.Err() == nil {

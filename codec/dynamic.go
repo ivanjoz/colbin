@@ -594,7 +594,7 @@ func appendStructsElement(
 	defer buf.leave()
 	if plan.canTable && slice.len >= tableThreshold {
 		mark := writer.OpenElementTable(slice.len)
-		appendColumns(writer, plan, slice, stride, buf)
+		appendColumns(writer, plan, slice, stride, buf, nil)
 		writer.Close(mark)
 		return
 	}

@@ -697,6 +697,9 @@ func appendRecord(dst []byte, plan *typePlan, record unsafe.Pointer) ([]byte, er
 	if plan.isWide {
 		root = rootStructWide
 	}
+	if dictionaryOn.Load() {
+		return appendDictRecord(dst, root, plan, record)
+	}
 	var buf scratch
 	out, err := appendRunInto(append(dst, root), plan, record, &buf)
 	if err != nil {
@@ -839,6 +842,10 @@ func Unmarshal(data []byte, dst any) error {
 	}
 	section, body, wide, ok := rootParts(data)
 	if !ok {
+		if isDictRoot(data) {
+			value.SetZero()
+			return unmarshalDictionaryAs(data, plan, unsafe.Pointer(value.UnsafeAddr()), value.Type())
+		}
 		return errBadRoot(data, value.Type())
 	}
 	value.SetZero()
@@ -1086,6 +1093,10 @@ func (codec *Codec[T]) Encode(value *T) ([]byte, error) {
 func (codec *Codec[T]) Unmarshal(data []byte, value *T) error {
 	section, body, wide, ok := rootParts(data)
 	if !ok {
+		if isDictRoot(data) {
+			*value = *new(T)
+			return unmarshalDictionaryAs(data, codec.plan, unsafe.Pointer(value), codec.what)
+		}
 		return errBadRoot(data, codec.what)
 	}
 	*value = *new(T)
