@@ -290,7 +290,7 @@ func decodeDecimal[T Signed](buf []byte, n int, out []T) (int, error) {
 	}
 	exponent := int(buf[1])
 	exceptions := int(binary.LittleEndian.Uint32(buf[2:]))
-	if exponent > maxDecimalExponent || exceptions > n {
+	if exponent > maxDecimalExponent || exceptions < 0 || exceptions > n {
 		return 0, errBadHeader
 	}
 	position := 6

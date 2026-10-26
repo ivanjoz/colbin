@@ -395,7 +395,8 @@ func flatLength(body []byte, at int, nibble uint8) (start, size int, ok bool) {
 	default:
 		return 0, 0, false
 	}
-	return start, size, size <= len(body)-start
+	// A 32-bit length is negative as an int on a 32-bit platform.
+	return start, size, size >= 0 && size <= len(body)-start
 }
 
 // readInt32s appends an int32 list's elements, two's complement at the width
