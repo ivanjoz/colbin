@@ -25,7 +25,9 @@ package wire
 //
 //	class 0 INT      [pos:1][n:3]          n magnitude bytes, as a narrow
 //	                                       signed element
-//	class 1 BLOB     [enc:2][lw:2]         [size: lw] then size bytes (packed.go)
+//	class 1 BLOB     [0 0 lw:2]            [size: lw] then size bytes
+//	                 [0 1 up lw:1]         the same, packed5 (packed.go)
+//	                 [1 size:3]            size+1 bytes, no length
 //	class 2 VEC      [w:2][pos:1][lw:1]    [bytelen: 1|4] then the elements
 //	class 3 COL      [—:2][lw:2]           [bytelen: lw] a table column (table.go)
 //	class 4 LIST     [homog:1][—:1][lw:2]  [bytelen: lw][count] then elements
@@ -391,9 +393,13 @@ func (w *Writer8) String(key uint8, value string) {
 }
 
 func (w *Writer8) blobHeader(key uint8, size int) {
-	code, width := lengthCodeFor(uint64(size))
-	w.Buffer = wirefmt.AppendMagnitude(
-		append(w.Buffer, key, descriptor(classBlob, code)), uint64(size), width)
+	// appendBlobHeader's short form, spelled here so that it inlines into
+	// String: a call per short string is what that form is there to save.
+	if uint(size-1) < maxShortBlob {
+		w.Buffer = append(w.Buffer, key, descriptor(classBlob, blobShort|uint8(size-1)))
+		return
+	}
+	w.Buffer = appendBlobLength(append(w.Buffer, key), size)
 }
 
 // Array writers, one concrete method per element type, for the reason the narrow
@@ -714,7 +720,7 @@ func (r *Reader8) F64() float64 {
 // copying. It stays valid only as long as the message buffer does. A blob in any
 // encoding but raw — a packed5 string — is refused; String reads those.
 func (r *Reader8) Bytes() []byte {
-	if r.at+2 <= len(r.buffer) && r.buffer[r.at+1]&encMask != encRaw {
+	if r.at+2 <= len(r.buffer) && isPacked(r.buffer[r.at+1]) {
 		r.fail(ErrBadDescriptor)
 		return nil
 	}
@@ -960,10 +966,18 @@ func declaredLength(buffer []byte, at int, want uint8) (length, start int, err e
 		return 0, 0, ErrBadDescriptor
 	}
 	width := lengthWidth[desc&0b11]
-	if want == classVec {
+	switch want {
+	case classVec:
 		width = 1
 		if desc&1 != 0 {
 			width = 4
+		}
+	case classBlob:
+		if desc&blobShort != 0 {
+			return int(desc&0b111) + 1, at + 1, nil
+		}
+		if desc&blobPacked != 0 {
+			width = lengthWidth[desc&1]
 		}
 	}
 	rest := buffer[at+1:]

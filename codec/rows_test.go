@@ -57,7 +57,8 @@ var rowsEdges = func() []int64 {
 }()
 
 // rowsLengths are the string lengths the copy and the header change at.
-var rowsLengths = []int{0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 253, 254, 255, 300, 65535, 65536, 70000}
+var rowsLengths = []int{0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 239, 240, 253, 254, 255, 300, 511, 512,
+	3823, 3824, 65535, 65536, 70000}
 
 func makeRowsEvery(random *rand.Rand) rowsEvery {
 	edge := func() int64 {
@@ -391,9 +392,10 @@ type rowsFlat struct {
 }
 
 // rowsListCounts are the list lengths the length byte changes at, at each
-// element width — 0xFD bytes is the last one-byte length, 0xFFFF the last the
-// kernel writes — and around them.
-var rowsListCounts = []int{0, 1, 2, 6, 63, 64, 126, 127, 253, 254, 16383, 16384, 32767, 32768, 65535, 65536}
+// element width — 0xEF bytes is the last one-byte length, 3823 the last
+// two-byte one, 0xFFFF the last the kernel writes — and around them.
+var rowsListCounts = []int{0, 1, 2, 6, 59, 60, 63, 64, 119, 120, 126, 127, 239, 240, 253, 254, 955, 956,
+	1911, 1912, 3823, 3824, 16383, 16384, 32767, 32768, 65535, 65536}
 
 func makeRowsFlat(random *rand.Rand) rowsFlat {
 	list := func() []int32 {
@@ -496,6 +498,12 @@ func TestFlatReadDecodesWhatTheWalkDoes(t *testing.T) {
 		again := used
 		again.L = slices.Clone(used.L)
 		viaPackage := Unmarshal(message, &again)
+		// A changed byte can make the float a NaN, which DeepEqual never
+		// finds equal to itself; its bits are what must agree.
+		bothNaN := math.IsNaN(value.F64) && math.Float64bits(value.F64) == math.Float64bits(again.F64)
+		if bothNaN {
+			value.F64, again.F64 = 0, 0
+		}
 		if !reflect.DeepEqual(value, again) {
 			t.Fatalf("Codec.Unmarshal %+v, Unmarshal %+v", value, again)
 		}
@@ -516,18 +524,19 @@ func TestFlatReadDecodesWhatTheWalkDoes(t *testing.T) {
 		value, used := makeRowsFlat(random), makeRowsFlat(random)
 		message := must(codec.Encode(&value))
 		check(trial, "as written", message, used)
-		if into := used; !codec.plan.flatReads.readFlat(message[1:], unsafe.Pointer(&into)) {
+		if into := used; !codec.plan.flatReads.readFlat(narrowBody(message), unsafe.Pointer(&into)) {
 			t.Fatalf("trial %d: the encoder's own message was refused\n%+v", trial, value)
 		}
 		check(trial, "cut short", message[:random.IntN(len(message))], used)
 		changed := slices.Clone(message)
-		changed[1+random.IntN(len(changed)-1)] ^= byte(1 << random.IntN(8))
+		changed[random.IntN(len(changed))] ^= byte(1 << random.IntN(8))
 		check(trial, "a byte changed", changed, used)
 		// The fields of another record, in another order or twice.
 		other := makeRowsFlat(random)
 		mixed := must(codec.Encode(&other))
-		cut := 1 + random.IntN(len(message))
-		check(trial, "two records spliced", append(slices.Clone(mixed), message[1:cut]...), used)
+		body := narrowBody(message)
+		cut := random.IntN(len(body) + 1)
+		check(trial, "two records spliced", append(slices.Clone(mixed), body[:cut]...), used)
 		noise := make([]byte, random.IntN(40))
 		for index := range noise {
 			noise[index] = byte(random.Uint32())

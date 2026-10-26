@@ -149,6 +149,9 @@ func mapOpFor(fieldType reflect.Type) (keyKind, valueKind mapKind, err error) {
 // reflection.
 var anyMapType = reflect.TypeFor[map[string]any]()
 
+// anySliceType is the dynamic document's list.
+var anySliceType = reflect.TypeFor[[]any]()
+
 // appendMapField writes a map, and nothing at all when it is empty — an absent
 // key means an empty map, exactly as it means a zero scalar.
 func appendMapField(writer *wire.Writer8, field *planField, at unsafe.Pointer, buf *scratch) {
@@ -160,7 +163,7 @@ func appendMapField(writer *wire.Writer8, field *planField, at unsafe.Pointer, b
 			return
 		}
 		mark := writer.OpenMap(field.key, len(document))
-		appendAnyEntries(writer, document, buf)
+		appendCompactEntries(writer, document, buf)
 		writer.Close(mark)
 		buf.leave()
 		return
@@ -190,10 +193,15 @@ func appendMapField(writer *wire.Writer8, field *planField, at unsafe.Pointer, b
 		if buf.err != nil {
 			break
 		}
+		if field.valueKind == mapAny {
+			// A map of dynamic values is a dynamic container: compact inside,
+			// its keys too. See compact.go.
+			appendCompactReflect(writer, key, buf)
+			appendCompactReflect(writer, value.MapIndex(key), buf)
+			continue
+		}
 		writeMapValue(writer, field.keyKind, key)
 		switch field.valueKind {
-		case mapAny:
-			appendAnyReflect(writer, value.MapIndex(key), buf)
 		case mapStruct:
 			holder.Set(value.MapIndex(key))
 			appendStructElement(writer, field.sub, holder.Addr().UnsafePointer(), buf)
@@ -272,13 +280,17 @@ func readMapField(reader *wire.Reader8, field *planField, at unsafe.Pointer, buf
 	key := reflect.New(field.sliceType.Key()).Elem()
 	value := reflect.New(field.sliceType.Elem()).Elem()
 	for range count {
-		readMapValue(&entries, field.keyKind, key)
+		if field.valueKind == mapAny {
+			readCompactKey(&entries, field.keyKind, key)
+		} else {
+			readMapValue(&entries, field.keyKind, key)
+		}
 		switch field.valueKind {
 		case mapAny:
 			// A dynamic entry decodes to whatever the wire said it was, and the
 			// destination is an interface, so this is a Set rather than one of the
 			// typed stores readMapValue does.
-			if decoded := readAnyValue(&entries, buf); decoded != nil {
+			if decoded := readCompactAny(&entries, buf); decoded != nil {
 				value.Set(reflect.ValueOf(decoded))
 			} else {
 				value.SetZero()

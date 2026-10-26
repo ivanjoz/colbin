@@ -72,12 +72,13 @@ func TestBoolIsOneByte(t *testing.T) {
 }
 
 // A string of up to eight bytes is sized by its nibble and carries no length at
-// all. Past that it is the length form, whose length is one byte to 253, then
-// 0xFE and a u16, then 0xFF and a u32 — so there is no size a string cannot
-// carry, and every step costs only what the size needs.
+// all. Past that it is the length form, whose length is one byte to 239, two
+// to 3823, then 0xFE and a u16, then 0xFF and a u32 — so there is no size a
+// string cannot carry, and every step costs only what the size needs.
 func TestStringSizes(t *testing.T) {
 	for _, size := range []int{
-		1, 8, 9, 200, inlineLength, inlineLength + 1, 0xFFFF, 0x1_0000, 300_000, 1 << 22,
+		1, 8, 9, 200, inlineLength, inlineLength + 1, 0x1FF, 0x200, maxPair, maxPair + 1,
+		0xFFFF, 0x1_0000, 300_000, 1 << 22,
 	} {
 		value := strings.Repeat("x", size)
 		writer := Writer{}
@@ -87,6 +88,8 @@ func TestStringSizes(t *testing.T) {
 		case size <= maxSized:
 		case size <= inlineLength:
 			header = 2 // [key|1100][length]
+		case size <= maxPair:
+			header = 3 // [key|1100][0xF0 + high][low]
 		case size <= 0xFFFF:
 			header = 4 // [key|1100][0xFE][u16]
 		default:
@@ -328,9 +331,9 @@ func TestBigArrayCount(t *testing.T) {
 	writer := Writer{}
 	writer.Ints(1, values)
 	// One width for the whole array: the widest element is 299, so every element
-	// costs two bytes, behind a four-byte header — the key and flags, then 0xFE
-	// and a u16 for a length past 253.
-	if want := 4 + 300*2; len(writer.Buffer) != want {
+	// costs two bytes, behind a three-byte header — the key and flags, then the
+	// two-byte length a body of 240 to 3823 bytes takes.
+	if want := 3 + 300*2; len(writer.Buffer) != want {
 		t.Fatalf("300 elements took %d bytes, want %d", len(writer.Buffer), want)
 	}
 	reader := NewReader(writer.Buffer)
@@ -745,12 +748,13 @@ func TestALargeUnsignedElementIsNotMistakenForNegative(t *testing.T) {
 
 // The cross-language vector. The Rust port asserts these same three literals in
 // rust/src/wire.rs, so neither side can move without the other failing — and
-// the message is 3704 bytes, so it is pinned by its length, its first 64 bytes
+// the message is 3702 bytes, so it is pinned by its length, its first 64 bytes
 // and an FNV-1a of all of it rather than by pasted hex.
 //
 // It covers every shape the lengths touch: a negative in the length form, a
-// string past one byte of length, per-element sizes, and an array whose length
-// takes the u16 escape.
+// string past one byte of length, per-element sizes, and an array and a string
+// whose lengths take the two-byte form. The Rust port has not followed the
+// two-byte form yet.
 func TestTheCrossLanguageVector(t *testing.T) {
 	writer := Writer{}
 	writer.Int(0, -1234567)
@@ -783,8 +787,8 @@ func TestTheCrossLanguageVector(t *testing.T) {
 }
 
 const (
-	vectorLength   = 3704
-	vectorChecksum = 0x0960B36FDCDB8B59
+	vectorLength   = 3702
+	vectorChecksum = 0xB5723FE1466E46FB
 )
 
 var vectorPrefix = []byte{

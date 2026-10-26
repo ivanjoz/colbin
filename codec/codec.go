@@ -174,6 +174,10 @@ type typePlan struct {
 	// JSON walk, which unwraps it so that the document is the value and not a
 	// struct holding one. See envelope.go.
 	envelope bool
+	// dynamicRoot is dynamicRootMap for the envelope of a map[string]any and
+	// dynamicRootList for that of a []any, whose messages are the document
+	// itself rather than a struct holding it. See compact.go.
+	dynamicRoot uint8
 	// page says this plan is a continuation page of a paged type: the fields
 	// past the first 255, linked from the page before under key 255. ids is the
 	// first page's, holding every field's id in declaration order, which a paged
@@ -376,6 +380,14 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 		plan.hasDynamic = anyDynamic(plan.fields)
 	}
 	plan.envelope = isEnvelope(structType)
+	if plan.envelope {
+		switch structType.Field(0).Type {
+		case anyMapType:
+			plan.dynamicRoot = dynamicRootMap
+		case anySliceType:
+			plan.dynamicRoot = dynamicRootList
+		}
+	}
 	plan.finish()
 	plan.reset = compileReset(structType)
 	if plan.rows != nil && plan.rows.flat && coversEveryField(structType, plan) {
@@ -736,11 +748,14 @@ func appendRecord(dst []byte, plan *typePlan, record unsafe.Pointer) ([]byte, er
 	if plan.simple {
 		return appendPlan(dst, plan, record), nil
 	}
+	if plan.dynamicRoot != 0 {
+		return appendDynamicRoot(dst, plan, record, nil)
+	}
 	if tree := plan.tree; tree != nil && tree.pure && useRowPrograms && !Packed5() && !dictionaryOn.Load() {
 		// Nothing in a pure tree takes a scratch or can fail. See tree.go.
-		writer := wire.Writer{Buffer: append(dst, rootStructNarrow)}
+		writer := wire.Writer{Buffer: dst}
 		tree.write(&writer, record, nil)
-		return writer.Buffer, nil
+		return wire.FinishNarrow(writer.Buffer, len(dst)), nil
 	}
 	root := rootStructNarrow
 	if plan.isWide {
@@ -750,12 +765,17 @@ func appendRecord(dst []byte, plan *typePlan, record unsafe.Pointer) ([]byte, er
 		return appendDictRecord(dst, root, plan, record)
 	}
 	var buf scratch
+	if !plan.isWide {
+		// A typed narrow message has no root byte: see wire/root.go.
+		out, err := appendRunInto(dst, plan, record, &buf)
+		if err != nil {
+			return dst, err
+		}
+		return wire.FinishNarrow(out, len(dst)), nil
+	}
 	out, err := appendRunInto(append(dst, root), plan, record, &buf)
 	if err != nil {
 		return dst, err
-	}
-	if buf.grouped {
-		out[len(dst)] |= rootGrouped
 	}
 	return out, nil
 }
@@ -798,11 +818,11 @@ func appendPlan(dst []byte, plan *typePlan, record unsafe.Pointer) []byte {
 		return writer.Buffer
 	}
 	if program := plan.rows; useRowKernel && program != nil && program.flat && useRowPrograms && !Packed5() {
-		return program.appendFlat(append(dst, rootStructNarrow), record)
+		return wire.FinishNarrow(program.appendFlat(dst, record), len(dst))
 	}
-	writer := wire.Writer{Buffer: append(dst, rootStructNarrow)}
+	writer := wire.Writer{Buffer: dst}
 	appendScalars(&writer, plan, record)
-	return writer.Buffer
+	return wire.FinishNarrow(writer.Buffer, len(dst))
 }
 
 // writePlan is the narrow-key encoder for a plan that nests. The walk itself is
@@ -908,6 +928,9 @@ func Unmarshal(data []byte, dst any) error {
 		if isDictRoot(data) {
 			value.SetZero()
 			return unmarshalDictionaryAs(data, plan, unsafe.Pointer(value.UnsafeAddr()), value.Type())
+		}
+		if plan.dynamicRoot != 0 {
+			return unmarshalDynamicRoot(data, plan, unsafe.Pointer(value.UnsafeAddr()), value.Type())
 		}
 		return errBadRoot(data, value.Type())
 	}
@@ -1169,6 +1192,9 @@ func (codec *Codec[T]) Unmarshal(data []byte, value *T) error {
 		if isDictRoot(data) {
 			*value = *new(T)
 			return unmarshalDictionaryAs(data, codec.plan, unsafe.Pointer(value), codec.what)
+		}
+		if codec.plan.dynamicRoot != 0 {
+			return unmarshalDynamicRoot(data, codec.plan, unsafe.Pointer(value), codec.what)
 		}
 		return errBadRoot(data, codec.what)
 	}

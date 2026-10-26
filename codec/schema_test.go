@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/ivanjoz/colbin/wire"
 )
 
 // TestFieldOpsArePinned is the test the schema section makes necessary.
@@ -306,19 +308,23 @@ func TestSelfDescribingIsMarshalWithAPrefix(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got, want := len(described), 1+schema.Size()+len(plain)-1; got != want {
+		// A narrow message is its key run, with no root; a wide one has one.
+		body, narrow := wire.NarrowBody(plain)
+		if !narrow {
+			body = plain[1:]
+		}
+		if got, want := len(described), 1+schema.Size()+len(body); got != want {
 			t.Fatalf("%T: a self-describing message is %d bytes, want %d", value, got, want)
 		}
-		if !bytes.Equal(described[1+schema.Size():], plain[1:]) {
+		if !bytes.Equal(described[1+schema.Size():], body) {
 			t.Fatalf("%T: the body differs from Marshal's", value)
 		}
 		if described[0]&rootSchema == 0 {
 			t.Fatalf("%T: root byte %#02x does not say it carries a schema",
 				value, described[0])
 		}
-		if described[0]&rootWide != plain[0]&rootWide {
-			t.Fatalf("%T: the key width changed: %#02x against %#02x",
-				value, described[0], plain[0])
+		if (described[0]&rootWide == 0) != narrow {
+			t.Fatalf("%T: the key width changed: %#02x", value, described[0])
 		}
 
 		// It decodes into the Go type, which is the property that makes the
@@ -334,11 +340,11 @@ func TestSelfDescribingIsMarshalWithAPrefix(t *testing.T) {
 }
 
 // A root byte inside colbin's range that this version does not assign stays
-// refused. Taking 0x04 for the schema must not have opened the others, and
-// taking 0x01 for grouped tables opened only the roots it marks.
+// refused. Taking 0x04 for the schema must not have opened the others, and a
+// dynamic root is a document's, which a struct does not read.
 func TestUnassignedRootBytesAreStillRefused(t *testing.T) {
 	for root := RootFirst; root <= RootLast; root++ {
-		switch root &^ rootGrouped {
+		switch root {
 		case rootStructNarrow, rootStructWide, rootStructNarrowSchema, rootStructWideSchema:
 			continue
 		}

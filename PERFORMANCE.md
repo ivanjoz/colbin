@@ -496,6 +496,94 @@ itself, was +1.5% on sales encode locally and −1.2 to −2.7% on Lambda, insid
 msgpack's own drift between builds. Not worth a second loop in two assembly
 files.
 
+## The fifth pass: format changes for SchemaStore and dynamic documents
+
+Branch `perf-decode-reuse`, after `c70776f`. The goal: beat msgpack and
+vtprotobuf on every metric over TPC-H, Public BI and SchemaStore, typed and
+dynamic. Code generation was ruled out, so small-message gaps are closed with
+specialised runtime paths instead. **Format changes went first**, to settle the
+wire before any micro-optimisation.
+
+Measured locally with `colbinbench` (`-count 6`, one core, asm build) and the
+`matrix` small-message benchmarks, A/B against a `c70776f` worktree. Sizes are
+from `matrix/bytecheck_test.go` in colbin-benchmarks, a study test that breaks a
+document's bytes down by what they carry.
+
+### What changed, and what it bought
+
+**Encode paths, no format change.** Tree programs now cover flat plans of
+pointers (`treePointerStruct`), and a value field skips `writeFields` through
+`writeValue` and `writeValueWide`.
+
+**Dynamic documents: the compact form and a document root** (INTERNALS §9.1,
+`wire/compact.go`). Inside a dynamic container a value is one msgpack-like code
+byte plus its payload, where it used to be a K8 descriptor plus a length. A
+`map[string]any` or `[]any` at the root is the document itself (`D1`, `D3`),
+with no envelope. The sorted-key rule went: it cost more than it bought, and
+tests now compare decoded values instead of bytes. The grouped root bit (bit 0)
+was freed for this.
+
+| dynamic, msgpack ÷ colbin | before | after |
+|---|---:|---:|
+| size | 0.91 (5/27) | 1.16 (27/27) |
+| encode | 0.62 (0/27) | 0.94 (6/27) |
+| decode reuse | 0.84 (2/27) | 1.15 (25/27) |
+| decode fresh | 0.83 (3/27) | 0.94 (9/27) |
+
+**Typed size against vtprotobuf.** Byte dumps of the losing documents showed
+four costs, each fixed by a format change:
+
+| cost | fix | cases it moved |
+|---|---|---|
+| a list of one paid a count and an element length, 2 bytes over protobuf | narrow f1 marks a list or map of one (INTERNALS §3.3) | jsonresume +7 → −17, imageoptimizerwebjob +4 → −1, circlecimatrix +3 → 0 |
+| a K8 string paid key + descriptor + size, 1 byte over protobuf | BLOB `[1 n:3]`, 1..8 bytes with no size (§4.1) | netcoreproject +12 → −6, packagejson +9 → −12 |
+| a body of 254..65535 bytes paid `FE` + u16 | `F0–FD` two-byte lengths up to 3823 (§3.1) | travisnotifications +2 → 0 |
+| the root byte, which protobuf does not have | no root byte on a typed narrow message (§2.1) | githubfundingblank, circlecimatrix, tslintextend, empty documents: +1 → 0 |
+
+SchemaStore typed against vtprotobuf went from 10 wins of 19 (+2 to +12 bytes
+on the rest) to no case larger: 6 ties, of which two are empty documents, and
+the rest smaller.
+
+The full run after the first three changes (before the root byte), ratios of the
+other format over colbin:
+
+| group | vs | encode | decode fresh | decode reuse | size |
+|---|---|---:|---:|---:|---:|
+| TPC-H | msgpack | 1.41 | 2.52 | 2.50 | 3.30 |
+| TPC-H | vtprotobuf | 1.39 | 2.27 | 2.19 | 1.32 |
+| Public BI | msgpack | 1.11 (32/46) | 1.67 | 1.73 | 3.89 |
+| Public BI | vtprotobuf | 1.02 (21/46) | 1.44 | 1.81 | 1.39 |
+| SchemaStore typed | msgpack | 0.68 (0/21) | 0.91 | 0.89 | 3.04 |
+| SchemaStore typed | vtprotobuf | 0.72 (1/21) | 1.06 | 1.28 | 1.05 |
+| SchemaStore dynamic | msgpack | 0.94 | 0.94 | 1.15 | 1.16 |
+
+TPC-H and Public BI did not move beyond run-to-run drift.
+
+### What these changes cost
+
+- **Encode, small typed documents**: after the root-byte change, A/B against
+  `c70776f` at n=10, ±1%: netcoreproject +5%, tslintbasic +5% (1.7 ns),
+  travisnotifications +4%, packagejson +2%; githubfundingblank and jsonfeed
+  unchanged. **Not yet attributed.** The A/B spans every change in this pass,
+  and each adds at most a compare per field or per message. Two inlining
+  regressions were found and fixed on the way: `wire.FinishNarrow` (cost 82)
+  and `Writer8.String`, whose short-string branch pushed `blobHeader` out of
+  line.
+- **YaleLanguages decode fresh against vtprotobuf**: 0.98 → 0.72 in one run,
+  while its decode reuse against msgpack rose 0.81 → 0.96 in the same run.
+  Probably drift; not yet re-measured alone.
+
+### Format hypotheses considered and set aside
+
+- **Narrow pages for structs of 17+ fields**: they conflict with tables, since
+  `appendNarrowColumns` and the JSON walk have no pages, and Public BI's wide
+  rows would become paged tables. Short K8 strings fixed the same cases.
+- **Dropping `D8`, the wide typed root**: it would break a type that grows from
+  16 to 17 fields, because old narrow messages are read by the wide plan at the
+  width the root declares.
+- **Dynamic keys as back-references**: a size win where colbin already wins
+  27/27, paid for in encode and decode time.
+
 ## Lessons for the next pass
 
 - **Go's inliner budget (80) is load-bearing here.** Moving the writers to
@@ -531,7 +619,32 @@ files.
 
 ## Open leads, not yet tried
 
-- **A generated encoder per type** for the row path: the only lead that
+From the fifth pass, in order:
+
+- **Attribute and recover the small-document encode regressions** above:
+  A/B the working tree against itself with one change reverted at a time (root
+  byte, short K8 strings, two-byte lengths), then fix whichever costs.
+- **Re-measure YaleLanguages decode fresh alone**, to rule out a real
+  regression.
+- **Two small format candidates**, to measure with `bytecheck_test.go` before
+  deciding: element sizes in the two-byte form (an element of 255+ bytes costs
+  `FF` + u32 today), and a wide list of one (LIST has a free detail bit). Both
+  are size, neutral on speed.
+- **SchemaStore typed encode**, 0.72× vtprotobuf and 0.68× msgpack, the weakest
+  metric. The documents are 10–500 bytes, so the fixed cost per message
+  dominates: the entry, the plan, the scratch. Worst cases: circlecimatrix,
+  imageoptimizerwebjob, commitlint, travisnotifications.
+- **Decode fresh of small documents**, typed 0.91× and dynamic 0.94× msgpack:
+  allocations, in githubfundingblank, nightwatch, circlecimatrix, tslintbasic.
+- **geojson dynamic encode** (0.76×): floats.
+- **TrainsUK1** in Public BI: 0.45× msgpack on encode, 0.66× on decode.
+- **Lambda**: re-run the matrix there once the local numbers settle.
+
+Older leads:
+
+- **A generated encoder per type** — ruled out as a product decision in the
+  fifth pass (small-message gaps go to specialised runtime paths instead); kept
+  here for what it measured. For the row path, it was the only lead that
   addresses what is left of encode into a reused buffer (0.63–0.83× of msgpack),
   and a different product decision from the rest of this list. `Generate`
   already covers flat records: on the reading record, alone on a P-core, its

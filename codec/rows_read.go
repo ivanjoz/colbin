@@ -122,17 +122,22 @@ func (program *rowProgram) readWide(body []byte, record unsafe.Pointer, buf *scr
 		to := unsafe.Add(record, op.offset)
 
 		if op.kind == rowString {
-			// A raw blob: the length in one, two, four or eight bytes.
-			if desc&^0b11 != wideBlob {
-				break
+			// A raw blob: up to eight bytes with no length, or the length in
+			// one, two, four or eight bytes.
+			var size uint64
+			start := at + 2
+			switch {
+			case desc&^0b111 == wideBlob|wideShort:
+				size = uint64(desc&0b111) + 1
+			case desc&^0b11 == wideBlob:
+				width := 1 << (desc & 0b11)
+				if start += width; start <= len(body) {
+					size = readMagnitude(body, at+2, width)
+				}
+			default:
+				size = math.MaxUint64 // anything else is the slow path's to read
 			}
-			width := 1 << (desc & 0b11)
-			start := at + 2 + width
-			if start > len(body) {
-				break
-			}
-			size := readMagnitude(body, at+2, width)
-			if size > uint64(len(body)-start) {
+			if start > len(body) || size > uint64(len(body)-start) {
 				break
 			}
 			*(*string)(to) = buf.strings.String(body[start : start+int(size)])
@@ -381,6 +386,8 @@ func flatLength(body []byte, at int, nibble uint8) (start, size int, ok bool) {
 	switch length := body[at+1]; {
 	case length <= wirefmt.InlineLength:
 		start, size = at+2, int(length)
+	case length < wirefmt.Length16 && at+3 <= len(body):
+		start, size = at+3, wirefmt.LengthPair+(int(length-wirefmt.LengthPair)<<8|int(body[at+2]))
 	case length == wirefmt.Length16 && at+4 <= len(body):
 		start, size = at+4, int(binary.LittleEndian.Uint16(body[at+2:]))
 	case length == wirefmt.Length32 && at+6 <= len(body):

@@ -38,6 +38,7 @@ Go is the specification. The Rust crate reads everything Go writes except where
 
 ```
 message := [root:1] [schema section]? [body]
+         | [narrow key run]          a typed narrow message: no root (§2.1)
 ```
 
 A message has no length of its own; it ends where the buffer that delivers it
@@ -45,55 +46,70 @@ ends.
 
 ### 2.1 The root byte
 
-The root byte is an ordinary wide STRUCT descriptor (§4.2), `1 101 dddd`, so every
-message begins with a byte in **0xD0..0xDF** (`codec/root.go`). Two of the four
-detail bits are assigned:
+The root byte is an ordinary wide STRUCT descriptor (§4.2), `1 101 dddd`, in
+**0xD0..0xDF** (`codec/root.go`), and it says what the message is.
+
+**A typed narrow message has none.** A struct at four key bits, with no schema
+section and no dictionary, is most messages, and its key run is the whole
+message; an empty message is the record with every field zero. A reader tells
+it from the rest by the first byte: one in the range is a root byte, anything
+else a key run's first field. A key run can begin in the range — a first field
+of key 13 has a header of `0xD_` — and that message keeps `0xD0` in front, which
+a reader steps over as it would any root byte (`wire.FinishNarrow`). Only a
+record whose keys 0 to 12 are all zero and whose key 13 is not pays it.
+
+The four detail bits are assigned:
 
 | bit | mask | meaning |
 |---|---|---|
 | 3 | 0x08 | the body's key run uses eight-bit keys |
 | 2 | 0x04 | a schema section (§10) comes before the body |
 | 1 | 0x02 | a dictionary section (§6.3) comes before the body — prototype |
-| 0 | 0x01 | the body holds a grouped table (§6.3) |
+| 0 | 0x01 | the body is a dynamic document, not a key run (§9.1) |
 
-Bit 0 changes nothing about how the body reads — a grouped table says so in its
-own descriptor — and exists so that a reader older than groups refuses the
-message: under eight-bit keys a grouped table differs from a whole one by a
-descriptor bit that reader never checked, and it would read the groups as
-columns. A writer sets it whenever the body holds a grouped table; a reader
-masks it off. So the root bytes are:
+A dynamic document has no key width and no dictionaries, so under bit 0 the
+wide bit is unassigned and bit 1 says which document it is. The root bytes are:
 
 | byte | body |
 |---|---|
-| `0xD0` | narrow keys |
+| none | narrow keys: the message is the key run |
+| `0xD0` | narrow keys, written only before a key run that begins in the range |
 | `0xD8` | wide keys |
 | `0xD4` | schema section, then narrow keys |
 | `0xDC` | schema section, then wide keys |
 | `0xD2` | dictionary section, then narrow keys |
 | `0xDA` | dictionary section, then wide keys |
+| `0xD1` | a `map[string]any`: its entries, compact, to the end of the message |
+| `0xD3` | a `[]any`: one compact value |
+| `0xD5`, `0xD7` | the same behind a schema section |
 
-each also with bit 0 set, and a reader refuses the other values in the range
-rather than guess at them.
+and a reader refuses the other values in the range rather than guess at them.
+A grouped table (§6.3) says so in its own descriptor and nowhere else.
 
 A reader dispatches the first four in one switch and reaches the dictionary
 roots only through the branch that would refuse the byte, so a message without
 dictionaries is read exactly as it was before they existed.
 
-The other 240 first bytes are never colbin. `colbin.IsColbin` is a range check on
-0xD0..0xDF, and an application may use any byte outside it for framing of its own
-(`RootFirst`/`RootLast`). There is no version byte: an unassigned root detail is
-how a later version would announce itself, and an older reader refuses it. With
-bit 0 spent on grouped tables every detail bit is assigned, so the next change
-an older reader has to refuse needs another door — a combination no writer
-produces, such as the dictionary and schema bits together, or SPECIAL `0xF6`
-inside the body.
+The other 240 first bytes are a typed narrow message's. They used to be left to
+an application's own framing; they are not any more, and a stream that carries
+colbin beside other data tags it itself. The byte was what protobuf won by on a
+document of a few dozen bytes. `colbin.IsColbin` is a range check on
+0xD0..0xDF, so it says whether a message has a root byte, not whether it is
+colbin (`RootFirst`/`RootLast`). There is no version byte: an unassigned root detail is
+how a later version would announce itself, and an older reader refuses it. Every
+detail bit is assigned, so the next change an older reader has to refuse needs
+another door — a combination no writer produces, such as the dictionary and
+schema bits together, a dynamic root with the wide bit, or SPECIAL `0xF6` inside
+the body.
 
-A reader decodes the body at the width the root byte declares, not the width its
-own type would have chosen.
+A reader decodes the body at the width the root byte declares, or at four bits
+when there is none, not the width its own type would have chosen.
 
 ### 2.2 What can be at the root
 
-The body is always a struct's key run. A slice or a map at the root is carried in
+The body is a struct's key run, or a dynamic document: a `map[string]any` or a
+`[]any` at the root is the document itself (§9.1), which costs the root byte and
+nothing else. Any other slice or map at the root is carried in
 an **envelope**: a one-field struct whose field is the value, under key 0, named
 `rows` in the schema section and flagged as an envelope there (§10). The JSON walk
 unwraps it, so the document is the array or the object rather than a wrapper
@@ -125,9 +141,19 @@ before it knows the type: it says **how long the field is**.
 | `4..11` | exactly `nibble − 3` bytes, 1..8 |
 | `12..15`, `1 1 f1 f0` | a length, then that many bytes |
 
-A length is one byte up to 253, `0xFE` and a u16, or `0xFF` and a u32. Writers use
-the shortest form; readers accept any. The flag bits `f1 f0` mean something
-different per type and never change the size.
+A length is one of four forms:
+
+| first byte | length |
+|---|---|
+| `0x00–0xEF` | the byte itself, 0..239 |
+| `0xF0–0xFD` | two bytes: `240 + ((first − 0xF0) << 8 \| second)`, 240..3823 |
+| `0xFE` | a u16 follows |
+| `0xFF` | a u32 follows |
+
+Writers use the shortest form; readers accept any. The two-byte form is what a
+varint spends on a body of a few hundred bytes, where a u16 escape spent three.
+It costs the bodies of 240 to 253 bytes a second byte. The flag bits `f1 f0`
+mean something different per type and never change the size.
 
 The type decides only what the bytes **mean**, so a narrow reader **steps over a
 key it does not know** exactly as a wide one does (`Reader.Skip`: one branch and,
@@ -143,7 +169,7 @@ old nibble, measured in `RATIONALE.md`.
 | signed | 1, 2, 3; nibble 3 is −1 | a positive value | `1100`: the magnitude of a negative value, 1..8 bytes; length 0 is an explicit zero |
 | string, blob | refused | 1..8 raw bytes | `f1 f0`: `00` raw, `01` packed5 opening in lower case, `10` packed5 opening in upper case (§8), `11` refused |
 | integer array | refused | refused | `f1 f0` is the element width: 0 → 1 byte, 1 → 2, 2 → 4, 3 → 8. The length is a multiple of it and the count is `length >> f1f0` |
-| string array | refused | refused | `1100`: the elements, each `[size][bytes]`, size one byte up to 254 or `0xFF` and a u32. There is no count: it is the number of elements the length holds |
+| string array | refused | refused | `1100`: the elements, each `[size][bytes]`, size one byte up to 254 or `0xFF` and a u32. There is no count: it is the number of elements the length holds. `1110`: one element, its bytes alone |
 
 Values use the fewest bytes that hold them, and a string of 1..8 bytes carries no
 length at all. The writer omits a field holding its zero value, so an absent key
@@ -172,20 +198,28 @@ normally.
 A narrow composite is the length form with a body:
 
 ```
-[key:4 | 1 1 0 f0] [length] [body]
+[key:4 | 1 1 f1 f0] [length] [body]
 ```
 
-| composite | `f0` | body |
+| composite | `f1 f0` | body |
 |---|---|---|
-| struct | k8: the nested run's own key width | a key run of exactly `length` bytes |
-| list | 0 | `[count]` then `count × ( [elementLength] [key run] )` |
-| table | 1 | `[rows]` then the column run (§6.3) |
-| map | 0 | `[count]` then `count × ( key element, value element )` |
+| struct | `0` k8: the nested run's own key width | a key run of exactly `length` bytes |
+| list | `00` | `[count]` then `count × ( [elementLength] [key run] )` |
+| list of one | `10` | the element's key run, with no count and no element length |
+| table | `01` | `[rows]` then the column run (§6.3) |
+| map | `00` | `[count]` then `count × ( key element, value element )` |
+| map of one | `10` | the entry, with no count |
 
 A list and a table are both a `[]Struct`, which is why one bit tells them apart; a
-struct and a map are other Go types, so their flags overlap nothing. `f1 = 1` is
-set only on a table whose rows are in groups — nibble `1111`, §6.3 — and refused
-everywhere else.
+struct and a map are other Go types, so their flags overlap nothing. `f1 = 1` is a
+list or a map of one element, a table whose rows are in groups (nibble `1111`,
+§6.3) and, in a table's column run, a nullable column (§6.6); a struct refuses
+it. A table's string column is always the counted form, because there `f1` is
+taken.
+
+A list of one is what a configuration document's lists mostly are — one
+`extends`, one rule, one job — and protobuf writes one as a tag, a length and
+the element. The counted form spent a count and an element length on top.
 
 A count is one byte up to 254, or `0xFF` and a u32. A list element carries a
 length and **no descriptor**: its shape is the schema's to know, which is a byte
@@ -194,10 +228,11 @@ wide one. Its length is one byte up to 254, or `0xFF` and a u32.
 
 **Backpatching.** A composite's length is not known until its body is written, so
 the writer reserves one byte, writes the body and patches it (`Close`). A body of
-up to 253 bytes fits the reserved byte; a longer one moves up by two (`0xFE` and a
-u16) or four (`0xFF` and a u32). A list element has no header and keeps its own
-escape (`CloseElement`). Sizing a value before writing it would cost a pass over
-every nested value; a backpatch costs a `memmove` only for bodies past 253 bytes.
+up to 239 bytes fits the reserved byte; a longer one moves up by one (the
+two-byte form), two (`0xFE` and a u16) or four (`0xFF` and a u32). A list element
+has no header and keeps its own escape (`CloseElement`). Sizing a value before
+writing it would cost a pass over every nested value; a backpatch costs a
+`memmove` only for bodies past 239 bytes.
 
 A narrow field holds at most 2³² − 1 bytes. A larger blob is a wide field's job.
 
@@ -224,7 +259,7 @@ the wide width exists, and why a type that has to evolve past its readers uses i
 | class | bytes | detail | payload |
 |---|---|---|---|
 | 0 INT | 0x80–0x8F | `[pos:1][n:3]`: `n = 0` means the magnitude is 1, 1..6 that many bytes, 7 eight bytes; `pos = 0` makes it negative | the magnitude |
-| 1 BLOB | 0x90–0x9F | `[enc:2][lw:2]`; enc 0 raw, 1 packed5 lower, 2 dictionary (reserved, refused), 3 packed5 upper | the size (`lw`), then the bytes |
+| 1 BLOB | 0x90–0x9F | `[0 0 lw:2]` raw; `[0 1 up lw:1]` packed5, opening in upper case when `up`, `lw` a 1- or 2-byte size; `[1 n:3]` raw, `n + 1` bytes and no size | the size, then the bytes |
 | 2 VEC | 0xA0–0xAF | `[w:2][pos:1][lw:1]`; `lw` 0 a one-byte, 1 a four-byte byte length | the elements; the count is `length >> w` and never stored |
 | 3 COL | 0xB0–0xBF | `[—:2][lw:2]` | the length, then a column (§7) |
 | 4 LIST | 0xC0–0xCF | `[homog:1][—:1][lw:2]` | `[length][count]` then the elements |
@@ -235,6 +270,13 @@ the wide width exists, and why a type that has to evolve past its readers uses i
 `lw` selects a length of 1, 2, 4 or 8 bytes, except in VEC where its single bit
 selects 1 or 4. No length anywhere is a varint: reading one is a branch and a
 fixed-width load.
+
+A BLOB of 1..8 bytes is the narrow nibble's sized string at eight key bits
+(`0x98–0x9F`): the key, the descriptor and the bytes, which is protobuf's tag
+and length. With a size byte as well, every short string of a type of more than
+sixteen fields cost a byte more than protobuf's. Its codes were a dictionary
+encoding, reserved and never written, and packed5 sizes past 65 535 bytes, which
+no string packed5 is for reaches.
 
 | SPECIAL | meaning |
 |---|---|
@@ -380,7 +422,6 @@ group := [byteLength:u32] column*
 - The group's length is a fixed four bytes rather than a length form, so the
   writer patches it in place: a group is far past what one byte holds, and a
   widening backpatch would move it.
-- The message's root byte has bit 0 set (§2.1).
 - Only a table field is grouped. A table in a dynamic value (§9) never is, and a
   reader refuses one that says it is.
 
@@ -438,10 +479,12 @@ needs every column's value — and of a grouped table one group's at a time (§1
 ```
 wide:    [key] [0xE0 | lw] [length] [count] ( key element, value element )*
 narrow:  [key | 1100]      [length] [count] ( key element, value element )*
+         [key | 1110]      [length] key element, value element         one entry
 ```
 
-Entries are pairs of key-less elements (§5.2), **sorted by key**, so the same map
-always encodes to the same bytes and renders to the same JSON. Keys are strings or
+Entries are pairs of key-less elements (§5.2). A typed map's are sorted by key; a
+map of `any` (`mapAny`) is a dynamic container, its keys and values compact (§9.1)
+and in whatever order the writer's map handed them over. Keys are strings or
 integers. Values are a string, an integer, a float, a bool (an unsigned 0 or 1),
 `any`, or a struct.
 
@@ -584,7 +627,7 @@ is packed.
 | width | how a packed string is flagged |
 |---|---|
 | K4 | blob escapes 3 / 4 (u8 size) and 5 / 6 (u32 size); a 5 / 6 declaring ≤ 255 is refused |
-| K8 | BLOB `enc` 1 (lower) or 3 (upper) |
+| K8 | BLOB `[0 1 up lw]`: `up` 0 (lower) or 1 (upper), a size of 1 or 2 bytes; a longer packed string is written raw |
 
 The writer packs only when the payload is shorter than the raw string, and at
 four key bits only when header and payload together are shorter too, so turning it
@@ -612,10 +655,14 @@ room for a class, so **a type holding a dynamic field is wide**.
 | float64 / float32 | `F3` / `F4`, then the reversed bits |
 | string | BLOB, raw |
 | `[]byte` | `F5`, then a BLOB |
-| slice, array | LIST of dynamic values |
-| map | MAP of dynamic key/value pairs, keys sorted |
+| slice, array | LIST, its values compact (§9.1) |
+| map | MAP, its keys and values compact (§9.1), in no particular order |
 | struct | `F7` + struct index, then a STRUCT (self-describing) — or a MAP of field names (plain `Marshal`) |
 | `[]Struct`, or `[]any` of one struct type | `F7` + struct index, then a LIST, or a TABLE from eight rows |
+
+That is a dynamic value at a field, where a reader that does not know the field
+has to step over it by its descriptor. Inside a LIST or a MAP — and at a dynamic
+root — nothing steps over anything, and the values are compact.
 
 **TYPED** (`0xF7`) is what keeps an array of records inside an `any` from writing
 its field names per row: it says "what follows is struct number n, which the
@@ -633,6 +680,43 @@ own section is parsed lazily, the first time a TYPED value needs it.
 A value the format has no form for — a channel, a function, a complex number, an
 opaque struct without `encoding.TextMarshaler` — is an encode error, as is a value
 that holds itself.
+
+### 9.1 The compact form
+
+Inside a dynamic container a value is a code byte from a table of its own
+(`wire/compact.go`), msgpack's shape with colbin's numbers:
+
+| code | value |
+|---|---|
+| `00`–`7F` | an unsigned integer, the code itself |
+| `80`–`8F` | a map of 0..15 entries, each a key and a value |
+| `90`–`9F` | a list of 0..15 values |
+| `A0`–`BF` | a string of 0..31 bytes |
+| `C0` / `C1` / `C2` | null / false / true |
+| `C3`–`C5` | a string, its length in 1, 2 or 4 bytes |
+| `C6`–`C8` | bytes, their length in 1, 2 or 4 bytes |
+| `C9` / `CA` | a map / a list, its count after (one byte up to 254, or `FF` and a u32) |
+| `CB` | TYPED: a struct index, then a STRUCT, LIST or TABLE element as in §9 |
+| `CC` | a float64 holding a whole number, the compact integer after |
+| `D0`–`D7` | an unsigned integer of 1..8 bytes |
+| `D8`–`DF` | a negative integer, its magnitude in 1..8 bytes |
+| `E0`–`E8` | a float64, its byte-reversed bits trimmed to 0..8 bytes |
+| `E9`–`ED` | a float32, the same in 0..4 bytes |
+| `F0`–`FF` | a float64 holding 0..15 |
+
+`CD`–`CF` and `EE`–`EF` are unassigned and refused.
+
+A container inside a container carries its count and **no length**: stepping
+over one means reading it, which nothing inside a dynamic container has to do —
+the outermost one, at a field, has its length, and that is what `Skip` uses. A
+float64 holding a whole number, which is every number `encoding/json` hands Go,
+is written as the integer when that is shorter than its trimmed bits.
+
+**At the root** a `map[string]any` is its entries to the end of the message, with
+no count, and a `[]any` is one compact value. A dynamic document therefore costs
+its root byte over msgpack's encoding of it, and the maps are written in the
+order Go's iteration hands their entries over: the same document encodes to
+different bytes from one call to the next, and is the same document decoded.
 
 ---
 
@@ -817,8 +901,8 @@ call fails and says how to fix it.
   first, after spending the row budget (§13), and rows are emitted in schema field
   order. A missing column, or one shorter than the table, renders zeros. A
   grouped table is one array, read and emitted a group at a time.
-- **Maps** render in wire order, which is key order. An integer key becomes a
-  quoted decimal.
+- **Maps** render in wire order: key order for a typed map, the writer's
+  iteration order for a dynamic one. An integer key becomes a quoted decimal.
 - **Envelopes** are unwrapped.
 - **Numbers** follow `encoding/json`: integers exactly, floats in their shortest
   form at their own width, exponent form below 1e-6 and from 1e21. **NaN and
@@ -1069,9 +1153,7 @@ The Go side is further covered by fuzz targets over every decoder and codec
 `rust/wasm/Cargo.toml`, `Cargo.lock` and `rust/wasm/Cargo.lock`, and the tag
 `vX.Y.Z` is the Go module version. On 0.x the minor version is the compatibility
 unit: a new op or map kind is a minor bump, because an older reader refuses a
-section that names it. So is a new root bit, for the same reason: grouped
-tables (§6.3) made the release after 0.6 a minor one, since a 0.6 reader refuses
-a message holding one.
+section that names it. So is a new root byte, for the same reason.
 
 **Releasing:**
 

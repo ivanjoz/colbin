@@ -129,9 +129,6 @@ func TestPointerColumns(t *testing.T) {
 func checkPointerTable[T any](t *testing.T, name string, value, used *T) {
 	t.Helper()
 	message := must(Marshal(value))
-	if message[0]&rootGrouped == 0 {
-		t.Fatalf("%s: the root byte %#02x does not say a reader before pointer columns must refuse it", name, message[0])
-	}
 	var fresh T
 	if err := Unmarshal(message, &fresh); err != nil || !reflect.DeepEqual(&fresh, value) {
 		t.Fatalf("%s: decoded as %+v, %v", name, fresh, err)

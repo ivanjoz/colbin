@@ -43,7 +43,7 @@ type genStatus uint8
 
 // AppendColbin encodes v onto dst.
 func (v *GenCharge) AppendColbin(dst []byte) []byte {
-	w := wire.Writer{Buffer: append(dst, 0xd0)}
+	w := wire.Writer{Buffer: dst}
 	w.I32(0, v.CompanyID)
 	w.I32(1, v.UserID)
 	w.U16(2, v.RouteID)
@@ -54,20 +54,18 @@ func (v *GenCharge) AppendColbin(dst []byte) []byte {
 	w.U16(7, v.Access2)
 	w.U16(8, v.Access3)
 	w.U16(9, v.Access4)
-	return w.Buffer
+	return wire.FinishNarrow(w.Buffer, len(dst))
 }
 
 // UnmarshalColbin decodes a colbin message into v, zeroing it first:
 // a key the message omits means the field was zero. A slice field's array
 // is reused for the values the message holds, as Codec.Unmarshal does.
 func (v *GenCharge) UnmarshalColbin(data []byte) error {
-	if len(data) == 0 {
-		return errors.New("colbin: an empty GenCharge message")
-	}
-	switch data[0] {
-	case 0xd0:
+	switch {
+	case len(data) == 0 || !wire.IsRoot(data[0]):
+	case data[0] == 0xd0:
 		data = data[1:]
-	case 0xd4:
+	case data[0] == 0xd4:
 		// A self-describing message: the schema section is stepped over.
 		length, width, ok := wire.ReadLength(data[1:])
 		if !ok || length > len(data)-1-width {
@@ -130,10 +128,10 @@ func (v *GenWide) UnmarshalColbin(data []byte) error {
 	if len(data) == 0 {
 		return errors.New("colbin: an empty GenWide message")
 	}
-	switch data[0] {
-	case 0xd8:
+	switch {
+	case data[0] == 0xd8:
 		data = data[1:]
-	case 0xdc:
+	case data[0] == 0xdc:
 		// A self-describing message: the schema section is stepped over.
 		length, width, ok := wire.ReadLength(data[1:])
 		if !ok || length > len(data)-1-width {

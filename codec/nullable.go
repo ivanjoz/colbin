@@ -19,9 +19,6 @@ package codec
 // The values are gathered densely, so the column codec sees only real values
 // and a run of nils costs a bit a row. Decoding allocates one array per column
 // and points each present row into it, rather than a pointee per row.
-//
-// A message holding a table with a pointer column sets the root bit a grouped
-// table sets (rootGrouped): a reader from before either would misread one.
 
 import (
 	"math"
@@ -65,7 +62,6 @@ func gatherPointers(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scr
 	if intColumns+stringColumns == 0 {
 		return
 	}
-	buf.grouped = true // see rootGrouped
 	rows := slice.len
 	size := wire.PresenceBytes(rows)
 	columns.reservePointers(rows*intColumns, rows*stringColumns, size*(intColumns+stringColumns))

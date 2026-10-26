@@ -56,11 +56,19 @@ statement of what the two widths are: K4 is the schema-driven form and K8 the
 self-describing one. A four-bit descriptor has no room for a class, so a narrow
 map's entries take their type from the schema and cannot carry one.
 
-A dynamic map is written in key order, where a typed map field is not. Go
-randomises map iteration, so without sorting the same value encodes to different
-bytes every time — which rules out a golden vector and any two ports being
-pinned against each other. A typed map field has a key set the schema declares
-and is usually small, so it keeps the iteration and the allocation this costs.
+A dynamic map is written in the order Go's iteration hands its entries over,
+which is not the same twice. It used to be sorted, so that the same value always
+encoded to the same bytes; sorting was most of a document's encode, and it is
+gone. Two encodings of a document are compared by decoding them, and a golden
+vector of one pins a decode rather than bytes.
+
+Inside a dynamic container the values are compact (INTERNALS §9.1): msgpack's
+framing — a string's length or a small map's count in its code byte, nested
+containers by count with no length — with colbin's trimmed floats. What it gives
+up is stepping over a nested container without reading it, which only a reader
+that reads every value would ever be in a position to want. On SchemaStore's
+documents it took colbin from about 9% larger than msgpack to about 14% smaller
+(geometric means), and made the dynamic encode and decode 31% faster.
 
 The cost is stated in the file and belongs here too: a `map[string]any` writes
 its keys as strings, per entry, per message. That is the thing this format exists
@@ -86,8 +94,9 @@ no room for a class).
 
 **Context** — The byte-aligned format encodes a struct and nothing else, which is
 what reserves `0xD0..0xDF`: the first byte is an ordinary STRUCT descriptor, so
-the other 240 values are guaranteed never to be colbin and an application may use
-them as its own framing. But a caller with a complex ORM column in its hand holds
+the other 240 values were guaranteed never to be colbin and an application could
+use them as its own framing (until a typed narrow message gave its root byte
+back, below). But a caller with a complex ORM column in its hand holds
 `[]Grant`, not a struct wrapping one, and the previous format took it. Refusing it
 made the format unusable for exactly the storage case it was written for.
 
@@ -800,6 +809,29 @@ message the old format wrote can be mistaken for one, because every legal root
 byte is even and above 0x90.
 
 It costs one byte and, on the encode path, about 1.5 ns.
+
+### A typed narrow message gives the root byte back
+
+**Context** — Measured against vtprotobuf on the SchemaStore documents, the
+last sizes colbin lost were all one byte: githubfundingblank, circlecimatrix,
+tslintextend, and the empty documents that protobuf writes as nothing. Each was
+the root byte. Protobuf has none, because its reader knows what it expects.
+
+**Decision** — A struct at four key bits, with no schema section and no
+dictionary, is written with no root byte: its key run is the message, and an
+empty message is the zero record. A first byte in `0xD0..0xDF` is still a root
+byte; any other is the key run's first field. A key run that itself begins in
+the range — a first field of key 13 — keeps `0xD0` in front. Every other root
+keeps its byte. `wire/root.go`.
+
+**Rationale** — The decoder loses nothing: a typed message was never readable
+without its type, so the byte told a typed decoder only what it already knew.
+What goes is recognising a message by its first byte. The range was promised
+to applications for their own framing; that promise is withdrawn, and a stream
+mixing colbin with other data now tags it itself — the byte colbin saved, paid
+by the one caller who needs it rather than by every message. The key-13 rule
+costs one comparison per encode and a byte only on records whose first twelve
+keys are all zero.
 
 ### packed5 is a flag, not a mode
 

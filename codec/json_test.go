@@ -698,7 +698,7 @@ func TestPackedNarrowStringThroughEveryReader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if data[0]&0x08 != 0 {
+	if !isNarrow(data) {
 		t.Fatalf("this test needs a narrow root; got %#02x", data[0])
 	}
 

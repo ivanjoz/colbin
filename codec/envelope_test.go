@@ -39,8 +39,8 @@ func TestASliceRootIsAnOrdinaryStructMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !IsColbin(data) {
-		t.Fatalf("first byte %#x is outside the reserved root range", data[0])
+	if !isNarrow(data) {
+		t.Fatalf("first byte %#x is not a typed narrow message's", data[0])
 	}
 
 	// Byte for byte what the hand-written wrapper writes, which is the claim the

@@ -5,7 +5,51 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/ivanjoz/colbin/wire"
 )
+
+// A typed narrow message has no root byte, unless its first field has key 13
+// and so a header in the root range, and an empty message is the zero record.
+func TestATypedNarrowMessageHasNoRootByte(t *testing.T) {
+	for _, c := range []struct {
+		value sixteenFields
+		want  []byte
+	}{
+		{sixteenFields{}, []byte{}},
+		{sixteenFields{F1: 9}, []byte{0x04, 9}},
+		{sixteenFields{F14: 9}, []byte{rootStructNarrow, 0xD4, 9}}, // key 13
+		{sixteenFields{F14: 9, F16: 2}, []byte{rootStructNarrow, 0xD4, 9, 0xF1}},
+		{sixteenFields{F13: 1, F14: 9}, []byte{0xC0, 0xD4, 9}}, // key 12 leads
+		{sixteenFields{F15: 3}, []byte{0xE2}},
+	} {
+		for _, flat := range []bool{false, true} {
+			useRowPrograms = flat
+			message := must(Marshal(&c.value))
+			useRowPrograms = true
+			if !bytes.Equal(message, c.want) {
+				t.Fatalf("%+v, row programs %v: % x, want % x", c.value, flat, message, c.want)
+			}
+		}
+		back := sixteenFields{F2: 77}
+		if err := Unmarshal(c.want, &back); err != nil || back != c.value {
+			t.Fatalf("% x decoded as %+v, %v", c.want, back, err)
+		}
+	}
+}
+
+// isNarrow reports whether message is a typed narrow one, which has no root
+// byte unless its key run would read as one (wire/root.go).
+func isNarrow(message []byte) bool {
+	_, ok := wire.NarrowBody(message)
+	return ok
+}
+
+// narrowBody is a typed narrow message's key run.
+func narrowBody(message []byte) []byte {
+	body, _ := wire.NarrowBody(message)
+	return body
+}
 
 // must unwraps an encode a test expects to succeed. A panic fails the test, and
 // keeps the call a single expression.
@@ -282,7 +326,7 @@ func TestFieldIDsCountFromOne(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if message[0] != rootStructNarrow {
+	if !isNarrow(message) {
 		t.Fatalf("sixteen fields went wide: root is %#02x", message[0])
 	}
 	var back sixteenFields

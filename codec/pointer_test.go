@@ -44,9 +44,9 @@ func TestPointerNilIsAbsent(t *testing.T) {
 	if back.Tag != 7 {
 		t.Fatalf("Tag = %d, want 7", back.Tag)
 	}
-	// Nothing on the wire for four nil pointers: the root, and the one scalar.
-	if len(data) != 3 {
-		t.Fatalf("four nil pointers cost %d bytes, want 3 (root + one field)", len(data))
+	// Nothing on the wire for four nil pointers: the one scalar alone.
+	if len(data) != 2 {
+		t.Fatalf("four nil pointers cost %d bytes, want 2 (one field)", len(data))
 	}
 }
 
@@ -306,8 +306,8 @@ func TestPointerToEmptyCollectionReadsBackNil(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(data) != 1 {
-			t.Fatalf("nil and empty collections cost %d bytes, want the root alone", len(data))
+		if len(data) != 0 {
+			t.Fatalf("nil and empty collections cost %d bytes, want none", len(data))
 		}
 		back := fullCollections()
 		if err := Unmarshal(data, &back); err != nil {

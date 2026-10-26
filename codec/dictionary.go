@@ -151,10 +151,13 @@ func appendDictRecord(dst []byte, root byte, plan *typePlan, record unsafe.Point
 	if err != nil {
 		return dst, err
 	}
-	if buf.grouped {
-		out[start] |= rootGrouped
-	}
 	if len(dict.written) == 0 {
+		if root == rootStructNarrow {
+			// No dictionary, so the message every other encoder writes, which
+			// for a narrow one has no root byte (wire/root.go).
+			out = append(out[:start], out[start+1:]...)
+			return wire.FinishNarrow(out, start), nil
+		}
 		return out, nil
 	}
 	out[start] |= rootDictionary
@@ -416,7 +419,7 @@ var (
 // isDictRoot reports whether a root byte is one the dictionary path reads:
 // either width, with no schema section.
 func isDictRoot(data []byte) bool {
-	return len(data) > 0 && data[0]&^(rootWide|rootGrouped) == RootFirst|rootDictionary
+	return len(data) > 0 && data[0]&^rootWide == RootFirst|rootDictionary
 }
 
 // parseDictSection reads the section at the front of data and returns its

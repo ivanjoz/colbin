@@ -223,10 +223,7 @@ func (w *Writer8) ElementInt(value int64) {
 
 // ElementString writes a string element.
 func (w *Writer8) ElementString(value string) {
-	code, width := lengthCodeFor(uint64(len(value)))
-	w.Buffer = wirefmt.AppendMagnitude(
-		append(w.Buffer, descriptor(classBlob, code)), uint64(len(value)), width)
-	w.Buffer = append(w.Buffer, value...)
+	w.Buffer = append(appendBlobHeader(w.Buffer, len(value)), value...)
 }
 
 // Reader side.

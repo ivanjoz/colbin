@@ -142,7 +142,7 @@ func skipsExtra[T any](t *testing.T, name string, extra T) {
 			Extra: extra, Tail: 9,
 		}
 		message := mustMarshal(t, &grown)
-		if message[0] != rootStructNarrow {
+		if !isNarrow(message) {
 			t.Fatalf("the record went wide: %#02x", message[0])
 		}
 		// The field has to be on the wire for skipping it to mean anything.
@@ -217,7 +217,7 @@ func TestAnUnknownKeyInsideANarrowCompositeIsSteppedOver(t *testing.T) {
 			Spares: &evolveInner{A: 4, B: "spare", C: 5},
 		}
 		message := mustMarshal(t, &grown)
-		if message[0] != rootStructNarrow {
+		if !isNarrow(message) {
 			t.Fatalf("%d rows: the record went wide", count)
 		}
 		want := evolveOuterOld{

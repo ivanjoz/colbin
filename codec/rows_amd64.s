@@ -191,10 +191,23 @@ textLength:
 	MOVL R13, R14
 	ORL  $12, R14
 	MOVB R14, (DX)
-	CMPQ CX, $0xFD
-	JA   textLength16
+	CMPQ CX, $0xEF
+	JA   textPair
 	MOVB CX, 1(DX)
 	ADDQ $2, DX
+	JMP  copy
+
+textPair:
+	// Up to 3823, two bytes: 0xF0 plus the high bits of what is past 240,
+	// then the low eight.
+	CMPQ CX, $3823
+	JA   textLength16
+	LEAQ -0xF0(CX), R14
+	MOVB R14, 2(DX)
+	SHRQ $8, R14
+	ADDQ $0xF0, R14
+	MOVB R14, 1(DX)
+	ADDQ $3, DX
 	JMP  copy
 
 textLength16:
@@ -333,11 +346,23 @@ listHead:
 	ORL     DX, R13
 	LEAQ    (DI)(R9*1), DX
 	MOVB    R13, (DX)
-	CMPQ    R14, $0xFD
-	JA      listLength16
+	CMPQ    R14, $0xEF
+	JA      listPair
 	MOVB    R14, 1(DX)
 	ADDQ    $2, DX
 	JMP     listBody
+
+listPair:
+	// Up to 3823, the two-byte length, as textPair writes it.
+	CMPQ R14, $3823
+	JA   listLength16
+	SUBQ $0xF0, R14
+	MOVB R14, 2(DX)
+	SHRQ $8, R14
+	ADDQ $0xF0, R14
+	MOVB R14, 1(DX)
+	ADDQ $3, DX
+	JMP  listBody
 
 listLength16:
 	MOVB $0xFE, 1(DX)
@@ -596,6 +621,14 @@ wstring:
 	LEAQ  (DI)(R9*1), DX
 	MOVB  R13, (DX)
 	MOVQ  CX, 2(DX)              // the length, little-endian, as a word
+	CMPQ  CX, $8
+	JA    wtext8
+	LEAQ  0x97(CX), R14          // up to eight bytes, the descriptor is the length
+	MOVB  R14, 1(DX)
+	ADDQ  $2, DX
+	JMP   wcopy
+
+wtext8:
 	CMPQ  CX, $0xFF
 	JA    wtext16
 	MOVB  $0x90, 1(DX)

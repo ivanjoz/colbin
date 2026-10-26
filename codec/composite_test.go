@@ -1,6 +1,7 @@
 package codec
 
 import (
+	"bytes"
 	"reflect"
 	"testing"
 )
@@ -34,7 +35,7 @@ func TestNestedStructsRoundTrip(t *testing.T) {
 	// A composite does not force the wide width: a narrow composite is the
 	// length form of a field (INTERNALS.md §3.3), with the class coming from the
 	// schema.
-	if message[0] != rootStructNarrow {
+	if !isNarrow(message) {
 		t.Fatalf("root is %#02x, want the narrow descriptor", message[0])
 	}
 
@@ -48,6 +49,70 @@ func TestNestedStructsRoundTrip(t *testing.T) {
 	// An empty slice comes back nil, like every other zero value.
 	if back.Empty != nil {
 		t.Fatalf("an empty slice round-tripped as %v", back.Empty)
+	}
+}
+
+type single struct {
+	Many  []inner          `cb:"1"`
+	Tags  []string         `cb:"2"`
+	Index map[string]int64 `cb:"3"`
+	Wide  []wideOuter      `cb:"4"`
+}
+
+// A list or a map of one goes out with no count, and a list's one element with
+// no length of its own: the field's length is the element's.
+func TestAListOfOneIsItsElement(t *testing.T) {
+	value := single{
+		Many:  []inner{{ID: 2, Name: "ab"}},
+		Tags:  []string{"xyz"},
+		Index: map[string]int64{"k": 5},
+	}
+	message, err := Marshal(&value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte{ // no root byte: wire/root.go
+		0x0E, 4, 0x01, 0x15, 'a', 'b', // [key 0|1110] [length] the element's run
+		0x1E, 3, 'x', 'y', 'z',
+		0x2E, 5, 0x00, 1, 'k', 0x09, 5, // no count, then the entry
+	}
+	if !bytes.Equal(message, want) {
+		t.Fatalf("% x, want % x", message, want)
+	}
+	schema, err := SchemaOf(single{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back single
+	if err := Unmarshal(message, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(back, value) {
+		t.Fatalf("round-tripped as %+v, want %+v", back, value)
+	}
+
+	// An element of no fields is a field of no body.
+	for _, value := range []single{
+		{Many: []inner{{}}},
+		{Tags: []string{""}},
+		{Wide: []wideOuter{{}}},
+		{Wide: []wideOuter{{Tail: "far"}}},
+		{Many: []inner{{ID: 1}}, Tags: []string{"", "a"}, Wide: []wideOuter{{Head: 1}, {}}},
+	} {
+		message, err := Marshal(&value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var back single
+		if err := Unmarshal(message, &back); err != nil {
+			t.Fatalf("% x: %v", message, err)
+		}
+		if !reflect.DeepEqual(back, value) {
+			t.Fatalf("% x round-tripped as %+v, want %+v", message, back, value)
+		}
+		if _, err := AppendJSON(nil, schema, message); err != nil {
+			t.Fatalf("% x: JSON: %v", message, err)
+		}
 	}
 }
 

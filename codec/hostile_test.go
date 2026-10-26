@@ -85,7 +85,7 @@ func TestANarrowTableOfWideRowsRoundTrips(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if message[0] != rootStructNarrow {
+		if !isNarrow(message) {
 			t.Fatalf("the holder went wide, so this tests nothing: %#02x", message[0])
 		}
 		var back holder
@@ -280,16 +280,16 @@ func TestTheRowBudgetIsPerMessage(t *testing.T) {
 // than recursing until the stack runs out, and a skip steps over a nested value
 // of any depth by its length, without descending.
 func TestDeepDynamicNestingIsRefusedAndSkippable(t *testing.T) {
+	// A list at the field, which has a length, and inside it lists of one list
+	// each, which in the compact form have none.
 	writer := wire.Writer8{Buffer: []byte{rootStructWide}}
 	writer.Key(0)
-	marks := make([]wire.Mark, 0, 1000)
+	mark := writer.OpenElementList(1)
 	for range 1000 {
-		marks = append(marks, writer.OpenElementList(1))
+		writer.CompactList(1)
 	}
-	writer.ElementNull()
-	for index := len(marks) - 1; index >= 0; index-- {
-		writer.Close(marks[index])
-	}
+	writer.CompactNull()
+	writer.Close(mark)
 
 	type holder struct {
 		A any `cb:"1"`

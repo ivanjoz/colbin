@@ -7,14 +7,23 @@ package wire
 //
 //	struct  [key:4][1 1 0 k8]    [length] [key run]
 //	list    [key:4][1 1 0 0]     [length] [count] ( [len] [body] )*
+//	        [key:4][1 1 1 0]     [length] body                   one element
 //	table   [key:4][1 1 0 1]     [length] [rows]  column run
 //	        [key:4][1 1 1 1]     [length] [rows] [groupRows] group*
 //	map     [key:4][1 1 0 0]     [length] [count] ( key value )*
+//	        [key:4][1 1 1 0]     [length] key value              one entry
 //
 // The flag bit f0 tells apart only what the schema cannot: a struct's own key
 // width, and whether a []Struct went out as a list or a table. A struct and a
-// map are other Go types, so their flags overlap nothing. f1 is set only on a
-// table whose rows are in groups (groups.go), and refused everywhere else.
+// map are other Go types, so their flags overlap nothing. f1 is a list or map of
+// one, and on a table says its rows are in groups (groups.go); a struct refuses
+// it.
+//
+// A list of one is what a configuration document's lists mostly are — one
+// extends, one rule, one job — and protobuf writes one of those as a tag, a
+// length and the element. The counted form spends a count and an element length
+// on top, two bytes per list. The single form spends neither: the field's
+// length is the element's.
 //
 // A table's column run uses the row type's key width, which the reader takes
 // from the schema as it does a list element's shape: a four-bit integer column
@@ -38,6 +47,8 @@ const (
 	narrowWideKeys uint8 = 0b01
 	// narrowTable is a []Struct's f0, set when it went out as a table.
 	narrowTable uint8 = 0b01
+	// narrowSingle is a list's or a map's f1: one element, no count.
+	narrowSingle uint8 = 0b10
 )
 
 // openNarrowComposite writes a key, the length form's nibble and a one-byte
@@ -81,8 +92,18 @@ func (w *Writer) OpenList(key uint8, count int) Mark {
 	return mark
 }
 
-// OpenMap begins a map of count entries under key.
+// OpenSingle begins a list of one element under key. The element's body
+// follows with no OpenElement around it: the field's length is the element's.
+func (w *Writer) OpenSingle(key uint8) Mark {
+	return w.openNarrowComposite(key, narrowSingle)
+}
+
+// OpenMap begins a map of count entries under key; one entry goes out with no
+// count.
 func (w *Writer) OpenMap(key uint8, count int) Mark {
+	if count == 1 {
+		return w.openNarrowComposite(key, narrowSingle)
+	}
 	mark := w.openNarrowSized(key, 0, count)
 	w.Buffer = appendCount(w.Buffer, count)
 	return mark
@@ -109,9 +130,10 @@ func (w *Writer) OpenElement() Mark {
 // outgrew it. It is the same backpatch the wide writer does, and the same
 // reason: sizing the value first would cost a pass over every nested one.
 //
-// A body of up to 253 bytes fits the placeholder. A longer one moves up by two
-// for the 0xFE escape and a u16, or by four for 0xFF and a u32 — the length's
-// own escape says which, so nothing in front of the placeholder changes.
+// A body of up to 239 bytes fits the placeholder. A longer one moves up by one
+// for the two-byte form, by two for the 0xFE escape and a u16, or by four for
+// 0xFF and a u32 — the length's own first byte says which, so nothing in front
+// of the placeholder changes.
 //
 // It does not inline, where the single-escape version did: that one inlined a
 // widen costing 47 of the budget's 80, and two escapes cost more than the
@@ -159,8 +181,8 @@ func (w *Writer) CloseElement(mark Mark) {
 	binary.LittleEndian.PutUint32(w.Buffer[mark.at+1:], uint32(body))
 }
 
-// widenLength rewrites a length placeholder as the form the body needs — three
-// or five bytes where one was reserved, or whatever openNarrowSized's guess got
+// widenLength rewrites a length placeholder as the form the body needs — two,
+// three or five bytes where one was reserved, or whatever openNarrowSized's guess got
 // wrong — shifting the body to fit. Out of line because it is the rare path.
 func (w *Writer) widenLength(mark Mark, body int) {
 	if uint64(body) > math.MaxUint32 {
@@ -178,6 +200,9 @@ func (w *Writer) widenLength(mark Mark, body int) {
 	switch extra {
 	case 0:
 		w.Buffer[mark.at] = uint8(body)
+	case 1:
+		pair := body - lengthPair
+		w.Buffer[mark.at], w.Buffer[mark.at+1] = lengthPair+uint8(pair>>8), uint8(pair)
 	case 2:
 		w.Buffer[mark.at] = length16
 		binary.LittleEndian.PutUint16(w.Buffer[mark.at+1:], uint16(body))
@@ -269,14 +294,42 @@ func (r *Reader) IsTable() bool {
 
 // List returns a list's element count and a reader over its elements. The count
 // is checked against the body: every element is at least its length byte.
-func (r *Reader) List() (int, Reader, bool) { return r.counted(1) }
+//
+// A list of one has no element length to read, so its reader stands one past
+// the end of the body, where only Element looks — in the branch it takes for a
+// list that has run out, which leaves every other element's read as it was.
+func (r *Reader) List() (int, Reader, bool) {
+	body, single, ok := r.countedBody()
+	if !ok || !single {
+		return r.counted(body, ok, 1)
+	}
+	return 1, Reader{buffer: body, at: len(body) + 1}, true
+}
 
 // Map returns a map's entry count and a reader over its entries, which are at
-// least two bytes each.
-func (r *Reader) Map() (int, Reader, bool) { return r.counted(2) }
+// least two bytes each. One entry is the whole body, with no count before it.
+func (r *Reader) Map() (int, Reader, bool) {
+	body, single, ok := r.countedBody()
+	if !ok || !single {
+		return r.counted(body, ok, 2)
+	}
+	return 1, Reader{buffer: body}, true
+}
 
-func (r *Reader) counted(minSize int) (int, Reader, bool) {
-	body, _, ok := r.compositeBody()
+// countedBody is compositeBody for a list or a map, which may carry f1.
+func (r *Reader) countedBody() (body []byte, single, ok bool) {
+	nibble, start, size, ok := r.field()
+	if !ok {
+		return nil, false, false
+	}
+	if nibble&^narrowSingle != nibbleLength {
+		r.fail(ErrBadEscape)
+		return nil, false, false
+	}
+	return r.buffer[start : start+size], nibble&narrowSingle != 0, true
+}
+
+func (r *Reader) counted(body []byte, ok bool, minSize int) (int, Reader, bool) {
 	if !ok {
 		return 0, Reader{}, false
 	}
@@ -320,6 +373,11 @@ func (r *Reader) Table() (rows, groupRows int, body []byte, ok bool) {
 // Element returns one narrow list element's body: a length and then a key run.
 func (r *Reader) Element() ([]byte, bool) {
 	if r.at >= len(r.buffer) {
+		if r.at == len(r.buffer)+1 {
+			// A list of one: see List.
+			r.at--
+			return r.buffer, true
+		}
 		r.fail(ErrTruncated)
 		return nil, false
 	}
@@ -489,7 +547,7 @@ func (w *Writer) StringColumn(key uint8, values []string) {
 	if allEmpty(values) {
 		return
 	}
-	w.Strings(key, values)
+	w.stringList(key, values)
 }
 
 // StringColumnPayload is StringColumn for a caller that has added up the

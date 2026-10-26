@@ -53,3 +53,4 @@ js/src/generated/
 # Copied from the repository root by `bun run build`, so the tarball carries a
 # licence without this repository carrying two of them.
 js/LICENSE
+plan/

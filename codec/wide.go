@@ -110,12 +110,11 @@ func rootOf(data []byte) (body []byte, wide, ok bool) {
 // Go type says what that struct is. So the bytes are carried along unparsed and
 // looked at only if such a value turns up. See scratch.structPlans.
 func rootParts(data []byte) (section, body []byte, wide, ok bool) {
-	if len(data) == 0 {
-		return nil, nil, false, false
+	if len(data) == 0 || !wire.IsRoot(data[0]) {
+		// A typed narrow message, which has no root byte: wire/root.go.
+		return nil, data, false, true
 	}
-	// A grouped table is its own descriptor's business, so the root's saying
-	// there is one changes nothing here.
-	switch data[0] &^ rootGrouped {
+	switch data[0] {
 	case rootStructNarrow:
 		return nil, data[1:], false, true
 	case rootStructWide:

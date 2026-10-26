@@ -49,14 +49,10 @@ package codec
 
 import (
 	"encoding"
-	"encoding/binary"
 	"fmt"
 	"math"
 	"reflect"
-	"slices"
 	"sort"
-	"strconv"
-	"strings"
 	"unsafe"
 
 	"github.com/ivanjoz/colbin/wire"
@@ -185,7 +181,7 @@ func appendAnyReflect(writer *wire.Writer8, value reflect.Value, buf *scratch) {
 			appendOpaqueStruct(writer, value, buf)
 			return
 		}
-		appendAnyStruct(writer, value, buf)
+		appendAnyStruct(writer, value, buf, false)
 	default:
 		buf.fail(fmt.Errorf("colbin: a %s has no form in a dynamic value", value.Type()))
 		writer.ElementNull()
@@ -203,10 +199,8 @@ func appendAnySequence(writer *wire.Writer8, value reflect.Value, buf *scratch) 
 		writer.ElementBytes(bytesOf(value))
 		return
 	}
-	if appendTypedSequence(writer, value, buf) {
-		return
-	}
-	if appendBoxedSequence(writer, value.Len(), value.Index, buf) {
+	if appendTypedSequence(writer, value, buf, false) ||
+		appendBoxedSequence(writer, value.Len(), value.Index, buf, false) {
 		return
 	}
 	if !buf.enter() {
@@ -215,12 +209,7 @@ func appendAnySequence(writer *wire.Writer8, value reflect.Value, buf *scratch) 
 	}
 	defer buf.leave()
 	mark := writer.OpenElementList(value.Len())
-	for index := range value.Len() {
-		if buf.err != nil {
-			break
-		}
-		appendAnyReflect(writer, value.Index(index), buf)
-	}
+	appendCompactElements(writer, value, buf)
 	writer.Close(mark)
 }
 
@@ -236,6 +225,15 @@ var textMarshalerType = reflect.TypeFor[encoding.TextMarshaler]()
 // is what encoding/json writes for a time.Time, and refuses it otherwise rather
 // than writing an empty object in its place.
 func appendOpaqueStruct(writer *wire.Writer8, value reflect.Value, buf *scratch) {
+	if text, ok := opaqueText(value, buf); ok {
+		writer.ElementString(text)
+	} else {
+		writer.ElementNull()
+	}
+}
+
+// opaqueText is an opaque struct's text, or false with the encode failed.
+func opaqueText(value reflect.Value, buf *scratch) (string, bool) {
 	var marshaler encoding.TextMarshaler
 	switch {
 	case value.Type().Implements(textMarshalerType):
@@ -248,16 +246,14 @@ func appendOpaqueStruct(writer *wire.Writer8, value reflect.Value, buf *scratch)
 		buf.fail(fmt.Errorf(
 			"colbin: a %s has no exported field and no text form, so it has no form in a dynamic value",
 			value.Type()))
-		writer.ElementNull()
-		return
+		return "", false
 	}
 	text, err := marshaler.MarshalText()
 	if err != nil {
 		buf.fail(fmt.Errorf("colbin: %s: %w", value.Type(), err))
-		writer.ElementNull()
-		return
+		return "", false
 	}
-	writer.ElementString(string(text))
+	return string(text), true
 }
 
 // appendBoxedSequence writes a sequence of *boxed* records as one typed run, and
@@ -277,8 +273,11 @@ func appendOpaqueStruct(writer *wire.Writer8, value reflect.Value, buf *scratch)
 //
 // It is the *sequence* that has to be uniform, not the type: a `[]any` of unlike
 // things, or holding one nil, falls through to the list of dynamic values below.
+//
+// compact says the sequence sits inside a dynamic container, whose TYPED tag is
+// the compact one.
 func appendBoxedSequence(
-	writer *wire.Writer8, count int, at func(int) reflect.Value, buf *scratch,
+	writer *wire.Writer8, count int, at func(int) reflect.Value, buf *scratch, compact bool,
 ) bool {
 	if buf.section == nil || count == 0 {
 		return false
@@ -295,7 +294,7 @@ func appendBoxedSequence(
 	for index := range count {
 		rows.Index(index).Set(boxedRecord(at(index)))
 	}
-	writer.ElementTyped(buf.section.structIndex(plan))
+	typedTag(writer, buf.section.structIndex(plan), compact)
 	slice := sliceHeader{data: rows.UnsafePointer(), len: count, cap: count}
 	appendStructsElement(writer, plan, &slice, elemType.Size(), buf)
 	return true
@@ -371,7 +370,7 @@ var byteType = reflect.TypeOf(byte(0))
 //
 // It declines when there is no section open to describe the element type in, and
 // the caller then writes a list of maps. See the file comment.
-func appendTypedSequence(writer *wire.Writer8, value reflect.Value, buf *scratch) bool {
+func appendTypedSequence(writer *wire.Writer8, value reflect.Value, buf *scratch, compact bool) bool {
 	if buf.section == nil || value.Kind() != reflect.Slice {
 		return false
 	}
@@ -385,10 +384,20 @@ func appendTypedSequence(writer *wire.Writer8, value reflect.Value, buf *scratch
 		// name the field that cannot go, which is a better error than this one.
 		return false
 	}
-	writer.ElementTyped(buf.section.structIndex(plan))
+	typedTag(writer, buf.section.structIndex(plan), compact)
 	slice := sliceHeader{data: value.UnsafePointer(), len: value.Len(), cap: value.Cap()}
 	appendStructsElement(writer, plan, &slice, elemType.Size(), buf)
 	return true
+}
+
+// typedTag writes the tag naming struct index, the compact one inside a
+// dynamic container.
+func typedTag(writer *wire.Writer8, index int, compact bool) {
+	if compact {
+		writer.CompactTyped(index)
+	} else {
+		writer.ElementTyped(index)
+	}
 }
 
 // appendAnyStringMap is appendAnyMap for the shape a dynamic map nearly always
@@ -404,215 +413,24 @@ func appendAnyStringMap(writer *wire.Writer8, value map[string]any, buf *scratch
 	}
 	defer buf.leave()
 	mark := writer.OpenElementMap(len(value))
-	appendAnyEntries(writer, value, buf)
+	appendCompactEntries(writer, value, buf)
 	writer.Close(mark)
-}
-
-// appendAnyEntries writes a map[string]any's entries, in key order.
-//
-// In order is why a map is written the same way twice. Go's map iteration is
-// deliberately random, so without it the same value encodes to different bytes
-// every time — which rules out a golden vector, an ETag, and any two ports
-// agreeing about a map at all.
-func appendAnyEntries(writer *wire.Writer8, value map[string]any, buf *scratch) {
-	if len(value) <= smallAnyMap {
-		appendSmallAnyEntries(writer, value, buf)
-		return
-	}
-	start, count, ordered := buf.pushEntries(value)
-	for index := range count {
-		if buf.err != nil {
-			break
-		}
-		// By index into the stacks, and not a slice of them: a map in a value
-		// pushes its own entries, which can move them.
-		at := index
-		if ordered {
-			at = int(buf.columns.order[start+index] & orderIndex)
-		}
-		entry := &buf.columns.entries[start+at]
-		writer.ElementString(entry.key)
-		appendAnyValue(writer, entry.value, buf)
-	}
-	buf.columns.entries = buf.columns.entries[:start]
-	buf.columns.order = buf.columns.order[:start]
-}
-
-// smallAnyMap is the most entries appendSmallAnyEntries orders on its stack.
-const smallAnyMap = 8
-
-// appendSmallAnyEntries is appendAnyEntries for a map of a few entries, which
-// is what a document's maps mostly are: ordered in arrays of its own frame,
-// where the pooled stacks cost a sync.Pool's get and put on a message of one
-// small map, more than its entries did.
-func appendSmallAnyEntries(writer *wire.Writer8, value map[string]any, buf *scratch) {
-	var entries [smallAnyMap]anyEntry
-	var order [smallAnyMap]uint64
-	count := 0
-	for key, element := range value {
-		if count == smallAnyMap {
-			break // only a map written to while it is encoded gets here
-		}
-		entries[count], order[count] = anyEntry{key, element}, uint64(count)
-		count++
-	}
-	orderEntries(order[:count], entries[:count], 0)
-	for _, sort := range order[:count] {
-		if buf.err != nil {
-			break
-		}
-		entry := &entries[sort&orderIndex]
-		writer.ElementString(entry.key)
-		appendAnyValue(writer, entry.value, buf)
-	}
-}
-
-// anyEntry is a map entry on its way out, its value taken in the iteration so
-// that the write does not look it up again.
-type anyEntry struct {
-	key   string
-	value any
-}
-
-// A map's order is its entries' sort keys: the key's first six bytes, big-endian
-// so that a number orders the way the bytes do, above the entry's index. Sorting
-// those is sorting integers, with no call per comparison and eight bytes a move;
-// the keys whose first six bytes tie are put in order after, a run at a time.
-// Sorting the strings was half of a document's encode.
-const (
-	orderIndexBits = 16
-	orderIndex     = 1<<orderIndexBits - 1
-)
-
-// pushEntries pushes a map's entries onto the pooled stack of them, and their
-// order onto its own, and answers where they start, how many there are, and
-// whether the order says it: a map past orderIndex entries is sorted in place
-// instead. Pooled because a document is maps inside maps, and a slice of keys
-// made for each of them was most of its allocations.
-func (buf *scratch) pushEntries(value map[string]any) (start, count int, ordered bool) {
-	columns := buf.reserve(0, false)
-	start = len(columns.entries)
-	for key, element := range value {
-		columns.entries = append(columns.entries, anyEntry{key, element})
-	}
-	entries := columns.entries[start:]
-	count = len(entries)
-	columns.usedEntries = max(columns.usedEntries, len(columns.entries))
-	// The order stack is as long as the entries one, so that a map's order
-	// starts where its entries do: a large map holds its place in it unused.
-	columns.order = slices.Grow(columns.order, count)
-	if count > orderIndex+1 {
-		columns.order = columns.order[:start+count]
-		slices.SortFunc(entries, func(a, b anyEntry) int { return strings.Compare(a.key, b.key) })
-		return start, count, false
-	}
-	for index := range entries {
-		columns.order = append(columns.order, uint64(index))
-	}
-	orderEntries(columns.order[start:], entries, 0)
-	return start, count, true
-}
-
-// orderEntries sorts order, whose entries' keys agree on their first depth
-// bytes, by the six bytes after, and each run that ties on those by the six
-// after that: a configuration's keys share stems — "react/" on twenty-seven of
-// one document's thirty-nine — and an insertion sort of a run that long was
-// most of the sort. Keys that tie to their end, or past a depth no key stem
-// reaches, are put in order whole.
-func orderEntries(order []uint64, entries []anyEntry, depth int) {
-	longest := 0
-	for index, sort := range order {
-		key := entries[sort&orderIndex].key
-		longest = max(longest, len(key))
-		order[index] = keyPrefix(key, depth) | sort&orderIndex
-	}
-	if len(order) <= 12 {
-		// slices.Sort's own insertion sort at this size, without its call.
-		for index := 1; index < len(order); index++ {
-			for at := index; at > 0 && order[at] < order[at-1]; at-- {
-				order[at], order[at-1] = order[at-1], order[at]
-			}
-		}
-	} else {
-		slices.Sort(order)
-	}
-	for run := 0; run < len(order); {
-		end := run + 1
-		for end < len(order) && order[end]>>orderIndexBits == order[run]>>orderIndexBits {
-			end++
-		}
-		switch {
-		case end-run == 1:
-		case longest <= depth+6 || depth >= 60:
-			sortTied(order[run:end], entries)
-		default:
-			orderEntries(order[run:end], entries, depth+6)
-		}
-		run = end
-	}
-}
-
-// keyPrefix is the six bytes of key from depth on in a word's top six, zero
-// past the key's end: one load where eight bytes are there to read, which a
-// copy into an array was not.
-func keyPrefix(key string, depth int) uint64 {
-	if len(key)-depth >= 8 {
-		word := binary.BigEndian.Uint64(unsafe.Slice(unsafe.StringData(key[depth:]), 8))
-		return word &^ orderIndex
-	}
-	var head [8]byte
-	if depth < len(key) {
-		copy(head[:6], key[depth:])
-	}
-	return binary.BigEndian.Uint64(head[:])
-}
-
-// sortTied orders a run of entries by the whole key: keys that differ only past
-// where orderEntries looks, or only in trailing zero bytes, which it reads as
-// the end of a key. A few keys at most, so an insertion sort.
-func sortTied(order []uint64, entries []anyEntry) {
-	for index := 1; index < len(order); index++ {
-		moving := order[index]
-		key := entries[moving&orderIndex].key
-		at := index
-		for ; at > 0 && entries[order[at-1]&orderIndex].key > key; at-- {
-			order[at] = order[at-1]
-		}
-		order[at] = moving
-	}
 }
 
 // appendAnyMap writes any other map: the keys have to be renderable as names,
 // which is what a JSON object needs and what a list or a struct is not.
 func appendAnyMap(writer *wire.Writer8, value reflect.Value, buf *scratch) {
-	if value.IsNil() {
-		writer.ElementNull()
-		return
-	}
-	if _, err := mapKindOf(value.Type().Key(), "key"); err != nil {
-		buf.fail(fmt.Errorf("colbin: %w", err))
-		writer.ElementNull()
-		return
-	}
-	if !buf.enter() {
+	if value.IsNil() || !dynamicMapKey(value, buf) || !buf.enter() {
 		writer.ElementNull()
 		return
 	}
 	defer buf.leave()
-	keys := sortedMapKeys(value)
-	mark := writer.OpenElementMap(len(keys))
-	for _, key := range keys {
-		if buf.err != nil {
-			break
-		}
-		appendAnyReflect(writer, key, buf)
-		appendAnyReflect(writer, value.MapIndex(key), buf)
-	}
+	mark := writer.OpenElementMap(value.Len())
+	appendCompactMapEntries(writer, value, buf)
 	writer.Close(mark)
 }
 
-// sortMapKeys orders a reflective key set the way sortedKeys orders a string
-// one, and for the same reason.
+// sortMapKeys orders a typed map field's reflective key set.
 func sortMapKeys(keys []reflect.Value) {
 	sort.Slice(keys, func(a, b int) bool {
 		switch keys[a].Kind() {
@@ -631,21 +449,30 @@ func sortMapKeys(keys []reflect.Value) {
 // A struct reached through an `any` takes a depth level like every other
 // container. `type Node struct{ Next any }` with `node.Next = &node` is a cycle
 // the *type* does not have — planFor terminates on it — and only the value walk
-// can see it.
-func appendAnyStruct(writer *wire.Writer8, value reflect.Value, buf *scratch) {
+// can see it. compact says the struct sits inside a dynamic container.
+func appendAnyStruct(writer *wire.Writer8, value reflect.Value, buf *scratch, compact bool) {
 	if buf.section != nil {
 		if plan, err := planFor(value.Type()); err == nil {
 			if !buf.enter() {
-				writer.ElementNull()
+				writeNull(writer, compact)
 				return
 			}
 			defer buf.leave()
-			writer.ElementTyped(buf.section.structIndex(plan))
+			typedTag(writer, buf.section.structIndex(plan), compact)
 			appendStructElement(writer, plan, addressableCopy(value), buf)
 			return
 		}
 	}
-	appendStructAsMap(writer, value, buf)
+	appendStructAsMap(writer, value, buf, compact)
+}
+
+// writeNull writes null, the compact one inside a dynamic container.
+func writeNull(writer *wire.Writer8, compact bool) {
+	if compact {
+		writer.CompactNull()
+	} else {
+		writer.ElementNull()
+	}
 }
 
 // appendStructAsMap writes a struct the way encoding/json would: an object keyed
@@ -656,9 +483,9 @@ func appendAnyStruct(writer *wire.Writer8, value reflect.Value, buf *scratch) {
 // deliberately, since one would ride in planField through every decode to serve
 // this path alone. parseCbTag is the same rule that named the field for the
 // schema, so the two cannot drift.
-func appendStructAsMap(writer *wire.Writer8, value reflect.Value, buf *scratch) {
+func appendStructAsMap(writer *wire.Writer8, value reflect.Value, buf *scratch, compact bool) {
 	if !buf.enter() {
-		writer.ElementNull()
+		writeNull(writer, compact)
 		return
 	}
 	defer buf.leave()
@@ -669,18 +496,13 @@ func appendStructAsMap(writer *wire.Writer8, value reflect.Value, buf *scratch) 
 			count++
 		}
 	}
-	mark := writer.OpenElementMap(count)
-	for index := range structType.NumField() {
-		name, ok := dynamicFieldName(structType.Field(index))
-		if !ok {
-			continue
-		}
-		if buf.err != nil {
-			break
-		}
-		writer.ElementString(name)
-		appendAnyReflect(writer, value.Field(index), buf)
+	if compact {
+		writer.CompactMap(count)
+		appendCompactStructEntries(writer, value, buf)
+		return
 	}
+	mark := writer.OpenElementMap(count)
+	appendCompactStructEntries(writer, value, buf)
 	writer.Close(mark)
 }
 
@@ -714,7 +536,7 @@ func addressableCopy(value reflect.Value) unsafe.Pointer {
 func appendAnyList(writer *wire.Writer8, values []any, buf *scratch) {
 	if appendBoxedSequence(writer, len(values), func(index int) reflect.Value {
 		return reflect.ValueOf(values[index])
-	}, buf) {
+	}, buf, false) {
 		return
 	}
 	if !buf.enter() {
@@ -727,7 +549,7 @@ func appendAnyList(writer *wire.Writer8, values []any, buf *scratch) {
 		if buf.err != nil {
 			break
 		}
-		appendAnyValue(writer, value, buf)
+		appendCompactValue(writer, value, buf)
 	}
 	writer.Close(mark)
 }
@@ -817,15 +639,8 @@ func readAnyDocument(entries *wire.Reader8, count int, at unsafe.Pointer, buf *s
 	document := make(map[string]any, count)
 	read := anyReader{plans: plans, depth: buf.depth, rowsLeft: buf.rowsLeft}
 	read.out.strings = buf.strings
-	for range count {
-		key := entries.ElementStringIn(&read.out.strings)
-		if err := entries.Err(); err != nil {
-			return err
-		}
-		document[key] = read.value(entries)
-		if read.err != nil {
-			return read.err
-		}
+	if err := read.entries(entries, count, document); err != nil {
+		return err
 	}
 	buf.rowsLeft, buf.strings = read.rowsLeft, read.out.strings
 	*(*map[string]any)(at) = document
@@ -998,7 +813,7 @@ func (r *anyReader) list(reader *wire.Reader8) any {
 	// A non-nil slice for an empty list, which the wire tells from a null.
 	list := make([]any, count)
 	for index := range list {
-		list[index] = r.value(&elements)
+		list[index] = r.compact(&elements)
 		if r.err != nil {
 			return nil
 		}
@@ -1019,32 +834,10 @@ func (r *anyReader) object(reader *wire.Reader8) any {
 	}
 	defer r.leave()
 	object := make(map[string]any, count)
-	for range count {
-		var key string
-		if entries.ElementKind() == wire.KindString {
-			key = r.out.copied(entries.ElementBlob())
-			if err := entries.Err(); err != nil {
-				r.fail(err)
-				return nil
-			}
-		} else {
-			// A number for a name, or no name at all: dynamicKey's to read or
-			// to refuse, onto a level of the borrowed sink's.
-			walk, sink := r.borrow()
-			sink.stack = append(sink.stack, anyLevel{})
-			ok := walk.dynamicKey(&entries)
-			r.give(walk, sink)
-			if !ok {
-				return nil
-			}
-			key = sink.stack[0].key
-		}
-		object[key] = r.value(&entries)
-		if r.err != nil {
-			return nil
-		}
+	if err := r.entries(&entries, count, object); err != nil {
+		r.fail(err)
+		return nil
 	}
-	r.fail(entries.Err())
 	return object
 }
 
@@ -1078,7 +871,7 @@ func (w *walker) dynamicList(reader *wire.Reader8) {
 	defer w.leave()
 	w.to.beginArray(count)
 	for range count {
-		w.dynamicValue(&elements)
+		w.compactValue(&elements)
 		if w.err != nil {
 			return
 		}
@@ -1093,44 +886,8 @@ func (w *walker) dynamicMap(reader *wire.Reader8) {
 		w.fail(reader.Err())
 		return
 	}
-	if !w.enter() {
-		return
-	}
-	defer w.leave()
-	w.to.beginObject(count)
-	for range count {
-		if !w.dynamicKey(&entries) {
-			return
-		}
-		w.dynamicValue(&entries)
-		if w.err != nil {
-			return
-		}
-	}
-	w.to.endObject()
+	w.compactEntries(&entries, count)
 	w.fail(entries.Err())
-}
-
-// dynamicKey writes an entry's key, which has to be a name.
-func (w *walker) dynamicKey(entries *wire.Reader8) bool {
-	switch entries.ElementKind() {
-	case wire.KindString:
-		w.to.keyBytes(entries.ElementBlob())
-	case wire.KindInt:
-		if entries.ElementNegative() {
-			w.to.key(strconv.FormatInt(entries.ElementInt(), 10))
-			break
-		}
-		w.to.key(strconv.FormatUint(entries.ElementUint(), 10))
-	default:
-		w.fail(fmt.Errorf("colbin: a dynamic map holds a key that is not a name"))
-		return false
-	}
-	if err := entries.Err(); err != nil {
-		w.fail(err)
-		return false
-	}
-	return true
 }
 
 // dynamicTyped walks a value whose type the section names: the rows of an array
@@ -1141,6 +898,11 @@ func (w *walker) dynamicTyped(reader *wire.Reader8) {
 		w.fail(reader.Err())
 		return
 	}
+	w.typedValue(reader, index)
+}
+
+// typedValue walks the record or the rows behind a type tag naming index.
+func (w *walker) typedValue(reader *wire.Reader8, index int) {
 	if index >= len(w.plans) {
 		w.fail(fmt.Errorf(
 			"colbin: a dynamic value names struct %d of %d", index, len(w.plans)))

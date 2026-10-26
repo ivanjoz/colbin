@@ -39,6 +39,14 @@ type treeMiddle struct {
 	Many    *[]int64          `cb:"6"`
 	Wide    treeWide          `cb:"7"`
 	Size    uint64            `cb:"8"`
+	Rules   []treePointers    `cb:"9"`
+}
+
+// treePointers is flat, but of pointers alone: no row program, and so a tree.
+type treePointers struct {
+	Level   *uint32   `cb:"1"`
+	When    *string   `cb:"2"`
+	Options *treeLeaf `cb:"3"`
 }
 
 type treeRoot struct {
@@ -49,15 +57,33 @@ type treeRoot struct {
 }
 
 // A chain deeper than maxTreeDepth, whose last levels are written by calls.
-type treeDeep1 struct{ Next treeDeep2 `cb:"1"` }
-type treeDeep2 struct{ Next treeDeep3 `cb:"1"` }
-type treeDeep3 struct{ Next treeDeep4 `cb:"1"` }
-type treeDeep4 struct{ Next treeDeep5 `cb:"1"` }
-type treeDeep5 struct{ Next treeDeep6 `cb:"1"` }
-type treeDeep6 struct{ Next treeDeep7 `cb:"1"` }
-type treeDeep7 struct{ Next treeDeep8 `cb:"1"` }
-type treeDeep8 struct{ Next treeDeep9 `cb:"1"` }
-type treeDeep9 struct{ Value int32 `cb:"1"` }
+type treeDeep1 struct {
+	Next treeDeep2 `cb:"1"`
+}
+type treeDeep2 struct {
+	Next treeDeep3 `cb:"1"`
+}
+type treeDeep3 struct {
+	Next treeDeep4 `cb:"1"`
+}
+type treeDeep4 struct {
+	Next treeDeep5 `cb:"1"`
+}
+type treeDeep5 struct {
+	Next treeDeep6 `cb:"1"`
+}
+type treeDeep6 struct {
+	Next treeDeep7 `cb:"1"`
+}
+type treeDeep7 struct {
+	Next treeDeep8 `cb:"1"`
+}
+type treeDeep8 struct {
+	Next treeDeep9 `cb:"1"`
+}
+type treeDeep9 struct {
+	Value int32 `cb:"1"`
+}
 
 // treePure is a tree with no call in it, which appendRecord writes on its own.
 type treePure struct {
@@ -105,6 +131,22 @@ func makeTreeRoot(random *rand.Rand) treeRoot {
 	}
 	root.Middle.Wide.X = uint32(random.IntN(3))
 	root.Middle.Size = random.Uint64() >> random.IntN(64)
+	for range random.IntN(4) {
+		var rule treePointers
+		if random.IntN(2) == 0 {
+			level := uint32(random.IntN(3))
+			rule.Level = &level
+		}
+		if random.IntN(2) == 0 {
+			when := text()
+			rule.When = &when
+		}
+		if random.IntN(2) == 0 {
+			options := leaf()
+			rule.Options = &options
+		}
+		root.Middle.Rules = append(root.Middle.Rules, rule)
+	}
 	if random.IntN(2) == 0 {
 		level := uint32(random.IntN(1000))
 		root.Level = &level
@@ -119,6 +161,9 @@ func TestTreeProgramWritesWhatWriteFieldsDoes(t *testing.T) {
 	}
 	if tree := MustCodec[treePure]().plan.tree; tree == nil || !tree.pure {
 		t.Fatal("treePure compiled to no pure tree")
+	}
+	if MustCodec[treePointers]().plan.tree == nil {
+		t.Fatal("treePointers compiled to no tree")
 	}
 	random := rand.New(rand.NewPCG(31, 32))
 	for trial := range 2000 {
@@ -156,6 +201,16 @@ func TestTreeProgramWritesWhatWriteFieldsDoes(t *testing.T) {
 		useRowPrograms = true
 		if got, _ := Marshal(&pure); !bytes.Equal(got, want) {
 			t.Fatalf("trial %d, pure: tree %x, writeFields %x", trial, got, want)
+		}
+
+		// A flat tree at the root, its rules taken from the record's.
+		for _, rule := range value.Middle.Rules {
+			useRowPrograms = false
+			want, _ = Marshal(&rule)
+			useRowPrograms = true
+			if got, _ := Marshal(&rule); !bytes.Equal(got, want) {
+				t.Fatalf("trial %d, pointers: tree %x, writeFields %x", trial, got, want)
+			}
 		}
 	}
 }

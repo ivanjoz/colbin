@@ -42,9 +42,7 @@ package codec
 // for TPC-H's lineitem at a tenth of scale, dropped by the pool at the next GC
 // and allocated again — where a group needs a group's, which stays in cache
 // between its gather and its write: encoding TPC-H normalized was 26% faster on
-// x86 and 18% on Graviton2, for 0.04% more bytes. A message holding a grouped
-// table says so in its root byte (rootGrouped), so a reader from before groups
-// refuses it rather than misreading a wide one.
+// x86 and 18% on Graviton2, for 0.04% more bytes.
 
 import (
 	"errors"
@@ -148,9 +146,6 @@ type scratch struct {
 	// dict is the message's string dictionaries, on the dictionary path only.
 	// See dictionary.go.
 	dict *dictionaries
-	// grouped is set when an encode wrote a grouped table, for its caller to
-	// say so in the root byte.
-	grouped bool
 }
 
 // columnBuffers is the transposition buffer, pooled across messages: a table of
@@ -179,12 +174,6 @@ type columnBuffers struct {
 	usedNullStrings                   int
 	// lists is the list columns' scratch, a level per depth. See listcolumn.go.
 	lists []listBuffers
-	// entries is the entries of the dynamic maps being written, a stack of
-	// them, order their order, and usedEntries the most entries has held. See
-	// pushEntries.
-	entries     []anyEntry
-	order       []uint64
-	usedEntries int
 }
 
 var columnPool sync.Pool // *columnBuffers
@@ -236,11 +225,6 @@ func (buf *scratch) release() {
 	// when the buffer last came back.
 	clear(columns.strings[:min(columns.usedStrings, cap(columns.strings))])
 	clear(columns.nullStrings[:min(columns.usedNullStrings, cap(columns.nullStrings))])
-	clear(columns.entries[:columns.usedEntries])
-	columns.entries, columns.order, columns.usedEntries = columns.entries[:0], columns.order[:0], 0
-	if !keepPooled(cap(columns.entries), 0) {
-		columns.entries, columns.order = nil, nil
-	}
 	if !keepPooled(cap(columns.nullInts), len(columns.nullInts)) {
 		columns.nullInts = nil
 	}
@@ -370,7 +354,6 @@ func appendTableField(writer *wire.Writer8, field *planField, at unsafe.Pointer,
 // appendGroups writes a table's rows as groups of groupRows, each the column
 // run a table of its rows would hold, keyed at eight bits if wide.
 func appendGroups(buffer []byte, field *planField, slice *sliceHeader, groupRows int, wide bool, buf *scratch) []byte {
-	buf.grouped = true
 	for start := 0; start < slice.len; start += groupRows {
 		group := sliceHeader{data: unsafe.Add(slice.data, uintptr(start)*field.stride),
 			len: min(groupRows, slice.len-start)}

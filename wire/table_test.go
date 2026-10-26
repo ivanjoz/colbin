@@ -336,7 +336,12 @@ func TestASizedLengthIsTheShortestForm(t *testing.T) {
 				mark := open.narrow(&narrow, count)
 				narrow.Buffer = append(narrow.Buffer, filler...)
 				narrow.Close(mark)
-				want := append(wirefmt.AppendLength([]byte{0xAA, 3<<4 | nibbleLength | open.flags}, len(body)), body...)
+				flags, narrowBody := open.flags, body
+				if open.name == "map" && count == 1 {
+					// A map of one has no count.
+					flags, narrowBody = narrowSingle, filler
+				}
+				want := append(wirefmt.AppendLength([]byte{0xAA, 3<<4 | nibbleLength | flags}, len(narrowBody)), narrowBody...)
 				if !bytes.Equal(narrow.Buffer, want) {
 					t.Fatalf("narrow %s of %d, %d-byte body: the framing differs", open.name, count, size)
 				}

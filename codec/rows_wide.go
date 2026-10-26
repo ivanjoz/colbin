@@ -21,7 +21,9 @@ const (
 	wideIntNegative = 0x80 // classInt; | the size code
 	wideVarint      = 0xF8 // classSpecial, the varint; | the value's low three bits
 	wideBlob        = 0x90 // classBlob; | the length code
-	wideTrue        = 1    // a bool is the inline value 1
+	wideShort       = 0x08 // | wideBlob, a blob of up to wideShortMax bytes; | its size less one
+	wideShortMax    = 8
+	wideTrue        = 1 // a bool is the inline value 1
 )
 
 // writeWide is writeFieldsWide for the program's plan, with packed strings off.
@@ -85,6 +87,9 @@ func (program *rowProgram) writeWide(writer *wire.Writer8, record unsafe.Pointer
 			head := unsafe.Add(out, at)
 			code, width := uint8(0), 1
 			switch {
+			case size <= wideShortMax:
+				// Up to eight bytes, the descriptor is the length.
+				code, width = wideShort|uint8(size-1), 0
 			case uint64(size) > 0xFFFF_FFFF:
 				code, width = 3, 8
 			case size > 0xFFFF:
@@ -116,7 +121,10 @@ func (program *rowProgram) writeWide(writer *wire.Writer8, record unsafe.Pointer
 			case rowStructs:
 				appendStructsField(writer, field, from, buf)
 			default:
-				writeFieldsWide(writer, program.singles[op.field], record, buf)
+				// writeValueWide where it can: see write.
+				if field.indirect || !writeValueWide(writer, field.key, field.op, from, false) {
+					writeFieldsWide(writer, program.singles[op.field], record, buf)
+				}
 			}
 			buffer = slices.Grow(writer.Buffer, program.reserve)
 			at, out = len(buffer), unsafe.Pointer(unsafe.SliceData(buffer))

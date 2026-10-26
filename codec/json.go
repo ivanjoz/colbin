@@ -213,11 +213,22 @@ func (set *fieldSet) has(index int) bool { return set[index>>6]&(1<<uint(index&6
 // value that was missing and one that was not a number. DecodeAny hands them
 // back as they are.
 func AppendJSON(dst []byte, schema *Schema, data []byte) ([]byte, error) {
+	out := jsonSink{buffer: dst}
+	if section, body, list, ok := dynamicRootParts(data); ok {
+		walk, err := dynamicRootWalker(&out, schema, section, data)
+		if err != nil {
+			return dst, err
+		}
+		walk.dynamicRoot(body, list)
+		if walk.err != nil {
+			return dst[:len(dst):len(dst)], walk.err
+		}
+		return out.buffer, nil
+	}
 	resolved, body, wide, dicts, err := resolveSchema(schema, data)
 	if err != nil {
 		return dst, err
 	}
-	out := jsonSink{buffer: dst}
 	walk := walker{to: &out, plans: resolved.plans, rowsLeft: rowBudget(len(data)), dicts: dicts}
 	walk.root(resolved.plans[0], body, wide)
 	if walk.err != nil {
@@ -242,17 +253,47 @@ func ToJSON(schema *Schema, data []byte) ([]byte, error) {
 //
 // Unlike AppendJSON it is faithful to a non-finite float, which JSON cannot be.
 func DecodeAny(schema *Schema, data []byte) (any, error) {
+	out := anySink{}
+	if section, body, list, ok := dynamicRootParts(data); ok {
+		walk, err := dynamicRootWalker(&out, schema, section, data)
+		if err != nil {
+			return nil, err
+		}
+		walk.dynamicRoot(body, list)
+		if walk.err != nil {
+			return nil, walk.err
+		}
+		return out.root, nil
+	}
 	resolved, body, wide, dicts, err := resolveSchema(schema, data)
 	if err != nil {
 		return nil, err
 	}
-	out := anySink{}
 	walk := walker{to: &out, plans: resolved.plans, rowsLeft: rowBudget(len(data)), dicts: dicts}
 	walk.root(resolved.plans[0], body, wide)
 	if walk.err != nil {
 		return nil, walk.err
 	}
 	return out.root, nil
+}
+
+// dynamicRootWalker is the walk of a message whose root is a dynamic document.
+// It needs no schema — the document says what everything in it is — except
+// for a struct a TYPED value names, which the message's own section describes
+// or, failing that, the caller's schema.
+func dynamicRootWalker(to sink, schema *Schema, section, data []byte) (*walker, error) {
+	var plans []*typePlan
+	switch {
+	case section != nil:
+		parsed, err := ParseSchema(section)
+		if err != nil {
+			return nil, err
+		}
+		plans = parsed.plans
+	case schema != nil:
+		plans = schema.plans
+	}
+	return &walker{to: to, plans: plans, rowsLeft: rowBudget(len(data))}, nil
 }
 
 // resolveSchema finds the plan and the body: from the message's own section when
@@ -265,9 +306,6 @@ func DecodeAny(schema *Schema, data []byte) (any, error) {
 // A message with dictionaries carries no schema section (isDictRoot), and its
 // dictionaries come back for the walk to resolve its id columns against.
 func resolveSchema(schema *Schema, data []byte) (resolved *Schema, body []byte, wide bool, dicts [][]string, err error) {
-	if len(data) == 0 {
-		return nil, nil, false, nil, errNoSection(data)
-	}
 	if isDictRoot(data) {
 		if schema == nil {
 			return nil, nil, false, nil, errNoSection(data)
@@ -280,7 +318,7 @@ func resolveSchema(schema *Schema, data []byte) (resolved *Schema, body []byte, 
 	}
 	section, body, wide, ok := rootParts(data)
 	if !ok {
-		if root := data[0] &^ rootGrouped; root == rootStructNarrowSchema || root == rootStructWideSchema {
+		if root := data[0]; root == rootStructNarrowSchema || root == rootStructWideSchema {
 			return nil, nil, false, nil, errShortSection
 		}
 		return nil, nil, false, nil, fmt.Errorf(
@@ -1213,8 +1251,9 @@ func (w *walker) columnValue(op fieldOp, raw int64) {
 
 // Maps.
 //
-// Entries render in the order the message holds them, which the Go encoder
-// sorts by key, so a map renders to the same text every time.
+// Entries render in the order the message holds them, which for a typed map
+// the Go encoder sorts by key, so such a map renders to the same text every
+// time. A dynamic map's are compact, and render in compact.go.
 //
 // An integer key becomes a quoted decimal, because a JSON object key is a
 // string. Reading one back the other way is out of scope.
@@ -1293,6 +1332,14 @@ func (w *walker) wideMap(reader *wire.Reader8, field *planField) {
 		w.fail(errBadMapKey(field.keyKind))
 		return
 	}
+	if field.valueKind == mapAny {
+		// The entries of a `map[string]any`, which say what they are one at a
+		// time rather than once in the schema: a dynamic container, compact
+		// inside. See compact.go.
+		w.compactEntries(&entries, count)
+		w.fail(entries.Err())
+		return
+	}
 	if !w.enter() {
 		return
 	}
@@ -1320,10 +1367,6 @@ func (w *walker) wideMap(reader *wire.Reader8, field *planField) {
 			w.floatValue(float64FromReversed(entries.ElementUint()), 64)
 		case mapBool:
 			w.to.boolean(entries.ElementUint() == 1)
-		case mapAny:
-			// The entries of a `map[string]any`, which say what they are one at a
-			// time rather than once in the schema. See dynamic.go.
-			w.dynamicValue(&entries)
 		case mapStruct:
 			if body, wideKeys, ok := entries.ElementStructBody(); ok {
 				w.body(field.sub, body, wideKeys)

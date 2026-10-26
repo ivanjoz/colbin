@@ -82,6 +82,13 @@ func appendNarrowStructs(writer *wire.Writer, field *planField, at unsafe.Pointe
 		appendNarrowTable(writer, field, at, buf)
 		return
 	}
+	if slice.len == 1 {
+		// A list of one: the element's body is the field's.
+		list := writer.OpenSingle(field.key)
+		appendNarrowBody(writer, field.sub, slice.data, buf)
+		writer.Close(list)
+		return
+	}
 	list := writer.OpenList(field.key, slice.len)
 	if program := field.sub.rows; program != nil && useRowPrograms && !Packed5() {
 		// What appendNarrowElement and writePlan do for each element, with the
@@ -123,12 +130,17 @@ func appendNarrowStructs(writer *wire.Writer, field *planField, at unsafe.Pointe
 // to say.
 func appendNarrowElement(writer *wire.Writer, plan *typePlan, at unsafe.Pointer, buf *scratch) {
 	element := writer.OpenElement()
+	appendNarrowBody(writer, plan, at, buf)
+	writer.CloseElement(element)
+}
+
+// appendNarrowBody writes one element's key run, at the width its type uses.
+func appendNarrowBody(writer *wire.Writer, plan *typePlan, at unsafe.Pointer, buf *scratch) {
 	if plan.isWide {
 		appendWideInto(writer, plan, at, buf)
 	} else {
 		writePlan(writer, plan, at, buf)
 	}
-	writer.CloseElement(element)
 }
 
 // appendNarrowTable writes a table under a narrow parent, its columns keyed at

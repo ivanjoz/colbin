@@ -31,7 +31,8 @@ var benchCharge = benchRecord{
 // field, each picking the writer that matches the field's static Go type, and
 // the same bytes Marshal writes (TestTheHandWrittenBaselineIsTheFormat).
 func appendChargeByHand(buffer []byte, charge *benchRecord) []byte {
-	writer := wire.Writer{Buffer: append(buffer, rootStructNarrow)}
+	start := len(buffer)
+	writer := wire.Writer{Buffer: buffer}
 	writer.I32(0, charge.CompanyID)
 	writer.I32(1, charge.UserID)
 	writer.U16(2, charge.RouteID)
@@ -42,7 +43,7 @@ func appendChargeByHand(buffer []byte, charge *benchRecord) []byte {
 	writer.U16(7, charge.Access2)
 	writer.U16(8, charge.Access3)
 	writer.U16(9, charge.Access4)
-	return writer.Buffer
+	return wire.FinishNarrow(writer.Buffer, start)
 }
 
 // A baseline that wrote some other encoding would be measuring something else.
@@ -113,11 +114,12 @@ func BenchmarkCodecUnmarshal(b *testing.B) {
 
 // readChargeByHand is the decode half of what a generator would emit.
 func readChargeByHand(message []byte, charge *benchRecord) error {
-	if len(message) == 0 || message[0] != rootStructNarrow {
+	body, ok := wire.NarrowBody(message)
+	if !ok {
 		return wire.ErrBadDescriptor
 	}
 	*charge = benchRecord{}
-	reader := wire.NewReader(message[1:])
+	reader := wire.NewReader(body)
 	for reader.More() {
 		switch reader.Key() {
 		case 0:

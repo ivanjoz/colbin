@@ -2,10 +2,10 @@ package wire
 
 // The opt-in string encoding.
 //
-// A BLOB's descriptor carries a two-bit `enc` field, and packed5 owns two of its
-// codes: about five bits per character on alphanumerics, against eight for a raw
-// blob. It is a per-field code rather than a mode, so a message can hold both
-// and a reader never has to be told which to expect — the field says.
+// A BLOB's descriptor says how its bytes are encoded, and packed5 owns four of
+// its codes: about five bits per character on alphanumerics, against eight for
+// a raw blob. It is a per-field code rather than a mode, so a message can hold
+// both and a reader never has to be told which to expect — the field says.
 //
 // It is not the default. A raw blob is a sub-slice of the message on the way out
 // and a memcpy on the way in; a packed one is a pass over every character on
@@ -16,31 +16,73 @@ package wire
 //
 // packed5 writes a bare unit stream: the container says how long it is and
 // which case mode it opens in. Under eight-bit keys that is the BLOB
-// descriptor's `enc` field:
+// descriptor's detail:
 //
-//	enc 0   raw bytes
-//	enc 1   packed5, stream opens in lowercase
-//	enc 2   dictionary reference (reserved, refused)
-//	enc 3   packed5, stream opens in uppercase
+//	0 0 lw:2      raw bytes, behind a length of 1, 2, 4 or 8 bytes
+//	0 1 up lw:1   packed5, opening in lower or upper case, behind a length of
+//	              1 or 2 bytes
+//	1 size:3      raw bytes, size+1 of them, with no length
 //
 // and under four-bit keys it is the flags of the field's length form: `00` raw,
 // `01` packed5 opening in lowercase, `10` opening in uppercase, `11` refused.
+//
+// The last row is the narrow nibble's sized string, at eight key bits: a code,
+// a name, a version of up to eight bytes costs the key and the descriptor and
+// nothing else, which is protobuf's tag and length. It used to cost a length
+// byte on top, a byte per field that every type of more than sixteen fields
+// paid on most of its strings. Its codes were a dictionary encoding, reserved
+// and never written, and the packed lengths past 65 535 bytes, which no string
+// this encoding is for reaches.
 
 import (
 	"unsafe"
 
+	"github.com/ivanjoz/colbin/internal/wirefmt"
 	"github.com/ivanjoz/colbin/packed5"
 )
 
-// The BLOB descriptor's enc codes, in bits 3-2.
+// The BLOB descriptor's detail bits.
 const (
-	encRaw        uint8 = 0 << 2
-	encPacked5    uint8 = 1 << 2
-	encDictionary uint8 = 2 << 2 // not written here; reserved for a column dictionary
-	encPacked5Up  uint8 = 3 << 2
-
-	encMask uint8 = 3 << 2
+	blobPacked uint8 = 0b0100
+	blobUpper  uint8 = 0b0010
+	blobShort  uint8 = 0b1000
+	// blobForm masks the bits that say which of the three a blob is: raw, packed
+	// or short. A short blob is raw bytes, so only packed needs telling apart.
+	blobForm uint8 = blobShort | blobPacked
+	// maxShortBlob is the longest blob with no length.
+	maxShortBlob = 8
 )
+
+// appendBlobHeader writes a blob's descriptor and length, the short form for
+// one of up to maxShortBlob bytes. The short form is inline and the rest a
+// call, so that a string field's write stays inside the inliner's budget.
+func appendBlobHeader(buffer []byte, size int) []byte {
+	if uint(size-1) < maxShortBlob {
+		return append(buffer, descriptor(classBlob, blobShort|uint8(size-1)))
+	}
+	return appendBlobLength(buffer, size)
+}
+
+// appendBlobLength is appendBlobHeader past maxShortBlob bytes, or at none.
+//
+//go:noinline
+func appendBlobLength(buffer []byte, size int) []byte {
+	code, width := lengthCodeFor(uint64(size))
+	return wirefmt.AppendMagnitude(append(buffer, descriptor(classBlob, code)), uint64(size), width)
+}
+
+// rawBlobSize is the whole field Writer8.String writes for size bytes: the
+// key, the descriptor, the length when there is one, and the bytes.
+func rawBlobSize(size int) int {
+	if size <= maxShortBlob {
+		return 2 + size
+	}
+	_, width := lengthCodeFor(uint64(size))
+	return 2 + width + size
+}
+
+// isPacked reports whether a BLOB descriptor is a packed5 one.
+func isPacked(desc uint8) bool { return desc&blobForm == blobPacked }
 
 // PackedString writes a string in the packed5 encoding when that is smaller than
 // the raw bytes, and raw when it is not. Nothing is written for an empty string.
@@ -59,18 +101,20 @@ func (w *Writer8) PackedString(key uint8, value string) {
 	start := len(w.Buffer)
 	w.Buffer = append(w.Buffer, key, 0, 0)
 	buf, size, upper, ok := packed5.AppendPayload(w.Buffer, value)
-	if !ok {
+	code, width := lengthCodeFor(uint64(size))
+	// The raw field is the comparison, since a raw string of up to eight bytes
+	// carries no length and a packed one always does.
+	if !ok || size > 0xFFFF || 2+width+size >= rawBlobSize(len(value)) {
 		w.Buffer = buf[:start]
 		w.String(key, value)
 		return
 	}
 	w.Buffer = buf
 
-	enc := encPacked5
+	enc := blobPacked
 	if upper {
-		enc = encPacked5Up
+		enc |= blobUpper
 	}
-	code, width := lengthCodeFor(uint64(size))
 	w.Buffer[start+1] = descriptor(classBlob, enc|code)
 	if width == 1 {
 		w.Buffer[start+2] = uint8(size)
@@ -100,7 +144,7 @@ func (r *Reader8) StringIn(a *Arena) string {
 		r.fail(ErrTruncated)
 		return ""
 	}
-	enc := r.buffer[r.at+1] & encMask
+	desc := r.buffer[r.at+1]
 	size, start, ok := r.lengthOf(classBlob)
 	if !ok {
 		return ""
@@ -110,19 +154,15 @@ func (r *Reader8) StringIn(a *Arena) string {
 		return ""
 	}
 	r.at = start + size
-	switch enc {
-	case encRaw:
+	if !isPacked(desc) {
 		if a == nil {
 			return string(r.buffer[start : start+size])
 		}
 		return a.String(r.buffer[start : start+size])
-	case encDictionary:
-		r.fail(ErrBadDescriptor)
-		return ""
 	}
 	// packed5 takes a whole word per group, so it is handed the rest of the
 	// message and reads the slack that follows the payload for free.
-	out, err := packed5.AppendString(nil, r.buffer[start:], size, enc == encPacked5Up)
+	out, err := packed5.AppendString(nil, r.buffer[start:], size, desc&blobUpper != 0)
 	if err != nil {
 		r.fail(err)
 		return ""

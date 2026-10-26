@@ -1,6 +1,7 @@
 package corpus
 
 import (
+	"fmt"
 	"hash/fnv"
 	"reflect"
 	"testing"
@@ -55,7 +56,7 @@ func fingerprint(t *testing.T, built *Corpus) uint64 {
 // moves this number, which is the point: it should not move by accident, and
 // when it moves on purpose the diff says which.
 func TestFingerprint(t *testing.T) {
-	const want uint64 = 0x5dc1c6c1d7a1e821
+	const want uint64 = 0xbc62735f4868ba3a
 	if got := fingerprint(t, Generate(Seed, Small)); got != want {
 		t.Fatalf("fingerprint %#016x, want %#016x", got, want)
 	}
@@ -222,16 +223,18 @@ func TestSalesStraddleTheTableThreshold(t *testing.T) {
 	t.Logf("%d sales as a list, %d transposed into a table", short, long)
 }
 
-// TestEveryMessageStartsInTheReservedRange pins the guarantee an application
-// builds its own framing on: colbin never writes a first byte outside
-// 0xD0..0xDF, so every other value is free for a caller to claim.
+// TestEveryMessageSaysWhatItIs pins what a reader dispatches on: a first byte
+// in 0xD0..0xDF is a root byte, and anything else — or nothing — is a typed
+// narrow message's key run, which has no root byte (wire/root.go). A narrow
+// message's own first byte is never one but 0xD0, the root it keeps when its
+// key run would read as one.
 //
 // It runs over the corpus rather than over a handful of literals because the
-// range has to hold for every shape at once — narrow and wide keys, a
+// rule has to hold for every shape at once — narrow and wide keys, a
 // transposed table, a map, floats, an empty-ish record.
-func TestEveryMessageStartsInTheReservedRange(t *testing.T) {
+func TestEveryMessageSaysWhatItIs(t *testing.T) {
 	built := Generate(Seed, Small)
-	seen := map[byte]string{}
+	seen := map[string]string{}
 
 	encode := func(v any) []byte {
 		t.Helper()
@@ -243,11 +246,14 @@ func TestEveryMessageStartsInTheReservedRange(t *testing.T) {
 	}
 	check := func(table string, data []byte) {
 		t.Helper()
-		if !colbin.IsColbin(data) {
-			t.Fatalf("%s: first byte %#02x is outside %#02x..%#02x",
-				table, data[0], colbin.RootFirst, colbin.RootLast)
+		switch {
+		case !colbin.IsColbin(data):
+			seen["no root byte"] = table
+		case data[0] == colbin.RootFirst || data[0] == colbin.RootFirst|0x08:
+			seen[fmt.Sprintf("%#02x", data[0])] = table
+		default:
+			t.Fatalf("%s: first byte %#02x is a root no typed message writes", table, data[0])
 		}
-		seen[data[0]] = table
 	}
 	for index := range built.Users {
 		check("users", encode(&built.Users[index]))
@@ -282,11 +288,11 @@ func TestEveryMessageStartsInTheReservedRange(t *testing.T) {
 	check("wide keys", encode(&wideKeyed{Name: "ACME", Code: 42}))
 
 	for root, table := range seen {
-		t.Logf("root %#02x written by %s", root, table)
+		t.Logf("%s written by %s", root, table)
 	}
-	if len(seen) < 2 {
-		t.Fatalf("only %d distinct root bytes: the corpus is not reaching both "+
-			"key widths, so this proves less than it looks", len(seen))
+	if seen["no root byte"] == "" || seen["0xd8"] == "" {
+		t.Fatalf("the corpus wrote %v: it is not reaching both key widths, so "+
+			"this proves less than it looks", seen)
 	}
 }
 
@@ -297,27 +303,27 @@ type wideKeyed struct {
 	Code int32  `cb:"21"`
 }
 
-// TestNonColbinFirstBytesAreRejected is the other half: a byte an application
-// claimed must not be mistaken for a message.
-func TestNonColbinFirstBytesAreRejected(t *testing.T) {
-	body, err := colbin.MustCodec[Metric]().Encode(&Metric{SeriesID: 1, At: 2, Value: 3})
+// TestATypedNarrowMessageReadsWithOrWithoutItsRoot is the other half: a
+// typed narrow message decodes the same whether or not 0xD0 stands in front of
+// it, which is what lets a writer put one back only when it must.
+func TestATypedNarrowMessageReadsWithOrWithoutItsRoot(t *testing.T) {
+	want := Metric{SeriesID: 1, At: 2, Value: 3}
+	data, err := colbin.MustCodec[Metric]().Encode(&want)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for value := range 256 {
-		first := byte(value)
-		data := append([]byte{first}, body[1:]...)
-		inRange := first >= colbin.RootFirst && first <= colbin.RootLast
-		if colbin.IsColbin(data) != inRange {
-			t.Fatalf("IsColbin disagrees with the range on %#02x", first)
+	if colbin.IsColbin(data) {
+		t.Fatalf("a typed narrow message starts with the root byte %#02x", data[0])
+	}
+	for _, message := range [][]byte{data, append([]byte{colbin.RootFirst}, data...)} {
+		var got Metric
+		if err := colbin.Unmarshal(message, &got); err != nil || got != want {
+			t.Fatalf("% x decoded as %+v, %v", message, got, err)
 		}
-		if inRange {
-			continue
-		}
-		var into Metric
-		if err := colbin.Unmarshal(data, &into); err == nil {
-			t.Fatalf("%#02x decoded as a message; it is supposed to be free "+
-				"for an application to use", first)
-		}
+	}
+	// An empty message is the record with every field zero.
+	got := want
+	if err := colbin.Unmarshal(nil, &got); err != nil || got != (Metric{}) {
+		t.Fatalf("an empty message decoded as %+v, %v", got, err)
 	}
 }

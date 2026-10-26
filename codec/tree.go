@@ -32,13 +32,14 @@ import (
 const maxTreeDepth = 8
 
 const (
-	treeValue uint8 = iota // a scalar or a string, inline
-	treePointer            // a pointer to one: nothing when nil
-	treeOpen               // a value struct's header
-	treeClose              // its length
-	treeCall               // anything else, through writeFields
-	treeRun                // a run of values, through the row kernel
-	treeStructs            // a slice of structs, through appendNarrowStructs
+	treeValue         uint8 = iota // a scalar or a string, inline
+	treePointer                    // a pointer to one: nothing when nil
+	treeOpen                       // a value struct's header
+	treeClose                      // its length
+	treeCall                       // anything else, through writeFields
+	treeRun                        // a run of values, through the row kernel
+	treeStructs                    // a slice of structs, through appendNarrowStructs
+	treePointerStruct              // a pointer to a struct, through appendNarrowPointerStruct
 )
 
 // treeRunMin is the fewest values in a row that a tree program hands the row
@@ -70,13 +71,14 @@ type treeProgram struct {
 }
 
 // compileTree builds a plan's tree program, or nil for a plan that nests no
-// narrow struct by value: a flat one is the row program's.
+// narrow struct by value: a flat one is the row program's, unless it has none
+// and the tree has a pointer to write.
 func compileTree(plan *typePlan) *treeProgram {
 	if plan.isWide || plan.fromSchema {
 		return nil
 	}
 	tree := &treeProgram{pure: true}
-	nested, fits := false, true
+	nested, fits, flat := false, true, false
 	var emit func(plan *typePlan, base uintptr, depth int)
 	emit = func(plan *typePlan, base uintptr, depth int) {
 		for _, field := range plan.fields {
@@ -98,13 +100,15 @@ func compileTree(plan *typePlan) *treeProgram {
 			case !field.indirect && treeInline(field.op):
 				op.kind = treeValue
 			case !field.indirect && field.op == opPointer:
-				op.kind, op.field = treePointer, uint16(len(tree.fields))
+				op.kind, op.field, flat = treePointer, uint16(len(tree.fields)), true
 				tree.fields = append(tree.fields, field)
 				tree.singles = append(tree.singles, nil)
 			default:
 				op.kind, op.field = treeCall, uint16(len(tree.fields))
 				if !field.indirect && field.op == opStructs {
 					op.kind = treeStructs
+				} else if !field.indirect && field.op == opPointerStruct {
+					op.kind, flat = treePointerStruct, true
 				}
 				tree.fields = append(tree.fields, field)
 				tree.singles = append(tree.singles, &typePlan{fields: []planField{field}})
@@ -114,6 +118,11 @@ func compileTree(plan *typePlan) *treeProgram {
 		}
 	}
 	emit(plan, 0, 0)
+	// A flat plan is the row program's, unless it has none: a struct of
+	// pointers, the element of many a list, was writeFields per element.
+	if plan.rows == nil && flat {
+		nested = true
+	}
 	if !nested || !fits {
 		return nil
 	}
@@ -235,9 +244,16 @@ func (tree *treeProgram) write(writer *wire.Writer, record unsafe.Pointer, buf *
 			writer.Buffer = buffer
 			appendNarrowStructs(writer, &tree.fields[op.field], at, buf)
 			buffer = writer.Buffer
+		case treePointerStruct:
+			writer.Buffer = buffer
+			appendNarrowPointerStruct(writer, &tree.fields[op.field], at, buf)
+			buffer = writer.Buffer
 		default:
 			writer.Buffer = buffer
-			writeFields(writer, tree.singles[op.field], record, buf)
+			// writeValue where it can: see rowProgram.write.
+			if field := &tree.fields[op.field]; field.indirect || !writeValue(writer, field.key, field.op, at, false) {
+				writeFields(writer, tree.singles[op.field], record, buf)
+			}
 			buffer = writer.Buffer
 		}
 	}

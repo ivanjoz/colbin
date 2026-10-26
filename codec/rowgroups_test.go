@@ -65,9 +65,6 @@ func TestGroupedTablesReadAsTables(t *testing.T) {
 func checkGrouped[T any](t *testing.T, name string, value, used *T, grouped bool) {
 	t.Helper()
 	message := must(Marshal(value))
-	if got := message[0]&rootGrouped != 0; got != grouped {
-		t.Fatalf("%s: the root byte %#02x says grouped is %v", name, message[0], got)
-	}
 	var fresh T
 	if err := Unmarshal(message, &fresh); err != nil || !reflect.DeepEqual(&fresh, value) {
 		t.Fatalf("%s: decoded as %+v, %v", name, fresh, err)
@@ -106,9 +103,6 @@ func checkGrouped[T any](t *testing.T, name string, value, used *T, grouped bool
 		}
 	}
 	described := must(MarshalSelfDescribing(value))
-	if got := described[0]&rootGrouped != 0; got != grouped {
-		t.Fatalf("%s: a self-describing root %#02x says grouped is %v", name, described[0], got)
-	}
 	var back T
 	if err := Unmarshal(described, &back); err != nil || !reflect.DeepEqual(&back, value) {
 		t.Fatalf("%s: a self-describing message decoded as %+v, %v", name, back, err)

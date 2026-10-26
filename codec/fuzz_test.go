@@ -3,6 +3,7 @@ package codec
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -165,7 +166,8 @@ func FuzzUnmarshal(f *testing.F) {
 
 // fuzzDecode decodes data into a T and, when that succeeds, checks the value
 // is one: it encodes, and decoding that encoding and encoding again gives the
-// same bytes.
+// same bytes — or, where a dynamic map's entries came out in another order,
+// bytes that decode to the same value.
 func fuzzDecode[T any](t *testing.T, data []byte) {
 	var value T
 	if Unmarshal(data, &value) != nil {
@@ -180,7 +182,9 @@ func fuzzDecode[T any](t *testing.T, data []byte) {
 		t.Fatalf("a re-encoded %T does not decode: %v\n%x", value, err, once)
 	}
 	twice, err := Marshal(&again)
-	if err != nil || !bytes.Equal(once, twice) {
+	var third T
+	if err != nil || !bytes.Equal(once, twice) &&
+		(Unmarshal(twice, &third) != nil || !reflect.DeepEqual(&again, &third)) {
 		t.Fatalf("a %T re-encodes differently:\n%x\n%x (%v)", value, once, twice, err)
 	}
 }

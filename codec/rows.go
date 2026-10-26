@@ -325,6 +325,10 @@ func (program *rowProgram) write(writer *wire.Writer, record unsafe.Pointer, buf
 			} else if size <= wirefmt.InlineLength {
 				*(*[2]byte)(head) = [2]byte{op.key | wirefmt.NibbleLength | wirefmt.FlagRaw, uint8(size)}
 				at += 2
+			} else if pair := size - wirefmt.LengthPair; size <= wirefmt.MaxPair {
+				*(*[3]byte)(head) = [3]byte{op.key | wirefmt.NibbleLength | wirefmt.FlagRaw,
+					wirefmt.LengthPair + uint8(pair>>8), uint8(pair)}
+				at += 3
 			} else {
 				*(*[4]byte)(head) = [4]byte{op.key | wirefmt.NibbleLength | wirefmt.FlagRaw,
 					wirefmt.Length16, uint8(size), uint8(size >> 8)}
@@ -355,7 +359,12 @@ func (program *rowProgram) write(writer *wire.Writer, record unsafe.Pointer, buf
 			case rowInt32s:
 				writer.Int32s(op.key>>4, *(*[]int32)(from))
 			default:
-				writeFields(writer, program.singles[op.field], record, buf)
+				// A value the program does not spell, a []string mostly, by
+				// writeValue: writeFields around one field was its frame and
+				// its loop for one switch.
+				if field.indirect || !writeValue(writer, field.key, field.op, from, false) {
+					writeFields(writer, program.singles[op.field], record, buf)
+				}
 			}
 			buffer = slices.Grow(writer.Buffer, program.reserve)
 			at, out = len(buffer), unsafe.Pointer(unsafe.SliceData(buffer))

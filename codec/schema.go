@@ -305,7 +305,7 @@ func MarshalSelfDescribing(v any) ([]byte, error) {
 	}
 	dst := make([]byte, 0, 1+len(schema.section)+plan.sizeHint)
 	dst = append(append(dst, root), schema.section...)
-	return appendRun(dst, 0, plan, record)
+	return appendRun(dst, plan, record)
 }
 
 // marshalDynamic is MarshalSelfDescribing for a type that can reach a struct the
@@ -318,35 +318,38 @@ func MarshalSelfDescribing(v any) ([]byte, error) {
 // is also why this one is not cached, while every static type's is.
 func marshalDynamic(root byte, plan *typePlan, record unsafe.Pointer) ([]byte, error) {
 	builder := newSectionBuilder(plan)
+	if plan.dynamicRoot != 0 {
+		// The document is the message: its root byte, the section, and its
+		// entries or its value, with the struct table the walk filled.
+		body, err := appendDynamicRoot(make([]byte, 0, plan.sizeHint), plan, record, builder)
+		if err != nil {
+			return nil, err
+		}
+		section := builder.bytes()
+		dst := make([]byte, 0, len(section)+len(body))
+		return append(append(append(dst, body[0]|rootSchema), section...), body[1:]...), nil
+	}
 	buf := scratch{section: builder}
 	body, err := appendRunInto(make([]byte, 0, plan.sizeHint), plan, record, &buf)
 	if err != nil {
 		return nil, err
-	}
-	if buf.grouped {
-		root |= rootGrouped
 	}
 	section := builder.bytes()
 	dst := make([]byte, 0, 1+len(section)+len(body))
 	return append(append(append(dst, root), section...), body...), nil
 }
 
-// appendRun writes a plan's key run onto dst, whose root descriptor — at
-// dst[root], with whatever section follows it — is already written, and which
-// it marks if the run held a grouped table.
+// appendRun writes a plan's key run onto dst, whose root descriptor, with
+// whatever section follows it, is already written.
 //
 // It is deliberately not appendPlan with the root byte hoisted out. appendPlan
 // is the hot path and is shaped around escape analysis — a writer declared per
 // branch, and the flat walk split out so that neither the scratch buffer nor the
 // writer escapes. This one runs once per self-describing message, so it takes
 // the general walk and none of that care.
-func appendRun(dst []byte, root int, plan *typePlan, record unsafe.Pointer) ([]byte, error) {
+func appendRun(dst []byte, plan *typePlan, record unsafe.Pointer) ([]byte, error) {
 	var buf scratch
-	out, err := appendRunInto(dst, plan, record, &buf)
-	if err == nil && buf.grouped {
-		out[root] |= rootGrouped
-	}
-	return out, err
+	return appendRunInto(dst, plan, record, &buf)
 }
 
 // appendRunInto is appendRun with the caller's scratch, which is what carries

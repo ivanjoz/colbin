@@ -41,25 +41,31 @@ func Unmarshal(data []byte, dst any) error { return codec.Unmarshal(data, dst) }
 // without a numeric tag has one only here.
 func FieldIDs(v any) (map[string]uint16, error) { return codec.FieldIDs(v) }
 
-// RootFirst and RootLast bound the first byte of every colbin message.
+// RootFirst and RootLast bound colbin's root bytes, 0xD0..0xDF: the first byte
+// of a message that says what the message is — wide keys, a schema section,
+// dictionaries, a dynamic document.
 //
-// A message always begins in 0xD0..0xDF, because the root is a struct and the
-// root descriptor is an ordinary descriptor with STRUCT in its class bits. The
-// other 240 values are guaranteed never to be written by colbin, so an
-// application may use them as its own framing — an envelope tag, a compression
-// marker, a protocol discriminator — and tell the two apart with IsColbin.
+// A typed message at four key bits, with none of those, is what most messages
+// are, and it has no root byte: its first byte is its first field, and an
+// empty message is the record with every field zero. One whose first field
+// would read as a root byte keeps 0xD0 in front of it. So a first byte outside
+// the range is a typed narrow message, and colbin no longer leaves those 240
+// values to an application's framing: a stream that carries colbin beside
+// other data has to tell them apart itself.
 //
-// Do not assume every byte *inside* the range is valid: twelve of the sixteen
-// are unassigned and a reader refuses them, which is the room the format has to
+// Do not assume every byte *inside* the range is valid: six of the sixteen are
+// unassigned and a reader refuses them, which is the room the format has to
 // grow into.
 const (
 	RootFirst = codec.RootFirst
 	RootLast  = codec.RootLast
 )
 
-// IsColbin reports whether data begins with a byte in colbin's reserved range.
-// It is a dispatch check, not a validation: a message can start correctly and
-// still be truncated further in.
+// IsColbin reports whether data begins with a root byte. A typed narrow
+// message usually does not, so it is not a test of whether data is colbin: it
+// says only that a message is one of the kinds a root byte names. It is a
+// dispatch check, not a validation: a message can start correctly and still be
+// truncated further in.
 func IsColbin(data []byte) bool { return codec.IsColbin(data) }
 
 // Codec is a handle for one type, with the plan resolved once and held. It is

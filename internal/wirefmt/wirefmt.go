@@ -37,9 +37,18 @@ const (
 	SignedInline   = 3
 	SignedMinusOne = 3
 
-	// A length: one byte up to 253, and two escapes naming the width of the
-	// length that follows.
-	InlineLength = 0xFD
+	// A length: one byte up to 239; two up to 3823, a first byte of 0xF0 to
+	// 0xFD carrying the high bits of what is past 240 and a second the low
+	// eight; and two escapes naming the width of the length that follows.
+	//
+	// The two-byte form is protobuf's: a varint is two bytes up to 16 383, and
+	// a body of 254 bytes to a few kilobytes — a configuration document's
+	// section, a list of a few records — cost a byte more here than there,
+	// spent on a u16 escape. The fourteen codes it takes cost the bodies of
+	// 240 to 253 bytes their one-byte length instead.
+	InlineLength = 0xEF
+	LengthPair   = 0xF0
+	MaxPair      = LengthPair + (Length16-LengthPair)<<8 - 1
 	Length16     = 0xFE
 	Length32     = 0xFF
 
@@ -87,12 +96,20 @@ func AppendLength(buffer []byte, length int) []byte {
 	switch {
 	case length <= InlineLength:
 		return append(buffer, uint8(length))
+	case length <= MaxPair:
+		return AppendPair(buffer, length)
 	case length <= 0xFFFF:
 		return append(buffer, Length16, uint8(length), uint8(length>>8))
 	case uint64(length) <= math.MaxUint32:
 		return binary.LittleEndian.AppendUint32(append(buffer, Length32), uint32(length))
 	}
 	panic(ErrFieldTooLarge)
+}
+
+// AppendPair writes a length of InlineLength+1 to MaxPair in its two bytes.
+func AppendPair(buffer []byte, length int) []byte {
+	length -= LengthPair
+	return append(buffer, LengthPair+uint8(length>>8), uint8(length))
 }
 
 // AppendUint writes an unsigned integer, and nothing at all when it is zero.

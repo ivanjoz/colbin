@@ -80,10 +80,13 @@ const (
 	signedInline   = wirefmt.SignedInline
 	signedMinusOne = wirefmt.SignedMinusOne
 
-	// A length: one byte up to 253, and two escapes above it. The escapes name
-	// the width of the length that follows rather than continuing it, so a
-	// length is a branch and a load, never a loop whose trip count is data.
+	// A length: one byte up to 239, two up to 3823, and two escapes above it
+	// (wirefmt). The escapes name the width of the length that follows rather
+	// than continuing it, so a length is a branch and a load, never a loop
+	// whose trip count is data.
 	inlineLength = wirefmt.InlineLength
+	lengthPair   = wirefmt.LengthPair
+	maxPair      = wirefmt.MaxPair
 	length16     = wirefmt.Length16
 	length32     = wirefmt.Length32
 
@@ -222,6 +225,8 @@ func lengthBytes(length int) int {
 	switch {
 	case length <= inlineLength:
 		return 1
+	case length <= maxPair:
+		return 2
 	case length <= 0xFFFF:
 		return 3
 	}
@@ -419,10 +424,24 @@ func narrowArrayWidth[T Integer](values []T) (width int, code uint8) {
 // same reason a length escalates: it removes the ceiling, and it makes the
 // common element — anything under 255 bytes, which is every code line and most
 // error texts — cost one byte instead of two.
+//
+// A list of one is its element's bytes alone, as a list of one struct is
+// (narrow_composite.go).
 func (w *Writer) Strings(key uint8, values []string) {
 	if len(values) == 0 {
 		return
 	}
+	if len(values) == 1 {
+		w.Buffer = wirefmt.AppendLength(append(w.Buffer, key<<4|nibbleLength|narrowSingle), len(values[0]))
+		w.Buffer = append(w.Buffer, values[0]...)
+		return
+	}
+	w.stringList(key, values)
+}
+
+// stringList is Strings in the counted form whatever the count, which a table
+// column needs: there f1 says the column is nullable (nullable.go).
+func (w *Writer) stringList(key uint8, values []string) {
 	payload := 0
 	for _, value := range values {
 		payload += elementSizeBytes(len(value)) + len(value)
@@ -430,8 +449,9 @@ func (w *Writer) Strings(key uint8, values []string) {
 	w.stringsSized(key, values, payload)
 }
 
-// StringsPayload is Strings for a caller that already added up the elements:
-// payload is each value's length plus its size's bytes (StringPayload).
+// StringsPayload is stringList for a caller that already added up the elements:
+// payload is each value's length plus its size's bytes (StringPayload). It is
+// a table column's, and so always the counted form.
 func (w *Writer) StringsPayload(key uint8, values []string, payload int) {
 	if len(values) == 0 {
 		return
@@ -542,13 +562,20 @@ func readLength(buffer []byte, at int) (length, start int, err error) {
 	if at >= len(buffer) {
 		return 0, 0, ErrTruncated
 	}
-	switch first := buffer[at]; first {
-	case length16:
+	switch first := buffer[at]; {
+	case first <= inlineLength:
+		return int(first), at + 1, nil
+	case first < length16:
+		if len(buffer)-at < 2 {
+			return 0, 0, ErrTruncated
+		}
+		return lengthPair + (int(first-lengthPair)<<8 | int(buffer[at+1])), at + 2, nil
+	case first == length16:
 		if len(buffer)-at < 3 {
 			return 0, 0, ErrTruncated
 		}
 		return int(binary.LittleEndian.Uint16(buffer[at+1:])), at + 3, nil
-	case length32:
+	default:
 		if len(buffer)-at < 5 {
 			return 0, 0, ErrTruncated
 		}
@@ -557,8 +584,6 @@ func readLength(buffer []byte, at int) (length, start int, err error) {
 			return 0, 0, ErrSizeTooLarge
 		}
 		return int(value), at + 5, nil
-	default:
-		return int(first), at + 1, nil
 	}
 }
 
@@ -801,24 +826,28 @@ func (r *Reader) arrayElements() (elements []byte, width int, ok bool) {
 // stringElements reads a string array's framing and returns a reader over
 // exactly its elements. An element is [size][bytes], the shape a list element
 // has, so Element reads it — and reading inside the field's own bytes is what
-// keeps a bad element size from running into the field that follows.
-func (r *Reader) stringElements() (Reader, bool) {
+// keeps a bad element size from running into the field that follows. A list of
+// one is its element's bytes alone, and single says so.
+func (r *Reader) stringElements() (elements Reader, single, ok bool) {
 	nibble, start, size, ok := r.field()
 	if !ok {
-		return Reader{}, false
+		return Reader{}, false, false
 	}
-	if nibble != nibbleLength {
+	if nibble&^narrowSingle != nibbleLength {
 		r.fail(ErrBadEscape)
-		return Reader{}, false
+		return Reader{}, false, false
 	}
-	return Reader{buffer: r.buffer[start : start+size]}, true
+	return Reader{buffer: r.buffer[start : start+size]}, nibble != nibbleLength, true
 }
 
 // StringsBytes appends each element to dst as a sub-slice of the message,
 // without copying. The slices stay valid only as long as the message buffer
 // does.
 func (r *Reader) StringsBytes(dst [][]byte) [][]byte {
-	elements, ok := r.stringElements()
+	elements, single, ok := r.stringElements()
+	if single {
+		return append(dst, elements.buffer)
+	}
 	for ok && elements.More() {
 		element, ok := elements.Element()
 		if !ok {
@@ -832,9 +861,12 @@ func (r *Reader) StringsBytes(dst [][]byte) [][]byte {
 
 // Strings copies each element into a Go string.
 func (r *Reader) Strings(dst []string) []string {
-	elements, ok := r.stringElements()
+	elements, single, ok := r.stringElements()
 	if !ok {
 		return dst
+	}
+	if single {
+		return append(dst, string(elements.buffer))
 	}
 	dst, ok = elements.appendStrings(dst, -1)
 	if !ok {

@@ -262,10 +262,23 @@ text:
 textLength:
 	ORR  $12, R9, R13
 	MOVB R13, (R16)
-	CMP  $0xFD, R12
-	BHI  textLength16
+	CMP  $0xEF, R12
+	BHI  textPair
 	MOVB R12, 1(R16)
 	ADD  $2, R16, R16
+	B    copy
+
+textPair:
+	// Up to 3823, two bytes: 0xF0 plus the high bits of what is past 240,
+	// then the low eight.
+	CMP  $3823, R12
+	BHI  textLength16
+	SUB  $0xF0, R12, R13
+	MOVB R13, 2(R16)
+	LSR  $8, R13, R13
+	ADD  $0xF0, R13, R13
+	MOVB R13, 1(R16)
+	ADD  $3, R16, R16
 	B    copy
 
 textLength16:
@@ -338,10 +351,22 @@ listHead:
 	ORR  R9, R15, R17
 	ADD  R4, R3, R16
 	MOVB R17, (R16)
-	CMP  $0xFD, R14
-	BHI  listLength16
+	CMP  $0xEF, R14
+	BHI  listPair
 	MOVB R14, 1(R16)
 	ADD  $2, R16, R16
+	B    listBody
+
+listPair:
+	// Up to 3823, the two-byte length, as textPair writes it.
+	CMP  $3823, R14
+	BHI  listLength16
+	SUB  $0xF0, R14, R19
+	MOVB R19, 2(R16)
+	LSR  $8, R19, R19
+	ADD  $0xF0, R19, R19
+	MOVB R19, 1(R16)
+	ADD  $3, R16, R16
 	B    listBody
 
 listLength16:
@@ -594,6 +619,14 @@ wstring:
 	ADD  R4, R3, R16
 	MOVB R9, (R16)
 	MOVD R12, 2(R16)             // the length, little-endian, as a word
+	CMP  $8, R12
+	BHI  wtext8
+	ADD  $0x97, R12, R13         // up to eight bytes, the descriptor is the length
+	MOVB R13, 1(R16)
+	ADD  $2, R16, R16
+	B    wcopy
+
+wtext8:
 	CMP  $0xFF, R12
 	BHI  wtext16
 	MOVD $0x90, R13
