@@ -315,3 +315,62 @@ func TestRowProgramReadsWhatTheRunsDo(t *testing.T) {
 	compare(0, "nested wide", must(MustCodec[rowsNestedUntagged]().Encode(makeRowsNestedUntagged(500))),
 		func() any { return new(rowsNestedUntagged) })
 }
+
+// rowsNumeric is a row the program writes as a whole list (writeRows): every
+// field a number or a bool.
+type rowsNumeric struct {
+	B   bool    `cb:"1"`
+	I8  int8    `cb:"2"`
+	I16 int16   `cb:"3"`
+	I32 int32   `cb:"4"`
+	I64 int64   `cb:"5"`
+	U8  uint8   `cb:"6"`
+	U16 uint16  `cb:"7"`
+	U32 uint32  `cb:"8"`
+	U64 uint64  `cb:"9"`
+	F32 float32 `cb:"10"`
+	F64 float64 `cb:"11"`
+}
+
+type rowsNumericList struct {
+	ID   int64         `cb:"1"`
+	Rows []rowsNumeric `cb:"2"`
+}
+
+func TestNumericListsWriteTheWalksBytes(t *testing.T) {
+	if program := MustCodec[rowsNumeric]().plan.rows; program == nil || !program.numeric {
+		t.Fatal("the numeric row compiled to no numeric program")
+	}
+	random := rand.New(rand.NewPCG(23, 24))
+	edge := func() int64 {
+		if random.IntN(3) == 0 {
+			return int64(random.Uint64())
+		}
+		return rowsEdges[random.IntN(len(rowsEdges))]
+	}
+	for trial := range 3000 {
+		// Below the table threshold, so the rows are a list.
+		value := rowsNumericList{ID: edge(), Rows: make([]rowsNumeric, 1+random.IntN(tableThreshold-1))}
+		for index := range value.Rows {
+			value.Rows[index] = rowsNumeric{
+				B: random.IntN(2) == 0, I8: int8(edge()), I16: int16(edge()), I32: int32(edge()), I64: edge(),
+				U8: uint8(edge()), U16: uint16(edge()), U32: uint32(edge()), U64: uint64(edge()),
+				F32: math.Float32frombits(uint32(edge())), F64: math.Float64frombits(uint64(edge())),
+			}
+			if random.IntN(4) == 0 {
+				value.Rows[index] = rowsNumeric{}
+			}
+		}
+		useRowPrograms = false
+		want := must(Marshal(&value))
+		useRowPrograms = true
+		got := must(Marshal(&value))
+		if !bytes.Equal(got, want) {
+			t.Fatalf("trial %d: writeRows %x\nwriteFields %x\n%+v", trial, got, want, value)
+		}
+		var back rowsNumericList
+		if err := Unmarshal(got, &back); err != nil {
+			t.Fatalf("trial %d: %v", trial, err)
+		}
+	}
+}

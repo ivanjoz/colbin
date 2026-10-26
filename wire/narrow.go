@@ -151,6 +151,11 @@ const (
 	elementSizeEscape = 0xFF
 )
 
+// MaxElementSize is the longest list element whose length is its first byte,
+// for a caller writing elements into the buffer itself: the length byte, then
+// the body.
+const MaxElementSize = inlineElementSize
+
 var (
 	// ErrSizeTooLarge is a size this platform cannot address. It is a read-side
 	// error only: a writer cannot produce one, because the value it is

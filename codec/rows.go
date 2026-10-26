@@ -75,6 +75,9 @@ type rowProgram struct {
 	singles []*typePlan
 	// wide says the plan's keys are eight bits, so writeWide runs it.
 	wide bool
+	// numeric says every op is a number or a bool, and a record of them cannot
+	// outgrow a list element's one-byte length: what writeRows needs.
+	numeric bool
 }
 
 // fixedRoom is the most a numeric field writes: a header, a length byte for a
@@ -119,7 +122,30 @@ func compileRows(plan *typePlan) *rowProgram {
 	if !spelled {
 		return nil
 	}
+	program.numeric = !program.wide && program.reserve-8 <= wire.MaxElementSize
+	for _, op := range program.ops {
+		program.numeric = program.numeric && op.kind <= rowBool
+	}
 	return program
+}
+
+// writeRows writes count records, stride apart from data, as the elements of a
+// narrow list, for a numeric program and the kernel: room for every element
+// made once, and each one its length byte and a kernel call, where an element
+// otherwise opens, grows, writes and closes. A numeric record writes at most
+// fixedRoom a field, which numeric holds under a one-byte length.
+func (program *rowProgram) writeRows(buffer []byte, data unsafe.Pointer, count int, stride uintptr) []byte {
+	element := 1 + program.reserve - 8
+	buffer = slices.Grow(buffer, count*element+8)
+	out := unsafe.Pointer(unsafe.SliceData(buffer))
+	at, limit := len(buffer), cap(buffer)
+	for index := range count {
+		_, end := rowKernel(&program.ops[0], len(program.ops), unsafe.Add(data, uintptr(index)*stride),
+			(*byte)(out), at+1, limit, program.reserve)
+		*(*byte)(unsafe.Add(out, at)) = uint8(end - at - 1)
+		at = end
+	}
+	return buffer[:at]
 }
 
 // rowKind is the op a field compiles to, if the program spells it.

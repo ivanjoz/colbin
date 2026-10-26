@@ -354,6 +354,15 @@ unchanged.
   sales encode −8.9%, dataset −4.7%, TPC-H unchanged; on a 16-row table, 600 →
   500 ns. Held to `gatherTable`'s bytes by a test over every column op.
 
+- **A list of numeric rows written in one go** (`rowProgram.writeRows`): a row
+  of numbers and bools writes at most `fixedRoom` a field, so when that is under
+  a list element's one-byte length the room for the whole list is made once,
+  and each element is its length byte and a kernel call, without
+  `OpenElement`, a grow, the program's loop and `CloseElement`. Sales' lines
+  under eight rows are such lists. Sales encode −5.3% (n=12, alone on a core;
+  beside other cases it read −11%, which was the neighbours). Held to
+  writeFields' bytes over every numeric kind and edge value.
+
 **Tried and reverted**
 
 - **The scan in the gather through a widening func**, as `gather` does: +25%.

@@ -77,6 +77,12 @@ func appendNarrowStructs(writer *wire.Writer, field *planField, at unsafe.Pointe
 			writer.Close(list)
 			return
 		}
+		if program.numeric && useRowKernel {
+			writer.Buffer = program.writeRows(writer.Buffer, slice.data, slice.len, field.stride)
+			buf.leave()
+			writer.Close(list)
+			return
+		}
 		for index := range slice.len {
 			at := unsafe.Add(slice.data, uintptr(index)*field.stride)
 			element := writer.OpenElement()
