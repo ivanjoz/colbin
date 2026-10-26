@@ -84,11 +84,6 @@ type rowProgram struct {
 	flat bool
 }
 
-// flatSlack is the room appendFlat makes past the fixed-width fields' for
-// strings and lists, which the kernel writes when they fit and hands back to
-// appendFlatRest when they do not.
-const flatSlack = 64
-
 // fixedRoom is the most a numeric field writes: a header, a length byte for a
 // negative magnitude, and the magnitude stored as a whole word. A wide field's
 // key and descriptor and the word are the same ten.

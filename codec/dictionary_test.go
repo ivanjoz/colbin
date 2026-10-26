@@ -271,9 +271,9 @@ func TestDictionaryIndex(t *testing.T) {
 	var values []string
 	for index := range 5000 {
 		// Short and long values both, so both tables grow.
-		value := fmt.Sprintf("%016x", index*2654435761)[:1+index%11]
+		value := fmt.Sprintf("%016x", uint64(index)*2654435761)[:1+index%11]
 		if index%3 == 0 {
-			value = fmt.Sprintf("long-%032x", index*2654435761)
+			value = fmt.Sprintf("long-%032x", uint64(index)*2654435761)
 		}
 		if _, found, ok := find(value); !ok {
 			t.Fatalf("probe ran out at %d entries", len(entries.values))

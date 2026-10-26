@@ -430,6 +430,9 @@ func gatherTable(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratc
 	return narrow, ints, strings, payloads
 }
 
+// prefetchSink keeps gatherTable's touch loads from being dropped as dead.
+//
+//lint:ignore U1000 written, never read, on purpose.
 var prefetchSink byte
 
 // tableBuffers is the scratch a table of rows rows is gathered into: its int32

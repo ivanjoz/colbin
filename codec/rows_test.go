@@ -469,7 +469,8 @@ func TestFlatRootWritesTheWalksBytes(t *testing.T) {
 // rowsFlatHidden has a field outside its plan, which a decode clears and a
 // flat read would not reach: it must not take readFlat.
 type rowsFlatHidden struct {
-	A      int64 `cb:"1"`
+	A int64 `cb:"1"`
+	//lint:ignore U1000 read only through reflection: a decode clears it.
 	hidden int64
 }
 
