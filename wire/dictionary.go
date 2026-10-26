@@ -105,3 +105,101 @@ func dictIDs(rest []byte, size, rows int, dst []int64) (int, []int64, error) {
 	}
 	return dict, ids, nil
 }
+
+// The nullable dictionary column: the dictionary column of a pointer field in
+// which some rows are nil, laid out as every nullable column is (nullable.go),
+// with the dictionary's number in front.
+//
+//	wide    [key] [0xB4 | lw] [length] [dict] [presence] [column]
+//	narrow  [key | 1111]      [length] [dict] [presence] [column]
+//
+// `column` holds an id for each row present only. Under a string field's key a
+// wide COL with the nullable bit is free, as a COL is; a narrow string column's
+// flags are 00 for strings, 01 ids, 10 nullable strings, and this is 11 — which
+// under a slice's key is a grouped table, so it is read by its key's type, never
+// by its flags alone.
+
+// narrowNullableDict is a narrow string column's flags when it holds the ids of
+// the rows present.
+const narrowNullableDict uint8 = 0b11
+
+// NullableDictColumn writes the dictionary column of a pointer field in which
+// some rows are nil: their presence, then the ids of the rows present.
+func (w *Writer8) NullableDictColumn(key uint8, dict int, presence []byte, ids []int64) {
+	mark := w.openSized(key, classCol, nullableDetail, len(presence)+len(ids))
+	w.Buffer = column.AppendArray(append(appendCount(w.Buffer, dict), presence...), ids)
+	w.Close(mark)
+}
+
+// NullableDictColumn is Writer8.NullableDictColumn with four key bits.
+func (w *Writer) NullableDictColumn(key uint8, dict int, presence []byte, ids []int64) {
+	mark := w.openNarrowSized(key, narrowNullableDict, len(presence)+len(ids))
+	w.Buffer = column.AppendArray(append(appendCount(w.Buffer, dict), presence...), ids)
+	w.Close(mark)
+}
+
+// IsNullableDictColumn reports whether the field at the cursor is a COL with
+// the nullable bit, which under a string column's key is a nullable dictionary
+// column.
+func (r *Reader8) IsNullableDictColumn() bool {
+	return r.at+1 < len(r.buffer) && r.buffer[r.at+1]>>4 == 0b1000|classCol &&
+		r.buffer[r.at+1]&nullableDetail != 0
+}
+
+// IsNullableDictColumn reports whether the field at the cursor is the length
+// form with the nullable dictionary flags.
+func (r *Reader) IsNullableDictColumn() bool {
+	return r.at < len(r.buffer) && r.buffer[r.at]&0b1111 == nibbleLength|narrowNullableDict
+}
+
+// NullableDictColumn reads a column written by NullableDictColumn, of a table
+// of rows rows: which dictionary, the presence, a sub-slice of the message, and
+// the ids of the rows present, decoded into dst's capacity.
+func (r *Reader8) NullableDictColumn(rows int, dst []int64) (int, []byte, []int64, bool) {
+	body, ok := r.compositeBody(classCol)
+	if !ok {
+		return 0, nil, nil, false
+	}
+	return r.nullableDict(r.buffer[r.at-len(body):], len(body), rows, dst)
+}
+
+// NullableDictColumn is Reader8.NullableDictColumn with four key bits.
+func (r *Reader) NullableDictColumn(rows int, dst []int64) (int, []byte, []int64, bool) {
+	nibble, start, size, ok := r.field()
+	if !ok {
+		return 0, nil, nil, false
+	}
+	if nibble != nibbleLength|narrowNullableDict {
+		r.fail(ErrBadEscape)
+		return 0, nil, nil, false
+	}
+	dict, presence, ids, err := nullableDictIDs(r.buffer[start:], size, rows, dst)
+	if err != nil {
+		r.fail(err)
+		return 0, nil, nil, false
+	}
+	return dict, presence, ids, true
+}
+
+func (r *Reader8) nullableDict(rest []byte, size, rows int, dst []int64) (int, []byte, []int64, bool) {
+	dict, presence, ids, err := nullableDictIDs(rest, size, rows, dst)
+	if err != nil {
+		r.fail(err)
+		return 0, nil, nil, false
+	}
+	return dict, presence, ids, true
+}
+
+// nullableDictIDs splits a nullable dictionary column's body, the first size
+// bytes of rest, into its dictionary number, its presence and its ids.
+func nullableDictIDs(rest []byte, size, rows int, dst []int64) (int, []byte, []int64, error) {
+	dict, at, ok := readCount(rest[:size])
+	if !ok {
+		return 0, nil, nil, ErrTruncated
+	}
+	presence, ids, err := nullableColumn(rest[at:], size-at, rows, dst)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	return dict, presence, ids, nil
+}

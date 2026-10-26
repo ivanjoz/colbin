@@ -151,12 +151,19 @@ func appendNarrowColumns(writer *wire.Writer, plan *typePlan, slice *sliceHeader
 	nulls := buf.columns.nulls
 	var choices []dictColumn
 	if buf.dict != nil {
-		choices = buf.dict.tableIDs(plan, strings, rows)
+		choices = buf.dict.tableIDs(plan, strings, nulls, rows)
 	}
 	for index := range plan.fields {
 		field := &plan.fields[index]
+		if field.op == opStructs {
+			continue // a list column, written after the rest
+		}
 		if field.op == opPointer {
-			writePointerColumn(writer, field.key, &nulls[0], rows, field.elemOp == opString)
+			var choice *dictColumn
+			if field.elemOp == opString && len(choices) != 0 {
+				choice, choices = &choices[0], choices[1:]
+			}
+			writePointerColumn(writer, field.key, &nulls[0], rows, field.elemOp, choice)
 			nulls = nulls[1:]
 			continue
 		}
@@ -186,7 +193,13 @@ func appendNarrowColumns(writer *wire.Writer, plan *typePlan, slice *sliceHeader
 			narrow = narrow[rows:]
 			continue
 		}
-		if scans != nil {
+		if field.op == opFloat64 {
+			// A float column takes its own codec, which has no use for the scan.
+			writer.FloatColumn(field.key, ints[:rows:rows])
+			if scans != nil {
+				scans = scans[1:]
+			}
+		} else if scans != nil {
 			writer.ColumnScanned(field.key, ints[:rows:rows], scans[0])
 			scans = scans[1:]
 		} else {
@@ -194,6 +207,7 @@ func appendNarrowColumns(writer *wire.Writer, plan *typePlan, slice *sliceHeader
 		}
 		ints = ints[rows:]
 	}
+	writer.Buffer = appendListColumns(writer.Buffer, plan, slice, stride, false, buf, buf.dict)
 }
 
 func appendNarrowMap(writer *wire.Writer, field *planField, at unsafe.Pointer, buf *scratch) {
@@ -395,7 +409,17 @@ func readNarrowColumns(field *planField, data unsafe.Pointer, rows int, body []b
 			continue
 		}
 		if column.op == opPointer {
-			readPointerColumn(&columns, column, data, field.stride, rows, buf)
+			if column.elemOp != opString || buf.dict == nil ||
+				!buf.dict.readDictPointer(&columns, column, data, field.stride, rows) {
+				readPointerColumn(&columns, column, data, field.stride, rows, buf)
+			}
+			continue
+		}
+		if column.listsColumn() {
+			// The columns decoded so far go into the rows first: the element
+			// table's decode takes the same scratch.
+			table.flush()
+			readListColumn(&columns, column, field.stride, data, rows, false, buf)
 			continue
 		}
 		if column.op == opString {

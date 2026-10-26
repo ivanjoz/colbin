@@ -47,6 +47,7 @@ import (
 	"math"
 	"math/bits"
 	"strconv"
+	"unsafe"
 
 	"github.com/ivanjoz/colbin/wire"
 )
@@ -156,6 +157,9 @@ type walker struct {
 	depth int
 	// rowsLeft is the message's row budget. See rowBudget.
 	rowsLeft int
+	// dicts are the message's dictionaries (dictionary.go), nil for a message
+	// without them and in a dynamic value, whose tables never use them.
+	dicts [][]string
 }
 
 func (w *walker) fail(err error) {
@@ -207,12 +211,12 @@ func (set *fieldSet) has(index int) bool { return set[index>>6]&(1<<uint(index&6
 // value that was missing and one that was not a number. DecodeAny hands them
 // back as they are.
 func AppendJSON(dst []byte, schema *Schema, data []byte) ([]byte, error) {
-	resolved, body, wide, err := resolveSchema(schema, data)
+	resolved, body, wide, dicts, err := resolveSchema(schema, data)
 	if err != nil {
 		return dst, err
 	}
 	out := jsonSink{buffer: dst}
-	walk := walker{to: &out, plans: resolved.plans, rowsLeft: rowBudget(len(data))}
+	walk := walker{to: &out, plans: resolved.plans, rowsLeft: rowBudget(len(data)), dicts: dicts}
 	walk.root(resolved.plans[0], body, wide)
 	if walk.err != nil {
 		return dst[:len(dst):len(dst)], walk.err
@@ -236,12 +240,12 @@ func ToJSON(schema *Schema, data []byte) ([]byte, error) {
 //
 // Unlike AppendJSON it is faithful to a non-finite float, which JSON cannot be.
 func DecodeAny(schema *Schema, data []byte) (any, error) {
-	resolved, body, wide, err := resolveSchema(schema, data)
+	resolved, body, wide, dicts, err := resolveSchema(schema, data)
 	if err != nil {
 		return nil, err
 	}
 	out := anySink{}
-	walk := walker{to: &out, plans: resolved.plans, rowsLeft: rowBudget(len(data))}
+	walk := walker{to: &out, plans: resolved.plans, rowsLeft: rowBudget(len(data)), dicts: dicts}
 	walk.root(resolved.plans[0], body, wide)
 	if walk.err != nil {
 		return nil, walk.err
@@ -255,30 +259,43 @@ func DecodeAny(schema *Schema, data []byte) (any, error) {
 // The message's own wins because it is the one that describes these bytes: a
 // caller's schema is a guess about what the message holds, and a wrong guess
 // reads every field as some other one.
-func resolveSchema(schema *Schema, data []byte) (resolved *Schema, body []byte, wide bool, err error) {
+//
+// A message with dictionaries carries no schema section (isDictRoot), and its
+// dictionaries come back for the walk to resolve its id columns against.
+func resolveSchema(schema *Schema, data []byte) (resolved *Schema, body []byte, wide bool, dicts [][]string, err error) {
 	if len(data) == 0 {
-		return nil, nil, false, errNoSection(data)
+		return nil, nil, false, nil, errNoSection(data)
+	}
+	if isDictRoot(data) {
+		if schema == nil {
+			return nil, nil, false, nil, errNoSection(data)
+		}
+		dicts, body, err := parseDictSection(data[1:])
+		if err != nil {
+			return nil, nil, false, nil, err
+		}
+		return schema, body, data[0]&rootWide != 0, dicts, nil
 	}
 	section, body, wide, ok := rootParts(data)
 	if !ok {
 		if root := data[0] &^ rootGrouped; root == rootStructNarrowSchema || root == rootStructWideSchema {
-			return nil, nil, false, errShortSection
+			return nil, nil, false, nil, errShortSection
 		}
-		return nil, nil, false, fmt.Errorf(
+		return nil, nil, false, nil, fmt.Errorf(
 			"colbin: byte 0 is %#02x, which is not a root descriptor this version writes",
 			data[0])
 	}
 	if section != nil {
 		parsed, err := ParseSchema(section)
 		if err != nil {
-			return nil, nil, false, err
+			return nil, nil, false, nil, err
 		}
-		return parsed, body, wide, nil
+		return parsed, body, wide, nil, nil
 	}
 	if schema == nil {
-		return nil, nil, false, errNoSection(data)
+		return nil, nil, false, nil, errNoSection(data)
 	}
-	return schema, body, wide, nil
+	return schema, body, wide, nil, nil
 }
 
 // root walks the outermost run, which is the only place an envelope can be.
@@ -740,20 +757,100 @@ type tableColumns struct {
 	// value of; next is where the row being written reads its value from.
 	presence [][]byte
 	next     []int
+	// dicts are the message's dictionaries, and ids where a column of ids into
+	// one is decoded before it is resolved.
+	dicts [][]string
+	ids   []int64
+	// pages are a paged row type's next pages, by the index of their link: each
+	// a table of the same rows (appendPageTable), made the first time one is
+	// read.
+	pages []*tableColumns
+	// lists are the element tables of list columns by field index, lengths
+	// each row's count of elements and cursor the element the row being
+	// written starts at (listcolumn.go); rowsLeft is the walk's row budget,
+	// which an element table spends from.
+	lists    []*tableColumns
+	lengths  [][]int64
+	cursor   []int
+	rowsLeft *int
+	// depth is how many list columns down this table is, which no writer takes
+	// past maxListDepth.
+	depth int
 }
 
-func newTableColumns(fields int) *tableColumns {
+func newTableColumns(fields int, dicts [][]string, rowsLeft *int) *tableColumns {
 	return &tableColumns{
 		ints:     make([][]int64, fields),
 		strings:  make([][][]byte, fields),
 		present:  make([]bool, fields),
 		presence: make([][]byte, fields),
 		next:     make([]int, fields),
+		dicts:    dicts,
+		pages:    make([]*tableColumns, fields),
+		lists:    make([]*tableColumns, fields),
+		lengths:  make([][]int64, fields),
+		cursor:   make([]int, fields),
+		rowsLeft: rowsLeft,
 	}
+}
+
+// readList reads the list column at the cursor into field index: its lengths,
+// and its element table, keyed at eight bits if wide.
+func (gathered *tableColumns) readList(columns listColumnReader, field *planField, index, rows int, wide bool) {
+	children, lengths, run, ok := columns.ListColumn(rows, gathered.lengths[index][:0])
+	if !ok {
+		return
+	}
+	gathered.lengths[index] = lengths
+	if err := takeRows(gathered.rowsLeft, children, len(field.sub.fields)); err != nil {
+		columns.Fail(err)
+		return
+	}
+	elements := gathered.lists[index]
+	if elements == nil {
+		if gathered.depth == maxListDepth {
+			columns.Fail(errTooDeep)
+			return
+		}
+		elements = newTableColumns(len(field.sub.fields), gathered.dicts, gathered.rowsLeft)
+		elements.depth = gathered.depth + 1
+		gathered.lists[index] = elements
+	}
+	if err := elements.read(run, field.sub, children, wide || field.sub.isWide); err != nil {
+		columns.Fail(err)
+		return
+	}
+	gathered.present[index] = true
+}
+
+// readPage reads the table at the cursor as field index's page, a table of the
+// same rows.
+func (gathered *tableColumns) readPage(columns *wire.Reader8, field *planField, index, rows int) {
+	pageRows, groupRows, body, ok := columns.Table()
+	if !ok {
+		return
+	}
+	if pageRows != rows || groupRows != 0 {
+		columns.Fail(errPageRows)
+		return
+	}
+	page := gathered.pages[index]
+	if page == nil {
+		page = newTableColumns(len(field.sub.fields), gathered.dicts, gathered.rowsLeft)
+		page.depth = gathered.depth
+		gathered.pages[index] = page
+	}
+	reader := wire.NewReader8(body)
+	if err := page.read8(&reader, field.sub, rows); err != nil {
+		columns.Fail(err)
+		return
+	}
+	gathered.present[index] = true
 }
 
 // columnReader is a column run's reader at either key width.
 type columnReader interface {
+	dictColumnReader
 	IsNullable() bool
 	Column(rows int, dst []int64) []int64
 	StringsBytes(dst [][]byte) [][]byte
@@ -764,11 +861,15 @@ type columnReader interface {
 // readColumn reads the column at the cursor into field index of the gathered
 // columns.
 func (gathered *tableColumns) readColumn(columns columnReader, field *planField, index, rows int) {
-	op, nullable := field.op, false
+	op := field.op
 	if op == opPointer {
-		op, nullable = field.elemOp, columns.IsNullable()
+		op = field.elemOp
 	}
 	gathered.presence[index] = nil
+	if op == opString && gathered.dicts != nil && gathered.readDictColumn(columns, index, rows) {
+		return
+	}
+	nullable := field.op == opPointer && columns.IsNullable()
 	switch {
 	case op == opString && nullable:
 		gathered.presence[index], gathered.strings[index] = columns.NullableStringsBytes(rows, gathered.strings[index][:0])
@@ -780,6 +881,47 @@ func (gathered *tableColumns) readColumn(columns columnReader, field *planField,
 		gathered.ints[index] = columns.Column(rows, gathered.ints[index])
 	}
 	gathered.present[index] = true
+}
+
+// readDictColumn reads a string column written as ids, in either form, into
+// field index as its dictionary's strings. It reads nothing and reports false
+// when the column at the cursor is not one.
+func (gathered *tableColumns) readDictColumn(columns columnReader, index, rows int) bool {
+	var number int
+	var presence []byte
+	var ids []int64
+	var ok bool
+	switch {
+	case columns.IsDictColumn():
+		number, ids, ok = columns.DictColumn(rows, gathered.ids)
+	case columns.IsNullableDictColumn():
+		number, presence, ids, ok = columns.NullableDictColumn(rows, gathered.ids)
+	default:
+		return false
+	}
+	if !ok {
+		return true
+	}
+	gathered.ids = ids[:0]
+	if presence == nil && len(ids) != rows {
+		columns.Fail(errColumnLength)
+		return true
+	}
+	if number >= len(gathered.dicts) {
+		columns.Fail(errDictNumber)
+		return true
+	}
+	values := gathered.dicts[number]
+	out := gathered.strings[index][:0]
+	for _, id := range ids {
+		if uint64(id) >= uint64(len(values)) {
+			columns.Fail(errDictID)
+			return true
+		}
+		out = append(out, unsafe.Slice(unsafe.StringData(values[id]), len(values[id])))
+	}
+	gathered.strings[index], gathered.presence[index], gathered.present[index] = out, presence, true
+	return true
 }
 
 // narrowTable walks a table under a narrow parent, whose columns are keyed at
@@ -827,7 +969,7 @@ func (w *walker) structTable(rows int, columns *wire.Reader8, sub *typePlan) {
 	}
 	defer w.leave()
 	w.to.beginArray()
-	gathered := newTableColumns(len(sub.fields))
+	gathered := newTableColumns(len(sub.fields), w.dicts, &w.rowsLeft)
 	if err := gathered.read8(columns, sub, rows); err != nil {
 		w.fail(err)
 		return
@@ -850,7 +992,7 @@ func (w *walker) table(sub *typePlan, rows, groupRows int, body []byte, wide boo
 	}
 	defer w.leave()
 	w.to.beginArray()
-	gathered := newTableColumns(len(sub.fields))
+	gathered := newTableColumns(len(sub.fields), w.dicts, &w.rowsLeft)
 	if groupRows == 0 {
 		if err := gathered.read(body, sub, rows, wide); err != nil {
 			w.fail(err)
@@ -897,6 +1039,10 @@ func (gathered *tableColumns) read(body []byte, sub *typePlan, rows int, wide bo
 			}
 			continue
 		}
+		if field := &sub.fields[index]; field.listsColumn() {
+			gathered.readList(&columns, field, index, rows, false)
+			continue
+		}
 		gathered.readColumn(&columns, &sub.fields[index], index, rows)
 	}
 	return columns.Err()
@@ -913,6 +1059,13 @@ func (gathered *tableColumns) read8(columns *wire.Reader8, sub *typePlan, rows i
 			}
 			continue
 		}
+		if field := &sub.fields[index]; field.linksPage() {
+			gathered.readPage(columns, field, index, rows)
+			continue
+		} else if field.listsColumn() {
+			gathered.readList(columns, field, index, rows, true)
+			continue
+		}
 		gathered.readColumn(columns, &sub.fields[index], index, rows)
 	}
 	return columns.Err()
@@ -921,41 +1074,101 @@ func (gathered *tableColumns) read8(columns *wire.Reader8, sub *typePlan, rows i
 // tableRows is the transpose itself: rows objects, without the array around
 // them, which a grouped table writes once for all its groups.
 func (w *walker) tableRows(sub *typePlan, gathered *tableColumns, rows int) {
-	clear(gathered.next)
+	gathered.restart()
 	for row := range rows {
 		if w.err != nil {
 			return
 		}
 		w.to.beginObject()
-		for index := range sub.fields {
-			field := &sub.fields[index]
-			w.to.key(sub.names[index])
-			op, at := field.op, row
-			if op == opPointer && gathered.present[index] {
-				op = field.elemOp
-				if presence := gathered.presence[index]; presence != nil {
-					if !wire.Present(presence, row) {
-						w.to.null()
-						continue
-					}
-					at = gathered.next[index]
-					gathered.next[index]++
-				}
-			}
-			switch {
-			case !gathered.present[index]:
-				// A column whose every value was zero is not written at all, and
-				// its absence is the whole of what says so — or, for a pointer
-				// column, that every row was nil.
-				w.zero(field)
-			case op == opString:
-				w.to.textBytes(elementAt(gathered.strings[index], at))
-			default:
-				w.columnValue(op, elementAt(gathered.ints[index], at))
-			}
-		}
+		w.rowFields(sub, gathered, row)
 		w.to.endObject()
 	}
+}
+
+// restart rewinds where each nullable column's next value is read from, and
+// each list column's next element, its pages' and element tables' included.
+func (gathered *tableColumns) restart() {
+	clear(gathered.next)
+	clear(gathered.cursor)
+	for index := range gathered.present {
+		if !gathered.present[index] {
+			continue
+		}
+		if page := gathered.pages[index]; page != nil {
+			page.restart()
+		}
+		if elements := gathered.lists[index]; elements != nil {
+			elements.restart()
+		}
+	}
+}
+
+// rowFields writes one row's fields into the object open for it, a paged row
+// type's next pages merged in as a record's are (walker.page).
+func (w *walker) rowFields(sub *typePlan, gathered *tableColumns, row int) {
+	for index := range sub.fields {
+		field := &sub.fields[index]
+		if field.linksPage() {
+			if gathered.present[index] {
+				w.rowFields(field.sub, gathered.pages[index], row)
+			} else {
+				w.absentPage(field.sub)
+			}
+			continue
+		}
+		w.to.key(sub.names[index])
+		if field.listsColumn() && gathered.present[index] {
+			w.listRows(field, gathered, index, row)
+			continue
+		}
+		op, at := field.op, row
+		if op == opPointer && gathered.present[index] {
+			op = field.elemOp
+			if presence := gathered.presence[index]; presence != nil {
+				if !wire.Present(presence, row) {
+					w.to.null()
+					continue
+				}
+				at = gathered.next[index]
+				gathered.next[index]++
+			}
+		}
+		switch {
+		case !gathered.present[index]:
+			// A column whose every value was zero is not written at all, and
+			// its absence is the whole of what says so — or, for a pointer
+			// column, that every row was nil.
+			w.zero(field)
+		case op == opString:
+			w.to.textBytes(elementAt(gathered.strings[index], at))
+		default:
+			w.columnValue(op, elementAt(gathered.ints[index], at))
+		}
+	}
+}
+
+// listRows writes one row's elements of a list column: the next of them in its
+// element table, as many as the row's length says. A row with none is what an
+// empty slice is in a record, which leaves it out.
+func (w *walker) listRows(field *planField, gathered *tableColumns, index, row int) {
+	n := int(elementAt(gathered.lengths[index], row))
+	if n == 0 {
+		w.zero(field)
+		return
+	}
+	if !w.enter() {
+		return
+	}
+	defer w.leave()
+	elements, start := gathered.lists[index], gathered.cursor[index]
+	gathered.cursor[index] += n
+	w.to.beginArray()
+	for element := start; element < start+n && w.err == nil; element++ {
+		w.to.beginObject()
+		w.rowFields(field.sub, elements, element)
+		w.to.endObject()
+	}
+	w.to.endArray()
 }
 
 // elementAt reads a column at a row, and answers zero past its end. A column

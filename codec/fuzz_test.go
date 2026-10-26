@@ -108,6 +108,25 @@ func FuzzUnmarshal(f *testing.F) {
 	} {
 		f.Add(must(Marshal(value)))
 	}
+	// Dictionary columns, plain and nullable, at both key widths.
+	dictPointers := dictPointerHolder{}
+	for index := range 40 {
+		status := dictStatuses[index%len(dictStatuses)]
+		row := dictPointerRow{ID: int32(index), Status: &status}
+		if index%3 == 0 {
+			row.Status = nil
+		}
+		dictPointers.Rows = append(dictPointers.Rows, row)
+		dictPointers.Wide = append(dictPointers.Wide, dictPointerWideRow{Currency: &dictCurrencies[index%len(dictCurrencies)]})
+	}
+	dictPlain := dictWideHolder{Rows: makeDictRows(20, 0), Wide: makeDictWideRows(20)}
+	lists := makeListHolder(12)
+	withDictionary(f, func() {
+		f.Add(must(Marshal(&dictPointers)))
+		f.Add(must(Marshal(&dictPlain)))
+		f.Add(must(Marshal(&lists)))
+	})
+	f.Add(must(Marshal(&lists)))
 	f.Add([]byte{rootStructNarrow, 0x01})
 	f.Add([]byte{rootStructWide, 0x00, 0x30})
 
@@ -123,13 +142,19 @@ func FuzzUnmarshal(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
+	dictSchema := must(SchemaOf(dictPointerHolder{}))
+	listSchema := must(SchemaOf(listHolder{}))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		fuzzDecode[fuzzNarrow](t, data)
 		fuzzDecode[fuzzWide](t, data)
 		fuzzDecode[nullTable](t, data)
 		fuzzDecode[wideNullTable](t, data)
 		fuzzDecode[wideParentNullTable](t, data)
-		for _, schema := range []*Schema{nil, narrowSchema, wideSchema, nullSchema} {
+		fuzzDecode[dictPointerHolder](t, data)
+		fuzzDecode[dictWideHolder](t, data)
+		fuzzDecode[listHolder](t, data)
+		fuzzDecode[listWideHolder](t, data)
+		for _, schema := range []*Schema{nil, narrowSchema, wideSchema, nullSchema, dictSchema, listSchema} {
 			if text, err := ToJSON(schema, data); err == nil && !json.Valid(text) {
 				t.Fatalf("ToJSON wrote invalid JSON: %q", text)
 			}

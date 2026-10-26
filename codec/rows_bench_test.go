@@ -135,11 +135,22 @@ func appendRowsByHand(buffer []byte, value *rowsNested) []byte {
 	return writer.Buffer
 }
 
+// The by-hand writer is the row path, which this shape no longer takes: an
+// order holding its lines is a table with a list column (listcolumn.go). Its
+// bytes still decode to the same value, and the table's are fewer.
 func TestRowsByHandIsTheFormat(t *testing.T) {
 	value := makeRowsNested(300)
-	want := must(MustCodec[rowsNested]().Encode(value))
-	if got := appendRowsByHand(nil, value); !bytes.Equal(got, want) {
-		t.Fatalf("by hand %d bytes, codec %d bytes", len(got), len(want))
+	table := must(MustCodec[rowsNested]().Encode(value))
+	rows := appendRowsByHand(nil, value)
+	if len(table) >= len(rows) {
+		t.Fatalf("by hand %d bytes, codec %d bytes", len(rows), len(table))
+	}
+	var back rowsNested
+	if err := Unmarshal(rows, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(must(Marshal(&back)), table) {
+		t.Fatal("the rows decode to another value")
 	}
 }
 

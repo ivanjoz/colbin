@@ -179,8 +179,8 @@ func TestPagesEvolve(t *testing.T) {
 	}
 }
 
-// A paged type inside another: as a field, as the element of a slice — which
-// stays a list, since a link is not a column — and behind a pointer.
+// A paged type inside another: as a field, as the element of a slice — a table
+// whose next pages are tables of the same rows — and behind a pointer.
 func TestAPagedTypeNests(t *testing.T) {
 	inner := pagedType(span(1, 300))
 	outer := reflect.StructOf([]reflect.StructField{
@@ -201,6 +201,118 @@ func TestAPagedTypeNests(t *testing.T) {
 
 	message := roundTrips(t, value)
 	sameJSON(t, must(ToJSON(must(SchemaOf(value.Interface())), message)), must(json.Marshal(value.Interface())))
+}
+
+// pagedRows is a slice of a paged row type, n rows of it, each with a few
+// fields set across the pages, some of them pointers.
+func pagedRows(structType reflect.Type, n int) reflect.Value {
+	holder := reflect.StructOf([]reflect.StructField{
+		{Name: "Head", Type: reflect.TypeFor[int32](), Tag: `cb:"1"`},
+		{Name: "Rows", Type: reflect.SliceOf(structType), Tag: `cb:"2"`},
+	})
+	value := reflect.New(holder)
+	value.Elem().Field(0).SetInt(3)
+	rows := reflect.MakeSlice(reflect.SliceOf(structType), n, n)
+	ids := make([]int, 0, structType.NumField())
+	for index := range structType.NumField() {
+		var id int
+		fmt.Sscanf(structType.Field(index).Name, "F%d", &id)
+		ids = append(ids, id)
+	}
+	for row := range n {
+		var set []int
+		for at, id := range ids {
+			if (row+at)%3 != 0 {
+				set = append(set, id)
+			}
+		}
+		rows.Index(row).Set(pagedValue(structType, set).Elem())
+	}
+	value.Elem().Field(1).Set(rows)
+	return value
+}
+
+// pagedPointerType is a paged type with pointer fields on its later pages.
+func pagedPointerType() reflect.Type {
+	fields := []reflect.StructField{
+		{Name: "F1", Type: reflect.TypeFor[int32](), Tag: `cb:"1"`},
+		{Name: "F2", Type: reflect.TypeFor[string](), Tag: `cb:"2"`},
+		{Name: "P1", Type: reflect.TypeFor[*string](), Tag: `cb:"300"`},
+		{Name: "P2", Type: reflect.TypeFor[*float64](), Tag: `cb:"301"`},
+		{Name: "F3", Type: reflect.TypeFor[float64](), Tag: `cb:"302"`},
+		{Name: "P3", Type: reflect.TypeFor[*int64](), Tag: `cb:"700"`},
+	}
+	return reflect.StructOf(fields)
+}
+
+// A slice of a paged type is a table: its first page's columns, and under the
+// link a table of the same rows holding the next page's, and so on. It reads
+// back, and walks to the JSON encoding/json writes, as the list it was before.
+func TestAPagedTypeIsATable(t *testing.T) {
+	for _, testCase := range []struct {
+		structType reflect.Type
+		rows       int
+	}{
+		{pagedType(span(1, 600)), 40},
+		{pagedType(append(span(1, 3), span(256, 260)...)), 300},
+		{pagedType(append(span(1, 3), span(256, 260)...)), 70_000},
+		{reflect.TypeFor[sparsePages](), 50},
+		{pagedPointerType(), 500},
+	} {
+		structType := testCase.structType
+		if plan := must(planFor(structType)); !plan.canTable {
+			t.Fatalf("%v is not a table", structType)
+		}
+		value := pagedRows(structType, testCase.rows)
+		if structType == pagedPointerType() {
+			value = pagedPointerRows(testCase.rows)
+		}
+		message := roundTrips(t, value)
+		schema := must(SchemaOf(value.Interface()))
+		want := must(json.Marshal(value.Interface()))
+		sameJSON(t, must(ToJSON(schema, message)), want)
+		sameJSON(t, must(ToJSON(nil, must(MarshalSelfDescribing(value.Interface())))), want)
+		var dict []byte
+		withDictionary(t, func() { dict = must(Marshal(value.Interface())) })
+		back := reflect.New(value.Elem().Type())
+		if err := Unmarshal(dict, back.Interface()); err != nil || !reflect.DeepEqual(back.Elem().Interface(), value.Elem().Interface()) {
+			t.Fatalf("%v: with dictionaries: %v", structType, err)
+		}
+		sameJSON(t, must(ToJSON(schema, dict)), want)
+		for cut := range min(len(message)-1, 200) {
+			_ = Unmarshal(message[:len(message)-1-cut], reflect.New(value.Elem().Type()).Interface())
+			_, _ = ToJSON(schema, message[:len(message)-1-cut])
+		}
+	}
+}
+
+func pagedPointerRows(n int) reflect.Value {
+	structType := pagedPointerType()
+	holder := reflect.StructOf([]reflect.StructField{
+		{Name: "Rows", Type: reflect.SliceOf(structType), Tag: `cb:"1"`},
+	})
+	value := reflect.New(holder)
+	rows := reflect.MakeSlice(reflect.SliceOf(structType), n, n)
+	for row := range n {
+		record := rows.Index(row)
+		record.Field(0).SetInt(int64(row))
+		record.Field(1).SetString([]string{"a", "b", "c"}[row%3])
+		if row%2 == 0 {
+			s := []string{"x", "y"}[row%4/2]
+			record.Field(2).Set(reflect.ValueOf(&s))
+		}
+		if row%5 != 0 {
+			f := float64(row) / 4
+			record.Field(3).Set(reflect.ValueOf(&f))
+		}
+		record.Field(4).SetFloat(float64(row) * 1.5)
+		if row%7 == 0 {
+			i := int64(-row)
+			record.Field(5).Set(reflect.ValueOf(&i))
+		}
+	}
+	value.Elem().Field(0).Set(rows)
+	return value
 }
 
 // sparsePages has ids on its first and third pages and none on its second,

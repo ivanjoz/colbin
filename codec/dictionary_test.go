@@ -159,6 +159,81 @@ func TestDictionaryRoundTripWideParent(t *testing.T) {
 	t.Logf("%d bytes → %d with dictionaries", len(plain), len(message))
 }
 
+// dictPointerRow has string pointer columns at four key bits and at eight.
+type dictPointerRow struct {
+	ID     int32   `cb:"1"`
+	Status *string `cb:"2"`
+	Empty  *string `cb:"3"`
+	Note   *string `cb:"4"`
+}
+
+type dictPointerWideRow struct {
+	ID       int32   `cb:"1"`
+	Currency *string `cb:"20"`
+	Country  *string `cb:"21"`
+}
+
+type dictPointerHolder struct {
+	Rows []dictPointerRow     `cb:"1"`
+	Wide []dictPointerWideRow `cb:"2"`
+}
+
+// A pointer string column goes out as ids too: the plain dictionary column when
+// every row holds a value, and otherwise the presence and the ids of the rows
+// present. Nil, absent and empty rows all come back as they went.
+func TestDictionaryPointerColumns(t *testing.T) {
+	ptr := func(s string) *string { return &s }
+	for _, n := range []int{tableThreshold, 100, 1000, 20_000} {
+		var value dictPointerHolder
+		for index := range n {
+			row := dictPointerRow{ID: int32(index), Note: ptr(fmt.Sprintf("note %d", index))}
+			if index%3 != 0 {
+				row.Status = ptr(dictStatuses[index%len(dictStatuses)])
+			}
+			if index%5 == 0 {
+				row.Empty = ptr("")
+			}
+			value.Rows = append(value.Rows, row)
+			wide := dictPointerWideRow{ID: int32(index), Currency: ptr(dictCurrencies[index%len(dictCurrencies)])}
+			if index%7 == 1 {
+				wide.Country = ptr(dictCountries[index%len(dictCountries)])
+			}
+			value.Wide = append(value.Wide, wide)
+		}
+		plain := must(Marshal(&value))
+		var message []byte
+		withDictionary(t, func() { message = must(Marshal(&value)) })
+		if message[0]&rootDictionary == 0 || len(message) >= len(plain) {
+			t.Fatalf("n=%d: root %#02x, %d bytes with dictionaries, %d without", n, message[0], len(message), len(plain))
+		}
+		dicts, _, err := parseDictSection(message[1:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Status, Currency and Country; Empty holds nothing but "", Note does
+		// not repeat. On a few rows, the sparse columns do not pay.
+		if n >= 100 && len(dicts) != 3 {
+			t.Fatalf("n=%d: %d dictionaries, want 3: %q", n, len(dicts), dicts)
+		}
+		var back dictPointerHolder
+		if err := Unmarshal(message, &back); err != nil {
+			t.Fatalf("n=%d: %v", n, err)
+		}
+		if !reflect.DeepEqual(back, value) {
+			t.Fatalf("n=%d: round-tripped wrong", n)
+		}
+		var handled dictPointerHolder
+		if err := MustCodec[dictPointerHolder]().Unmarshal(message, &handled); err != nil || !reflect.DeepEqual(handled, value) {
+			t.Fatalf("n=%d: Codec.Unmarshal round-tripped wrong: %v", n, err)
+		}
+		for cut := range min(len(message), 400) {
+			var partial dictPointerHolder
+			_ = Unmarshal(message[:len(message)-1-cut], &partial)
+		}
+		t.Logf("n=%d: %d bytes → %d with dictionaries", n, len(plain), len(message))
+	}
+}
+
 // Tables of one row type at two depths use one dictionary per field, not one
 // per table.
 func TestDictionaryIsPerField(t *testing.T) {
@@ -406,13 +481,63 @@ func TestDictionaryCorruptionDoesNotPanic(t *testing.T) {
 }
 
 // What does not read a dictionary yet refuses it rather than misreading it.
-func TestDictionaryRefusedWhereUnsupported(t *testing.T) {
-	value := makeDictHolder(50)
-	var message []byte
-	withDictionary(t, func() { message = must(Marshal(&value)) })
-	schema := must(SchemaFor[dictHolder]())
-	if _, err := ToJSON(schema, message); err == nil {
-		t.Fatal("ToJSON read a message with dictionaries")
+// The schema walk reads a message with dictionaries as the one without: the
+// same JSON and the same DecodeAny value, pointer columns and all.
+func TestDictionaryWalk(t *testing.T) {
+	values := []any{&dictHolder{}, &dictWideHolder{}, &dictPointerHolder{}}
+	fill := []func(int){
+		func(n int) { *values[0].(*dictHolder) = makeDictHolder(n) },
+		func(n int) {
+			*values[1].(*dictWideHolder) = dictWideHolder{Head: 1, Rows: makeDictRows(n, 1), Wide: makeDictWideRows(n)}
+		},
+		func(n int) {
+			ptr := func(s string) *string { return &s }
+			holder := values[2].(*dictPointerHolder)
+			*holder = dictPointerHolder{}
+			for index := range n {
+				row := dictPointerRow{ID: int32(index), Empty: ptr("")}
+				if index%3 != 0 {
+					row.Status = ptr(dictStatuses[index%len(dictStatuses)])
+				}
+				holder.Rows = append(holder.Rows, row)
+				holder.Wide = append(holder.Wide, dictPointerWideRow{
+					ID: int32(index), Currency: ptr(dictCurrencies[index%len(dictCurrencies)])})
+			}
+		},
+	}
+	schemas := []*Schema{must(SchemaFor[dictHolder]()), must(SchemaFor[dictWideHolder]()), must(SchemaFor[dictPointerHolder]())}
+	for at, value := range values {
+		for _, n := range []int{50, 3000} {
+			fill[at](n)
+			plain := must(Marshal(value))
+			var message []byte
+			withDictionary(t, func() { message = must(Marshal(value)) })
+			if message[0]&rootDictionary == 0 {
+				t.Fatalf("%T n=%d: no dictionary was used", value, n)
+			}
+			want, err := ToJSON(schemas[at], plain)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := ToJSON(schemas[at], message)
+			if err != nil {
+				t.Fatalf("%T n=%d: %v", value, n, err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("%T n=%d: JSON differs with dictionaries", value, n)
+			}
+			wantAny := must(DecodeAny(schemas[at], plain))
+			gotAny, err := DecodeAny(schemas[at], message)
+			if err != nil || !reflect.DeepEqual(gotAny, wantAny) {
+				t.Fatalf("%T n=%d: DecodeAny differs with dictionaries: %v", value, n, err)
+			}
+			if _, err := ToJSON(nil, message); err == nil {
+				t.Fatalf("%T n=%d: walked without a schema", value, n)
+			}
+			for cut := range min(len(message)-1, 300) {
+				_, _ = ToJSON(schemas[at], message[:len(message)-1-cut])
+			}
+		}
 	}
 }
 

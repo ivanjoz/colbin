@@ -247,6 +247,24 @@ func (e *dictEntries) rebuild() bool {
 	return true
 }
 
+// maxSpareBytes is the most index and values a dictionary keeps for the next
+// message: a dictionary of every one of maxDictEntries is 4 MB of index.
+const maxSpareBytes = 1 << 20
+
+// empty forgets every value, and the strings with them, keeping the tables for
+// another message's dictionary. It reports false when they are too large to be
+// worth keeping.
+func (e *dictEntries) empty() bool {
+	clear(e.values)
+	e.values = e.values[:0]
+	e.number = -1
+	if cap(e.short)*int(unsafe.Sizeof(dictShort{}))+cap(e.long)*4+cap(e.values)*16 > maxSpareBytes {
+		return false
+	}
+	e.rebuild()
+	return true
+}
+
 // rollback forgets the entries a column added before it was refused.
 //
 // Linear probing has no cheap delete, so the index is rebuilt from what is

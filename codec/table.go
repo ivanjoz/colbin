@@ -82,9 +82,28 @@ func columnable(op fieldOp) bool {
 
 // transposable reports whether every field of a plan is columnable, which is
 // what makes a slice of that struct a candidate for a table. A pointer to a
-// scalar is: it goes out as a nullable column (nullable.go).
+// scalar is: it goes out as a nullable column (nullable.go). So is the link to
+// a paged type's next page whose fields are, which goes out as a table of the
+// same rows under the link's key (appendPageTable), and a slice of structs that
+// are, which goes out as a list column (listcolumn.go).
 func (plan *typePlan) transposable() bool {
+	return plan.transposableAt(0)
+}
+
+func (plan *typePlan) transposableAt(lists int) bool {
 	for _, field := range plan.fields {
+		if field.linksPage() {
+			if !field.sub.transposableAt(lists) {
+				return false
+			}
+			continue
+		}
+		if field.listsColumn() {
+			if lists == maxListDepth || !field.sub.transposableAt(lists+1) {
+				return false
+			}
+			continue
+		}
 		if !columnable(field.op) && field.op != opPointer {
 			return false
 		}
@@ -158,6 +177,8 @@ type columnBuffers struct {
 	// has reserved, which is what release judges a large buffer by.
 	usedInts, usedStrings, usedInts32 int
 	usedNullStrings                   int
+	// lists is the list columns' scratch, a level per depth. See listcolumn.go.
+	lists []listBuffers
 }
 
 var columnPool sync.Pool // *columnBuffers
@@ -216,6 +237,15 @@ func (buf *scratch) release() {
 		columns.nullStrings = nil
 	}
 	columns.nulls = columns.nulls[:0]
+	for index := range columns.lists {
+		level := &columns.lists[index]
+		if !keepPooled(cap(level.rows), 0) {
+			level.rows = nil
+		}
+		if !keepPooled(cap(level.lengths), 0) {
+			level.lengths = nil
+		}
+	}
 	columns.usedInts, columns.usedStrings, columns.usedInts32, columns.usedNullStrings = 0, 0, 0, 0
 	columnPool.Put(columns)
 }
@@ -366,12 +396,19 @@ func appendColumns(
 	rows := slice.len
 	var choices []dictColumn
 	if dict != nil {
-		choices = dict.tableIDs(plan, strings, rows)
+		choices = dict.tableIDs(plan, strings, nulls, rows)
 	}
 	for index := range plan.fields {
 		column := &plan.fields[index]
+		if column.op == opStruct || column.op == opStructs {
+			continue // a page link or a list column, written after the rest
+		}
 		if column.op == opPointer {
-			writePointerColumn(writer, column.key, &nulls[0], rows, column.elemOp == opString)
+			var choice *dictColumn
+			if column.elemOp == opString && len(choices) != 0 {
+				choice, choices = &choices[0], choices[1:]
+			}
+			writePointerColumn(writer, column.key, &nulls[0], rows, column.elemOp, choice)
 			nulls = nulls[1:]
 			continue
 		}
@@ -396,9 +433,38 @@ func appendColumns(
 			narrow = narrow[rows:]
 			continue
 		}
-		writer.Column(column.key, ints[:rows:rows])
+		if column.op == opFloat64 {
+			writer.FloatColumn(column.key, ints[:rows:rows])
+		} else {
+			writer.Column(column.key, ints[:rows:rows])
+		}
 		ints = ints[rows:]
 	}
+	writer.Buffer = appendListColumns(writer.Buffer, plan, slice, stride, true, buf, dict)
+	if last := len(plan.fields) - 1; last >= 0 && plan.fields[last].linksPage() {
+		appendPageTable(writer, &plan.fields[last], slice, stride, buf, dict)
+	}
+}
+
+// appendPageTable writes the next page of a paged row type: a table of the same
+// rows under the link's key, holding the page's columns — what the page is in a
+// record, a struct under the link, turned into columns as the record was. Like
+// that struct it is left out when it holds nothing.
+//
+// It comes after every other column of its page, because it gathers into the
+// same scratch they were gathered into.
+func appendPageTable(
+	writer *wire.Writer8, link *planField, slice *sliceHeader, stride uintptr, buf *scratch, dict *dictionaries,
+) {
+	before := len(writer.Buffer)
+	mark := writer.OpenTable(link.key, slice.len)
+	start := len(writer.Buffer)
+	appendColumns(writer, link.sub, slice, stride, buf, dict)
+	if len(writer.Buffer) == start {
+		writer.Buffer = writer.Buffer[:before]
+		return
+	}
+	writer.Close(mark)
 }
 
 // gatherChunk is how many rows gatherTable transposes at a time: few enough
@@ -435,8 +501,10 @@ func gatherTable(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratc
 		for index := range plan.fields {
 			column := &plan.fields[index]
 			switch {
-			case column.op == opPointer:
-				// Gathered by gatherPointers, into buffers of their own.
+			case column.op == opPointer, column.op == opStruct, column.op == opStructs:
+				// Gathered by gatherPointers, into buffers of their own, a page
+				// link by its page's gatherTable (appendPageTable) and a list
+				// column by its elements' (appendListColumn).
 			case column.op == opString:
 				payloads[stringColumn] += gatherStrings(strings[stringAt+start:stringAt+end], &chunk, stride, column.offset)
 				stringAt += rows
@@ -502,7 +570,7 @@ func gatherScanned(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scra
 	for index := range plan.fields {
 		field := &plan.fields[index]
 		switch {
-		case field.op == opPointer:
+		case field.op == opPointer, field.op == opStruct, field.op == opStructs:
 		case field.op == opString:
 			payloads[stringColumn] = gatherStrings(strings[stringAt:stringAt+rows], slice, stride, field.offset)
 			stringAt += rows
@@ -529,7 +597,7 @@ const prefetchDist = 8
 func (plan *typePlan) intWidths() (narrow, wide int) {
 	for index := range plan.fields {
 		switch op := plan.fields[index].op; {
-		case op == opString, op == opPointer:
+		case op == opString, op == opPointer, op == opStruct, op == opStructs:
 		case op.fitsInt32():
 			narrow++
 		default:
@@ -572,11 +640,11 @@ func gather32[T any](dst []int32, base unsafe.Pointer, stride uintptr, widen fun
 
 // columnCounts is how many of a row type's fields go out as integer columns
 // and how many as string columns, pointer columns aside: those have buffers of
-// their own (nullable.go).
+// their own (nullable.go). A page link is its page's columns, not one.
 func (plan *typePlan) columnCounts() (ints, strings int) {
 	for index := range plan.fields {
 		switch plan.fields[index].op {
-		case opPointer:
+		case opPointer, opStruct, opStructs:
 		case opString:
 			strings++
 		default:
@@ -807,7 +875,23 @@ func readColumns(columns *wire.Reader8, field *planField, data unsafe.Pointer, r
 			continue
 		}
 		if column.op == opPointer {
-			readPointerColumn(columns, column, data, field.stride, rows, buf)
+			if column.elemOp != opString || buf.dict == nil ||
+				!buf.dict.readDictPointer(columns, column, data, field.stride, rows) {
+				readPointerColumn(columns, column, data, field.stride, rows, buf)
+			}
+			continue
+		}
+		if column.linksPage() || column.listsColumn() {
+			// The columns decoded so far go into the rows first: the page's
+			// decode, or the element table's, takes the same scratch. Any other
+			// struct is no column, and a message that says it is one is read
+			// below as a column of nothing (scatterInts).
+			table.flush()
+			if column.linksPage() {
+				readPageTable(columns, column, field.stride, data, rows, buf)
+			} else {
+				readListColumn(columns, column, field.stride, data, rows, true, buf)
+			}
 			continue
 		}
 		if column.op == opString {
@@ -834,7 +918,31 @@ func readColumns(columns *wire.Reader8, field *planField, data unsafe.Pointer, r
 	table.finish()
 }
 
-var errColumnLength = errors.New("colbin: a table column holds a different number of values than the table has rows")
+var (
+	errColumnLength = errors.New("colbin: a table column holds a different number of values than the table has rows")
+	errPageRows     = errors.New("colbin: a paged table's next page holds a different number of rows than the table")
+)
+
+// readPageTable reads the next page of a paged row type, written by
+// appendPageTable, into the same rows.
+func readPageTable(columns *wire.Reader8, link *planField, stride uintptr, data unsafe.Pointer, rows int, buf *scratch) {
+	pageRows, groupRows, body, ok := columns.Table()
+	if !ok {
+		return
+	}
+	if pageRows != rows || groupRows != 0 {
+		columns.Fail(errPageRows)
+		return
+	}
+	if !buf.enter() {
+		columns.Fail(buf.err)
+		return
+	}
+	defer buf.leave()
+	page := wire.NewReader8(body)
+	readColumns(&page, &planField{sub: link.sub, stride: stride}, data, rows, buf)
+	columns.Fail(page.Err())
+}
 
 // tableDecode is a table being decoded: every column is decoded first, into
 // the transposition buffer, and only then scattered into the rows, a chunk of

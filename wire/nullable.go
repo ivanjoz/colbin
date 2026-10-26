@@ -31,8 +31,6 @@ package wire
 import (
 	"errors"
 	"math/bits"
-
-	"github.com/ivanjoz/colbin/column"
 )
 
 // ErrBadPresence is a nullable column whose presence and values disagree.
@@ -53,9 +51,10 @@ func Present(presence []byte, row int) bool { return presence[row>>3]&(1<<(row&7
 
 // ColumnKeep is Column for a pointer column in which every row holds a value:
 // written even when every value is zero, because its absence would mean nil.
-func (w *Writer8) ColumnKeep(key uint8, values []int64) {
+// float says the values are a float64 column's bit patterns (FloatColumn).
+func (w *Writer8) ColumnKeep(key uint8, values []int64, float bool) {
 	mark := w.openSized(key, classCol, 0, len(values))
-	w.Buffer = column.AppendArray(w.Buffer, values)
+	w.Buffer = appendInts(w.Buffer, values, float)
 	w.Close(mark)
 }
 
@@ -67,9 +66,9 @@ func (w *Writer8) StringColumnKeep(key uint8, values []string, payload int) {
 
 // NullableColumn writes the integer column of a pointer field in which some rows
 // are nil: their presence, then the values of the rows present.
-func (w *Writer8) NullableColumn(key uint8, presence []byte, values []int64) {
+func (w *Writer8) NullableColumn(key uint8, presence []byte, values []int64, float bool) {
 	mark := w.openSized(key, classCol, nullableDetail, len(presence)+len(values))
-	w.Buffer = column.AppendArray(append(w.Buffer, presence...), values)
+	w.Buffer = appendInts(append(w.Buffer, presence...), values, float)
 	w.Close(mark)
 }
 
@@ -83,9 +82,9 @@ func (w *Writer8) NullableStrings(key uint8, presence []byte, values []string, p
 }
 
 // ColumnKeep is Writer8.ColumnKeep with four key bits.
-func (w *Writer) ColumnKeep(key uint8, values []int64) {
+func (w *Writer) ColumnKeep(key uint8, values []int64, float bool) {
 	mark := w.openNarrowSized(key, 0, len(values))
-	w.Buffer = column.AppendArray(w.Buffer, values)
+	w.Buffer = appendInts(w.Buffer, values, float)
 	w.Close(mark)
 }
 
@@ -95,9 +94,9 @@ func (w *Writer) StringColumnKeep(key uint8, values []string, payload int) {
 }
 
 // NullableColumn is Writer8.NullableColumn with four key bits.
-func (w *Writer) NullableColumn(key uint8, presence []byte, values []int64) {
+func (w *Writer) NullableColumn(key uint8, presence []byte, values []int64, float bool) {
 	mark := w.openNarrowSized(key, narrowNullable, len(presence)+len(values))
-	w.Buffer = column.AppendArray(append(w.Buffer, presence...), values)
+	w.Buffer = appendInts(append(w.Buffer, presence...), values, float)
 	w.Close(mark)
 }
 

@@ -89,6 +89,11 @@ type dictionaries struct {
 	usedIDs int
 	// read is the reader's: the section's dictionaries, by number.
 	read [][]string
+	// spare are an earlier message's dictionaries, emptied, whose index tables
+	// entriesFor hands out again: allocating and regrowing them per message was
+	// most of what a dictionary encode allocated, and the collections it set
+	// off cost a third of a Public BI encode.
+	spare []*dictEntries
 }
 
 var dictPool sync.Pool // *dictionaries
@@ -106,6 +111,11 @@ func newDictionaries() *dictionaries {
 // release hands d back holding nothing of the message: its dictionaries and
 // the strings in them go, and only the buffers stay.
 func (d *dictionaries) release() {
+	for _, entries := range d.byField {
+		if entries.empty() {
+			d.spare = append(d.spare, entries)
+		}
+	}
 	clear(d.byField)
 	clear(d.written)
 	d.written = d.written[:0]
@@ -155,6 +165,9 @@ func appendDictRecord(dst []byte, root byte, plan *typePlan, record unsafe.Point
 // A column not refused goes out as ids into dictionary number.
 type dictColumn struct {
 	entries *dictEntries
+	// values are the column's strings, one per row or, for a pointer column,
+	// one per row present; ids has one for each.
+	values  []string
 	ids     []int64
 	number  int
 	refused bool
@@ -171,42 +184,61 @@ type dictColumn struct {
 // new dictionary entries and the ids cost less than the strings.
 //
 // strings is the table's string columns back to back, rows values each, in
-// field order, as gatherTable leaves them; the result has one entry per string
-// column, in the same order, and is good until the next call. The columns are
+// field order, as gatherTable leaves them, and nulls its pointer columns as
+// gatherPointers does; the result has one entry per string column, pointer or
+// not, in field order, and is good until the next call. The columns are
 // walked dictScanChunk rows at a time.
 //
 // Reading the strings straight from the rows, with a stride, instead of from
 // the gathered headers saved their copy and measured no faster on TPC-H.
-func (d *dictionaries) tableIDs(plan *typePlan, strings []string, rows int) []dictColumn {
+func (d *dictionaries) tableIDs(plan *typePlan, strings []string, nulls []nullColumn, rows int) []dictColumn {
 	columns := d.columns[:0]
+	need := 0
 	for index := range plan.fields {
-		if plan.fields[index].op == opString {
-			columns = append(columns, dictColumn{entries: d.entriesFor(plan, plan.fields[index].key)})
+		field := &plan.fields[index]
+		var values []string
+		switch field.op {
+		case opString:
+			values, strings = strings[:rows:rows], strings[rows:]
+		case opPointer:
+			null := &nulls[0]
+			nulls = nulls[1:]
+			if field.elemOp != opString {
+				continue
+			}
+			// The rows present only, which is what a nullable column's ids
+			// stand for (wire.NullableDictColumn).
+			values = null.strings
+		default:
+			continue
 		}
+		columns = append(columns, dictColumn{entries: d.entriesFor(plan, field.key), values: values})
+		need += len(values)
 	}
-	need := rows * len(columns)
 	if cap(d.ids) < need {
 		d.ids = make([]int64, need)
 	}
 	d.usedIDs = max(d.usedIDs, need)
+	ids := d.ids[:need]
 	for at := range columns {
 		column := &columns[at]
-		column.ids = d.ids[at*rows : (at+1)*rows : (at+1)*rows]
+		n := len(column.values)
+		column.ids, ids = ids[:n:n], ids[n:]
 		column.before = len(column.entries.values)
 		// A column whose rows are more than half new values has nothing to
 		// sell, and finding that out early saves hashing the rest of it.
-		column.newLimit = column.before + rows/2
+		column.newLimit = column.before + n/2
+		column.refused = n == 0
 	}
 	for start := 0; start < rows; start += dictScanChunk {
-		end := min(start+dictScanChunk, rows)
 		for at := range columns {
-			if column := &columns[at]; !column.refused {
-				column.scan(strings[at*rows+start:at*rows+end], start)
+			if column := &columns[at]; !column.refused && start < len(column.values) {
+				column.scan(column.values[start:min(start+dictScanChunk, len(column.values))], start)
 			}
 		}
 	}
 	for at := range columns {
-		d.decide(&columns[at], rows)
+		d.decide(&columns[at])
 	}
 	d.columns = columns
 	return columns
@@ -221,7 +253,11 @@ func (d *dictionaries) entriesFor(plan *typePlan, key uint8) *dictEntries {
 		if d.byField == nil {
 			d.byField = map[dictField]*dictEntries{}
 		}
-		entries = newDictEntries()
+		if last := len(d.spare) - 1; last >= 0 {
+			entries, d.spare = d.spare[last], d.spare[:last]
+		} else {
+			entries = newDictEntries()
+		}
 		d.byField[field] = entries
 	}
 	return entries
@@ -304,13 +340,13 @@ func (c *dictColumn) refuse() {
 // decide weighs a scanned column's ids and new entries against its strings,
 // refusing it when they do not pay, and numbers its dictionary the first time
 // a column uses it.
-func (d *dictionaries) decide(c *dictColumn, rows int) {
+func (d *dictionaries) decide(c *dictColumn) {
 	if c.refused {
 		return
 	}
 	entries := c.entries
 	number := entries.number
-	cost := c.added + idBytes(rows, len(entries.values))
+	cost := c.added + idBytes(len(c.ids), len(entries.values))
 	if number < 0 {
 		number = len(d.written)
 		cost += lengthBytes(len(entries.values)) // the dictionary's own count
@@ -488,6 +524,50 @@ func (d *dictionaries) readDictColumn(columns *wire.Reader, rows int, slot []str
 	}
 	d.ids, d.usedIDs = ids[:0], max(d.usedIDs, len(ids))
 	return d.resolve(columns.Fail, number, ids, rows, slot)
+}
+
+// dictColumnReader is what a pointer column written as ids is read through, at
+// either key width.
+type dictColumnReader interface {
+	IsDictColumn() bool
+	IsNullableDictColumn() bool
+	DictColumn(rows int, dst []int64) (int, []int64, bool)
+	NullableDictColumn(rows int, dst []int64) (int, []byte, []int64, bool)
+	Fail(err error)
+}
+
+// readDictPointer reads a pointer string column written as ids, in either
+// form, and points each row present at its string. It reads nothing and
+// reports false when the column at the cursor is not one.
+func (d *dictionaries) readDictPointer(
+	columns dictColumnReader, field *planField, data unsafe.Pointer, stride uintptr, rows int,
+) bool {
+	var number int
+	var presence []byte
+	var ids []int64
+	var ok bool
+	switch {
+	case columns.IsDictColumn():
+		number, ids, ok = columns.DictColumn(rows, d.ids)
+	case columns.IsNullableDictColumn():
+		number, presence, ids, ok = columns.NullableDictColumn(rows, d.ids)
+	default:
+		return false
+	}
+	if !ok {
+		return true
+	}
+	d.ids, d.usedIDs = ids[:0], max(d.usedIDs, len(ids))
+	// The array every row of the column points into, as readPointerColumn's.
+	values := make([]string, len(ids))
+	want := rows
+	if presence != nil {
+		want = len(ids) // the presence's count, which the column was decoded to
+	}
+	if d.resolve(columns.Fail, number, ids, want, values) {
+		pointRows(values, presence, data, stride, field.offset, rows)
+	}
+	return true
 }
 
 // resolve turns ids into their dictionary's strings, in slot.

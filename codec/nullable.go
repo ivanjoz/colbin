@@ -170,26 +170,34 @@ func gatherPointerStrings(dst []string, presence []byte, base unsafe.Pointer, st
 // columnWriter is what a pointer column is written through, at either key
 // width.
 type columnWriter interface {
-	ColumnKeep(key uint8, values []int64)
+	ColumnKeep(key uint8, values []int64, float bool)
 	StringColumnKeep(key uint8, values []string, payload int)
-	NullableColumn(key uint8, presence []byte, values []int64)
+	NullableColumn(key uint8, presence []byte, values []int64, float bool)
 	NullableStrings(key uint8, presence []byte, values []string, payload int)
+	DictColumn(key uint8, dict int, ids []int64)
+	NullableDictColumn(key uint8, dict int, presence []byte, ids []int64)
 }
 
 // writePointerColumn writes a gathered pointer column of a table of rows rows
 // in the form it takes: nothing when no row holds a value, the plain column
-// when every one does, and a nullable column otherwise.
-func writePointerColumn(writer columnWriter, key uint8, column *nullColumn, rows int, isString bool) {
+// when every one does, and a nullable column otherwise. A string column that
+// tableIDs took, choice, goes out as ids in the same three forms.
+func writePointerColumn(writer columnWriter, key uint8, column *nullColumn, rows int, elemOp fieldOp, choice *dictColumn) {
+	float := elemOp == opFloat64
 	switch {
 	case column.present == 0:
-	case column.present == rows && isString:
+	case choice != nil && !choice.refused && column.present == rows:
+		writer.DictColumn(key, choice.number, choice.ids)
+	case choice != nil && !choice.refused:
+		writer.NullableDictColumn(key, choice.number, column.presence, choice.ids)
+	case column.present == rows && elemOp == opString:
 		writer.StringColumnKeep(key, column.strings, column.payload)
 	case column.present == rows:
-		writer.ColumnKeep(key, column.ints)
-	case isString:
+		writer.ColumnKeep(key, column.ints, float)
+	case elemOp == opString:
 		writer.NullableStrings(key, column.presence, column.strings, column.payload)
 	default:
-		writer.NullableColumn(key, column.presence, column.ints)
+		writer.NullableColumn(key, column.presence, column.ints, float)
 	}
 }
 
