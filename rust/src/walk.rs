@@ -18,6 +18,7 @@
 //! implementations agree, and the cross-language test compares parsed values for
 //! exactly this reason.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::Error;

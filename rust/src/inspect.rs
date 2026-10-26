@@ -47,7 +47,7 @@ use crate::plan::{
     OP_STRUCT, OP_STRUCTS, OP_UINT8, OP_UINT16, OP_UINT16S, OP_UINT32, OP_UINT32S, OP_UINT64,
     OP_UINT64S, Plan, PlanField,
 };
-use crate::section::{self, Schema};
+use crate::section::Schema;
 use crate::wire::{Reader, Reader8, Runs};
 
 /// How many of a list's elements get a node of their own.
@@ -56,10 +56,8 @@ const ELEMENT_LIMIT: usize = 64;
 /// How deep the tree goes, matching the decoder's bound.
 const MAX_DEPTH: u32 = 128;
 
-const ROOT_FIRST: u8 = 0xd0;
-const ROOT_WIDE: u8 = 0x08;
-const ROOT_SCHEMA: u8 = 0x04;
-const ROOT_GROUPED: u8 = 0x01;
+const ROOT_NARROW: u8 = 0xd0;
+const ROOT_WIDE: u8 = 0xd8;
 
 /// One node of the tree, built before it is written so a parent can hold its
 /// children's total.
@@ -92,43 +90,26 @@ impl Node {
 /// Any malformed message, a root this version does not assign, and a message
 /// that carries no section when none was passed.
 pub fn inspect(data: &[u8], schema: Option<&Schema>) -> Result<Vec<u8>, Error> {
-    if data.is_empty() {
-        return Err(Error::Truncated);
+    let split = crate::walk::split_root(data)?;
+    // Only a typed message has a field tree. The dictionary and dynamic roots
+    // are refused, which is also what leaves room for the format to grow.
+    if split.root != ROOT_NARROW && split.root != ROOT_WIDE {
+        return Err(Error::BadRoot(split.root));
     }
-    let root = data[0];
-    if root & 0xf0 != ROOT_FIRST {
-        return Err(Error::BadRoot(root));
-    }
-    // Wide, schema and grouped tables are assigned; the dictionary bit is not
-    // read here. The rest must be refused, which is what leaves room for the
-    // format to grow.
-    if root & !(ROOT_WIDE | ROOT_SCHEMA | ROOT_GROUPED) != ROOT_FIRST {
-        return Err(Error::BadRoot(root));
-    }
-
-    let mut held: Option<Schema> = None;
-    let mut at = 1;
-    let mut section_bytes = 0;
-    if root & ROOT_SCHEMA != 0 {
-        let parsed = section::parse(&data[1..])?;
-        section_bytes = parsed.size;
-        at = 1 + section_bytes;
-        held = Some(parsed);
-    } else if schema.is_none() {
-        return Err(Error::NoSchema);
-    }
+    let at = data.len() - split.body.len();
+    let section_bytes = split.schema.as_ref().map_or(0, |parsed| parsed.size);
     // A message that carries its own section is described by *that* section, and
     // a held one is ignored — which is what [`crate::walk`] does for the same
     // message under `decode`. The two disagreeing would put this walk's spans on
     // one reading of the body and the rendered JSON on another, and the hex view
     // would highlight bytes the values did not come from.
-    let plan_schema = match (&held, schema) {
+    let plan_schema = match (&split.schema, schema) {
         (Some(parsed), _) => parsed,
         (None, Some(passed)) => passed,
         (None, None) => return Err(Error::NoSchema),
     };
-    let body = data.get(at..).ok_or(Error::Truncated)?;
-    let wide = root & ROOT_WIDE != 0;
+    let body = split.body;
+    let wide = split.root == ROOT_WIDE;
 
     let mut walker = SpanWalker { depth: 0, rows: 1 };
     let fields = walker.run(plan_schema, body, wide, at)?;
@@ -142,7 +123,7 @@ pub fn inspect(data: &[u8], schema: Option<&Schema>) -> Result<Vec<u8>, Error> {
     sink.key_bytes(b"bodyBytes");
     sink.signed((data.len() - at) as i64);
     sink.key_bytes(b"rootBytes");
-    sink.signed(1);
+    sink.signed((at - section_bytes) as i64);
     sink.key_bytes(b"wide");
     sink.boolean(wide);
     sink.key_bytes(b"rows");
@@ -331,7 +312,13 @@ impl SpanWalker {
         self.enter()?;
         let sub_wide = sub.is_wide;
         for index in 0..count {
-            let start = elements.cursor();
+            // A list of one parks its cursor past the end until read; its element
+            // is the whole body, so it starts at the front.
+            let start = if elements.cursor() > elements.buf_len() {
+                0
+            } else {
+                elements.cursor()
+            };
             let element = elements.element().ok_or(Error::Truncated)?;
             if index < ELEMENT_LIMIT {
                 let inner = body_at + elements.cursor() - element.len();

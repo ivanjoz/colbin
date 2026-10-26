@@ -151,7 +151,7 @@ test('a table claiming an impossible row count is refused, not allocated', () =>
     (rows >> 16) & 0xff,
     (rows >> 24) & 0xff,
   ])
-  const message = Uint8Array.from([0xd0, ...body])
+  const message = Uint8Array.from(body)
   const got = wasm.exports.decode(put(wasm, message))
   assert.equal(got, -1)
   assert.match(failure(wasm), /rows|field id|truncated|ends inside/)

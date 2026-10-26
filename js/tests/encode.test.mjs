@@ -42,8 +42,10 @@ for (const document of documents) {
     const section = take(wasm, wasm.exports.section())
 
     assert.ok(message.length > 0, 'a message must have bytes')
-    assert.ok(message[0] >= 0xd0 && message[0] <= 0xdf, `root byte ${message[0].toString(16)}`)
-    assert.equal(message[0] & 0x04, 0, 'an out-of-band message carries no section')
+    // A typed narrow message has no root byte, so only a root there says "no section".
+    if (message[0] >= 0xd0 && message[0] <= 0xdf) {
+      assert.equal(message[0] & 0x04, 0, 'an out-of-band message carries no section')
+    }
 
     const back = decodeWith(section, message)
     JSON.parse(back)
@@ -65,9 +67,10 @@ for (const document of documents) {
     const inlineLen = must(wasm, encode(text, SELF_DESCRIBING), 'encode')
     const inline = take(wasm, inlineLen)
 
+    const rooted = plain[0] >= 0xd0 && plain[0] <= 0xdf
     assert.deepEqual(
       Array.from(inline.subarray(1 + section.length)),
-      Array.from(plain.subarray(1)),
+      Array.from(rooted ? plain.subarray(1) : plain),
     )
   })
 }
@@ -101,10 +104,10 @@ test('a sixteen-field object stays narrow and a seventeen-field one goes wide', 
   const wide = documents.find((d) => d.name === 'seventeen-fields')
 
   const nLen = must(wasm, encode(textOf(narrow), VERIFY), 'encode')
-  assert.equal(take(wasm, 1)[0] & 0x08, 0, 'sixteen fields fit four key bits')
+  assert.notEqual(take(wasm, 1)[0], 0xd8, 'sixteen fields fit four key bits')
 
   const wLen = must(wasm, encode(textOf(wide), VERIFY), 'encode')
-  assert.equal(take(wasm, 1)[0] & 0x08, 0x08, 'seventeen fields need eight')
+  assert.equal(take(wasm, 1)[0], 0xd8, 'seventeen fields need eight')
 })
 
 test('the self-check catches a message that does not read back', () => {

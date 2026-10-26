@@ -68,10 +68,8 @@ func TestEverySectionStandsAlone(t *testing.T) {
 		for _, one := range tier.cases {
 			t.Run(tier.name+"/"+one.Name, func(t *testing.T) {
 				message := unhex(t, one.Message)
-				if len(message) == 0 {
-					t.Fatal("the message is empty")
-				}
-				if wide := message[0]&0x08 != 0; wide != one.Wide {
+				// An empty message is a typed narrow struct with every field zero.
+				if wide := len(message) > 0 && message[0]&0xFB == 0xD8; wide != one.Wide {
 					t.Fatalf("wide is %v, the root byte says %v", one.Wide, wide)
 				}
 				schema, err := colbin.ParseSchema(unhex(t, one.Section))

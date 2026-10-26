@@ -104,8 +104,7 @@ fn what_the_encoder_writes_the_decoder_reads_back() {
         let (message, section_bytes) =
             encode(input, flags).unwrap_or_else(|e| panic!("{name}: {}", e.message));
         let schema = section::parse(&section_bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
-        let wide = message[0] & 0x08 != 0;
-        let json = colbin::walk::to_json(&schema, &message[1..], wide)
+        let json = colbin::walk::message_to_json(Some(&schema), &message)
             .unwrap_or_else(|e| panic!("{name}: {e}"));
 
         // The module's own rendering of the same message, which Go has already

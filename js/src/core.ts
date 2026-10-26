@@ -32,6 +32,8 @@ const VERIFY = 2
 /** Byte 0 of a message, with bit 2 set, says the section is in front of the
  * body. See `rust/wasm/src/lib.rs` and ENCODER.md. */
 const ROOT_SCHEMA_BIT = 0x04
+const ROOT_FIRST = 0xd0
+const ROOT_LAST = 0xdf
 
 /** The module's exported ABI. `rust/wasm/src/lib.rs` is the definition. */
 type Exports = {
@@ -293,10 +295,14 @@ export class Codec {
         // corpus, which is what makes the shortcut checkable rather than
         // merely plausible.
         if (standalone) return standalone
-        const out = new Uint8Array(section.length + message.length)
-        out[0] = message[0] | ROOT_SCHEMA_BIT
+        // A typed narrow message has no root byte unless its key run begins in
+        // the root range, so the root is the message's own first byte only then.
+        const rooted = message.length > 0 && message[0] >= ROOT_FIRST && message[0] <= ROOT_LAST
+        const body = rooted ? message.subarray(1) : message
+        const out = new Uint8Array(1 + section.length + body.length)
+        out[0] = (rooted ? message[0] : ROOT_FIRST) | ROOT_SCHEMA_BIT
         out.set(section, 1)
-        out.set(message.subarray(1), 1 + section.length)
+        out.set(body, 1 + section.length)
         standalone = out
         return out
       },

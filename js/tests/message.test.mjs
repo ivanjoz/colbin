@@ -49,19 +49,19 @@ test('a message with no section and no schema is refused by name', () => {
   assert.match(failure(wasm), /carries no schema section/)
 })
 
-test('a first byte outside the reserved range is not colbin', () => {
+// A first byte outside 0xD0..0xDF is a typed narrow message's key run, which
+// has no root byte, so with no schema it is refused for want of one.
+test('a first byte outside the reserved range is a key run, not a root', () => {
   wasm.exports.set_schema(0)
   for (const byte of [0x00, 0x1f, 0x7b, 0xcf, 0xe0, 0xff]) {
     assert.equal(wasm.exports.decode(put(wasm, Uint8Array.from([byte, 0]))), -1)
-    assert.match(failure(wasm), /not a root descriptor/)
+    assert.match(failure(wasm), /carries no schema section/)
   }
 })
 
-// 0xD1 and 0xD9 are assigned: the body holds a grouped table. 0xD2 and 0xDA
-// carry a dictionary section, which the module does not read.
 test('an unassigned root detail is refused rather than guessed at', () => {
   wasm.exports.set_schema(0)
-  for (const byte of [0xd2, 0xd3, 0xda, 0xdb]) {
+  for (const byte of [0xd9, 0xdb]) {
     assert.equal(wasm.exports.decode(put(wasm, Uint8Array.from([byte, 0]))), -1)
     assert.match(failure(wasm), /not a root descriptor/)
   }

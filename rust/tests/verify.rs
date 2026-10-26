@@ -80,9 +80,20 @@ fn every_document_passes_it_self_describing_too() {
         // The same body either way: the difference is the root bit and the
         // section in front of it.
         let plain = build::encode(input.as_bytes(), flags, &mut Diag::new()).expect(&name);
+        // A typed narrow message has a root byte only when its key run begins in the
+        // root range.
+        let plain_body = if plain
+            .message
+            .first()
+            .is_some_and(|&b| (0xD0..=0xDF).contains(&b))
+        {
+            &plain.message[1..]
+        } else {
+            &plain.message[..]
+        };
         assert_eq!(
             &encoded.message[1 + encoded.section.len()..],
-            &plain.message[1..],
+            plain_body,
             "{name}: the two deliveries wrote different bodies",
         );
     }
@@ -115,14 +126,13 @@ fn a_corrupted_message_does_not_pass_the_check() {
             .expect("infer")
             .root;
 
-        for at in 1..good.message.len() {
+        for at in 0..good.message.len() {
             for bit in 0..8u32 {
                 let mut broken = good.message.clone();
                 broken[at] ^= 1 << bit;
-                let wide = broken[0] & 0x08 != 0;
 
                 let mut diag = Diag::new();
-                let passed = match walk::to_json(&schema, &broken[1..], wide) {
+                let passed = match walk::message_to_json(Some(&schema), &broken) {
                     // A decode that fails is already a refusal.
                     Err(_) => false,
                     Ok(json) => verify::verify(&doc, root, &json, &mut diag),

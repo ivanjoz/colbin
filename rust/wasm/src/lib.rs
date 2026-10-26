@@ -52,16 +52,6 @@ use colbin::diag::Diag;
 use colbin::section::{self, Schema};
 use colbin::walk;
 
-/// The root bytes this version reads. `0xD0` narrow, `0xD8` wide; with bit 2
-/// set they carry their own schema section in front of the body, and with bit
-/// 0 the body holds a grouped table, which the walk reads from its descriptor.
-const ROOT_STRUCT_NARROW: u8 = 0xd0;
-const ROOT_WIDE_BIT: u8 = 0x08;
-const ROOT_SCHEMA_BIT: u8 = 0x04;
-const ROOT_GROUPED_BIT: u8 = 0x01;
-const ROOT_RANGE_MASK: u8 = 0xf0;
-const ROOT_ASSIGNED: u8 = ROOT_WIDE_BIT | ROOT_SCHEMA_BIT | ROOT_GROUPED_BIT;
-
 thread_local! {
     /// Held across calls, because the host writes the input in one call and
     /// names its length in the next.
@@ -168,26 +158,7 @@ pub extern "C" fn set_schema(len: usize) -> i32 {
 pub extern "C" fn decode(len: usize) -> i32 {
     let outcome = INPUT.with_borrow(|input| {
         let message = input.get(..len).ok_or(colbin::Error::Truncated)?;
-        let (root, rest) = message.split_first().ok_or(colbin::Error::Truncated)?;
-        if root & ROOT_RANGE_MASK != ROOT_STRUCT_NARROW {
-            return Err(colbin::Error::BadRoot(*root));
-        }
-        // Three of the four detail bits are read here. The rest must be refused,
-        // which is what leaves room for the format to grow.
-        if root & !ROOT_ASSIGNED != ROOT_STRUCT_NARROW {
-            return Err(colbin::Error::BadRoot(*root));
-        }
-        let wide = root & ROOT_WIDE_BIT != 0;
-
-        if root & ROOT_SCHEMA_BIT != 0 {
-            let schema = section::parse(rest)?;
-            let body = rest.get(schema.size..).ok_or(colbin::Error::Truncated)?;
-            return walk::to_json(&schema, body, wide);
-        }
-        SCHEMA.with_borrow(|held| match held.as_ref() {
-            None => Err(colbin::Error::NoSchema),
-            Some(schema) => walk::to_json(schema, rest, wide),
-        })
+        SCHEMA.with_borrow(|held| walk::message_to_json(held.as_ref(), message))
     });
 
     match outcome {
@@ -209,24 +180,7 @@ pub extern "C" fn decode(len: usize) -> i32 {
 pub extern "C" fn materialize(len: usize) -> i32 {
     let outcome = INPUT.with_borrow(|input| {
         let message = input.get(..len).ok_or(colbin::Error::Truncated)?;
-        let (root, rest) = message.split_first().ok_or(colbin::Error::Truncated)?;
-        if root & ROOT_RANGE_MASK != ROOT_STRUCT_NARROW {
-            return Err(colbin::Error::BadRoot(*root));
-        }
-        if root & !ROOT_ASSIGNED != ROOT_STRUCT_NARROW {
-            return Err(colbin::Error::BadRoot(*root));
-        }
-        let wide = root & ROOT_WIDE_BIT != 0;
-
-        if root & ROOT_SCHEMA_BIT != 0 {
-            let schema = section::parse(rest)?;
-            let body = rest.get(schema.size..).ok_or(colbin::Error::Truncated)?;
-            return colbin::materialize::to_buffer(&schema, body, wide);
-        }
-        SCHEMA.with_borrow(|held| match held.as_ref() {
-            None => Err(colbin::Error::NoSchema),
-            Some(schema) => colbin::materialize::to_buffer(schema, rest, wide),
-        })
+        SCHEMA.with_borrow(|held| colbin::materialize::message_to_buffer(held.as_ref(), message))
     });
 
     match outcome {

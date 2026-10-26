@@ -588,13 +588,13 @@ mod tests {
                     "width {w}, count {count}"
                 );
 
-                let mut exact = vec![0_u64; count];
+                let mut exact = alloc::vec![0_u64; count];
                 unpack_run(&packed, &mut exact, w);
                 assert_eq!(exact, block, "exact buffer, width {w}, count {count}");
 
                 let mut slack = packed.clone();
                 slack.extend_from_slice(&[0_u8; 8]);
-                let mut loaded = vec![0_u64; count];
+                let mut loaded = alloc::vec![0_u64; count];
                 unpack_run(&slack, &mut loaded, w);
                 assert_eq!(loaded, block, "slack buffer, width {w}, count {count}");
             }
@@ -613,7 +613,7 @@ mod tests {
     fn round_trip<T: Signed + PartialEq + core::fmt::Debug>(vals: &[T]) -> usize {
         let mut buf = Vec::new();
         append_array(&mut buf, vals);
-        let mut out = vec![T::from_i64(0); vals.len()];
+        let mut out = alloc::vec![T::from_i64(0); vals.len()];
         let read = decode_array(&buf, vals.len(), &mut out).expect("decode");
         assert_eq!(out, vals);
         assert_eq!(read, buf.len(), "the decode consumed the whole column");
@@ -627,7 +627,7 @@ mod tests {
         round_trip(&[i64::MIN, i64::MAX, 0, -1, 1]);
         round_trip(&(0..1000_i64).collect::<Vec<_>>()); // delta
         round_trip(&[7_i64; 500]); // constant
-        round_trip(&vec![0_i64; 256]); // width 0
+        round_trip(&alloc::vec![0_i64; 256]); // width 0
         round_trip(
             &(0..300)
                 .map(|i| 1_700_000_000_000 + i * 37)
@@ -641,12 +641,12 @@ mod tests {
     /// No other transform may produce a shorter encoding than the one chosen.
     #[test]
     fn the_transform_choice_is_optimal() {
-        let shapes: Vec<Vec<i64>> = vec![
+        let shapes: Vec<Vec<i64>> = alloc::vec![
             (1..900).collect(),
             (0..500).map(|i| 1_700_000_000 + i).collect(),
             (0..500).map(|i| (i * 7919) % 50000).collect(),
-            vec![42; 300],
-            vec![0; 300],
+            alloc::vec![42; 300],
+            alloc::vec![0; 300],
             (0..300).map(|i| -i).collect(),
         ];
         for shape in shapes {
@@ -692,11 +692,11 @@ mod tests {
         let mut buf = Vec::new();
         append_array(&mut buf, &(0..400_i64).collect::<Vec<_>>());
         for cut in 0..buf.len() {
-            let mut out = vec![0_i64; 400];
+            let mut out = alloc::vec![0_i64; 400];
             let _ = decode_array(&buf[..cut], 400, &mut out);
         }
         for byte in 0..=255_u8 {
-            let mut out = vec![0_i64; 8];
+            let mut out = alloc::vec![0_i64; 8];
             let _ = decode_array(&[byte; 12], 8, &mut out);
         }
     }
@@ -836,7 +836,7 @@ pub fn append_float64(out: &mut Vec<u8>, vals: &[i64]) {
     if !worth_converting(vals, exponent, reached, sampled) {
         return append_array(out, vals);
     }
-    let mut ints = vec![0_i64; vals.len()];
+    let mut ints = alloc::vec![0_i64; vals.len()];
     let mut positions: Vec<i64> = Vec::new();
     let mut bits: Vec<i64> = Vec::new();
     let mut previous = 0_i64;
@@ -893,7 +893,7 @@ fn decode_decimal<T: Signed>(buf: &[u8], n: usize, out: &mut [T]) -> Result<usiz
     let mut position = 6;
     // Decoded as int64, then narrowed when the column is a narrower type, as
     // every column is.
-    let mut target = vec![0_i64; n];
+    let mut target = alloc::vec![0_i64; n];
     position += decode_inner(&buf[position..], n, &mut target)?;
 
     let power = POWERS_OF_10[exponent];
@@ -906,8 +906,8 @@ fn decode_decimal<T: Signed>(buf: &[u8], n: usize, out: &mut [T]) -> Result<usiz
         return Err(Error::ColumnOutOfRange);
     }
     if exceptions > 0 {
-        let mut positions = vec![0_i64; exceptions];
-        let mut bits = vec![0_i64; exceptions];
+        let mut positions = alloc::vec![0_i64; exceptions];
+        let mut bits = alloc::vec![0_i64; exceptions];
         position += decode_inner(&buf[position..], exceptions, &mut positions)?;
         position += decode_inner(&buf[position..], exceptions, &mut bits)?;
         let mut last = -1_i64;

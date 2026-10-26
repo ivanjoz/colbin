@@ -13,7 +13,7 @@ const cases = await vectors('packed')
 
 test('the packed tier is present, at both key widths', () => {
   assert.ok(cases.length >= 6, `only ${cases.length} cases`)
-  const roots = new Set(cases.map((c) => unhex(c.message)[0] & 0x08))
+  const roots = new Set(cases.map((c) => unhex(c.message)[0] === 0xd8))
   assert.equal(roots.size, 2, 'the tier must cover both key widths')
 })
 

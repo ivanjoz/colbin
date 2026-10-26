@@ -97,18 +97,27 @@ impl<'a, 'd> Builder<'a, 'd> {
         true
     }
 
-    /// The root byte and then the run.
+    /// The run, behind the root byte a wide or self-describing message has: a
+    /// typed narrow message has none, and gets `0xD0` only when its key run
+    /// begins in the root range.
     pub fn build(&mut self, out: &mut Vec<u8>, node: u32, with_schema: bool) {
-        let mut root = if self.schema.root().is_wide {
-            ROOT_STRUCT_WIDE
-        } else {
-            ROOT_STRUCT_NARROW
-        };
-        if with_schema {
-            root |= ROOT_SCHEMA;
+        let wide = self.schema.root().is_wide;
+        if with_schema || wide {
+            let mut root = if wide {
+                ROOT_STRUCT_WIDE
+            } else {
+                ROOT_STRUCT_NARROW
+            };
+            if with_schema {
+                root |= ROOT_SCHEMA;
+            }
+            out.push(root);
+            self.run(out, 0, node);
+            return;
         }
-        out.push(root);
+        let start = out.len();
         self.run(out, 0, node);
+        wire::root::finish_narrow(out, start);
     }
 
     /// A key run at whichever width the plan declared.
@@ -303,6 +312,10 @@ impl<'a, 'd> Builder<'a, 'd> {
                 continue;
             }
             let values = self.gather_column(plan, index, node, rows);
+            if field.op == OP_FLOAT64 {
+                w.float_column(field.key, &values);
+                continue;
+            }
             write_column_narrow(w, field.key, &values, width_of_op(field.op));
         }
     }
@@ -461,6 +474,10 @@ impl<'a, 'd> Builder<'a, 'd> {
                 continue;
             }
             let values = self.gather_column(plan, index, node, rows);
+            if field.op == OP_FLOAT64 {
+                w.float_column(field.key, &values);
+                continue;
+            }
             write_column_wide(w, field.key, &values, width_of_op(field.op));
         }
     }
@@ -691,28 +708,23 @@ pub fn encode(text: &[u8], flags: u32, diag: &mut Diag) -> Option<Encoded> {
         // Through the same decoder any other reader would use, and against the
         // section that travelled with it — so a section that describes the wrong
         // body fails here rather than at whoever reads it next.
-        let (schema, body, wide) = if self_describing {
-            match crate::section::parse(&message[1..]) {
-                Ok(schema) => {
-                    let body = 1 + schema.size;
-                    let wide = message[0] & 0x08 != 0;
-                    (schema, body, wide)
-                }
-                Err(err) => {
-                    diag.fail(
-                        crate::diag::D_CORRUPT,
-                        -1,
-                        "",
-                        format!("the encoder wrote a section it cannot read back: {err}"),
-                    );
-                    return None;
-                }
+        let split = match crate::walk::split_root(&message) {
+            Ok(split) => split,
+            Err(err) => {
+                diag.fail(
+                    crate::diag::D_CORRUPT,
+                    -1,
+                    "",
+                    format!("the encoder wrote a section it cannot read back: {err}"),
+                );
+                return None;
             }
-        } else {
-            (inferred.schema, 1, message[0] & 0x08 != 0)
         };
+        let wide = split.root & 0x08 != 0;
+        let schema = split.schema.unwrap_or(inferred.schema);
+        let body = split.body;
 
-        match crate::walk::to_json(&schema, &message[body..], wide) {
+        match crate::walk::to_json(&schema, body, wide) {
             Ok(json) => {
                 if !crate::verify::verify(&doc, inferred.root, &json, diag) {
                     return None;
