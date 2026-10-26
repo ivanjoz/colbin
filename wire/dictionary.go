@@ -44,7 +44,8 @@ func (w *Writer) DictColumn(key uint8, dict int, ids []int64) {
 // IsDictColumn reports whether the field at the cursor is a COL, which under a
 // string column's key is a dictionary column.
 func (r *Reader8) IsDictColumn() bool {
-	return r.at+1 < len(r.buffer) && r.buffer[r.at+1]>>4 == 0b1000|classCol
+	return r.at+1 < len(r.buffer) && r.buffer[r.at+1]>>4 == 0b1000|classCol &&
+		r.buffer[r.at+1]&nullableDetail == 0
 }
 
 // IsDictColumn reports whether the field at the cursor is the length form with

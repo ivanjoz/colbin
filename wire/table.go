@@ -137,6 +137,11 @@ func (r *Reader8) Table() (rows, groupRows int, body []byte, ok bool) {
 // own — the table said it once for every column.
 
 func (r *Reader8) Column(rows int, dst []int64) []int64 {
+	if r.IsNullable() {
+		// Its values are fewer than the rows; NullableColumn reads it.
+		r.fail(ErrBadDescriptor)
+		return dst
+	}
 	body, ok := r.compositeBody(classCol)
 	if !ok {
 		return dst

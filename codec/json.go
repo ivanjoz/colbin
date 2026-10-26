@@ -736,14 +736,50 @@ type tableColumns struct {
 	// strings, for the reason textBytes exists: the walk only ever appends them.
 	strings [][][]byte
 	present []bool
+	// presence is a nullable column's, nil for a column every row holds a
+	// value of; next is where the row being written reads its value from.
+	presence [][]byte
+	next     []int
 }
 
 func newTableColumns(fields int) *tableColumns {
 	return &tableColumns{
-		ints:    make([][]int64, fields),
-		strings: make([][][]byte, fields),
-		present: make([]bool, fields),
+		ints:     make([][]int64, fields),
+		strings:  make([][][]byte, fields),
+		present:  make([]bool, fields),
+		presence: make([][]byte, fields),
+		next:     make([]int, fields),
 	}
+}
+
+// columnReader is a column run's reader at either key width.
+type columnReader interface {
+	IsNullable() bool
+	Column(rows int, dst []int64) []int64
+	StringsBytes(dst [][]byte) [][]byte
+	NullableColumn(rows int, dst []int64) ([]byte, []int64)
+	NullableStringsBytes(rows int, dst [][]byte) ([]byte, [][]byte)
+}
+
+// readColumn reads the column at the cursor into field index of the gathered
+// columns.
+func (gathered *tableColumns) readColumn(columns columnReader, field *planField, index, rows int) {
+	op, nullable := field.op, false
+	if op == opPointer {
+		op, nullable = field.elemOp, columns.IsNullable()
+	}
+	gathered.presence[index] = nil
+	switch {
+	case op == opString && nullable:
+		gathered.presence[index], gathered.strings[index] = columns.NullableStringsBytes(rows, gathered.strings[index][:0])
+	case op == opString:
+		gathered.strings[index] = columns.StringsBytes(gathered.strings[index][:0])
+	case nullable:
+		gathered.presence[index], gathered.ints[index] = columns.NullableColumn(rows, gathered.ints[index])
+	default:
+		gathered.ints[index] = columns.Column(rows, gathered.ints[index])
+	}
+	gathered.present[index] = true
 }
 
 // narrowTable walks a table under a narrow parent, whose columns are keyed at
@@ -861,12 +897,7 @@ func (gathered *tableColumns) read(body []byte, sub *typePlan, rows int, wide bo
 			}
 			continue
 		}
-		if sub.fields[index].op == opString {
-			gathered.strings[index] = columns.StringsBytes(gathered.strings[index][:0])
-		} else {
-			gathered.ints[index] = columns.Column(rows, gathered.ints[index])
-		}
-		gathered.present[index] = true
+		gathered.readColumn(&columns, &sub.fields[index], index, rows)
 	}
 	return columns.Err()
 }
@@ -882,12 +913,7 @@ func (gathered *tableColumns) read8(columns *wire.Reader8, sub *typePlan, rows i
 			}
 			continue
 		}
-		if sub.fields[index].op == opString {
-			gathered.strings[index] = columns.StringsBytes(gathered.strings[index][:0])
-		} else {
-			gathered.ints[index] = columns.Column(rows, gathered.ints[index])
-		}
-		gathered.present[index] = true
+		gathered.readColumn(columns, &sub.fields[index], index, rows)
 	}
 	return columns.Err()
 }
@@ -895,6 +921,7 @@ func (gathered *tableColumns) read8(columns *wire.Reader8, sub *typePlan, rows i
 // tableRows is the transpose itself: rows objects, without the array around
 // them, which a grouped table writes once for all its groups.
 func (w *walker) tableRows(sub *typePlan, gathered *tableColumns, rows int) {
+	clear(gathered.next)
 	for row := range rows {
 		if w.err != nil {
 			return
@@ -903,15 +930,28 @@ func (w *walker) tableRows(sub *typePlan, gathered *tableColumns, rows int) {
 		for index := range sub.fields {
 			field := &sub.fields[index]
 			w.to.key(sub.names[index])
+			op, at := field.op, row
+			if op == opPointer && gathered.present[index] {
+				op = field.elemOp
+				if presence := gathered.presence[index]; presence != nil {
+					if !wire.Present(presence, row) {
+						w.to.null()
+						continue
+					}
+					at = gathered.next[index]
+					gathered.next[index]++
+				}
+			}
 			switch {
 			case !gathered.present[index]:
 				// A column whose every value was zero is not written at all, and
-				// its absence is the whole of what says so.
+				// its absence is the whole of what says so — or, for a pointer
+				// column, that every row was nil.
 				w.zero(field)
-			case field.op == opString:
-				w.to.textBytes(elementAt(gathered.strings[index], row))
+			case op == opString:
+				w.to.textBytes(elementAt(gathered.strings[index], at))
 			default:
-				w.columnValue(field.op, elementAt(gathered.ints[index], row))
+				w.columnValue(op, elementAt(gathered.ints[index], at))
 			}
 		}
 		w.to.endObject()

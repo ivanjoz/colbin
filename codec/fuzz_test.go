@@ -99,6 +99,15 @@ func FuzzUnmarshal(f *testing.F) {
 			f.Add(message)
 		}
 	}
+	// Tables with pointer columns in all three forms (nullable_test.go).
+	nulls := nullRows(12, nullPatterns["column by col"])
+	for _, value := range []any{
+		&nullTable{Rows: nulls, ID: 1},
+		&wideNullTable{Rows: wideNullRows(nulls)},
+		&wideParentNullTable{Rows: nulls},
+	} {
+		f.Add(must(Marshal(value)))
+	}
 	f.Add([]byte{rootStructNarrow, 0x01})
 	f.Add([]byte{rootStructWide, 0x00, 0x30})
 
@@ -110,10 +119,17 @@ func FuzzUnmarshal(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
+	nullSchema, err := SchemaOf(nullTable{})
+	if err != nil {
+		f.Fatal(err)
+	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		fuzzDecode[fuzzNarrow](t, data)
 		fuzzDecode[fuzzWide](t, data)
-		for _, schema := range []*Schema{nil, narrowSchema, wideSchema} {
+		fuzzDecode[nullTable](t, data)
+		fuzzDecode[wideNullTable](t, data)
+		fuzzDecode[wideParentNullTable](t, data)
+		for _, schema := range []*Schema{nil, narrowSchema, wideSchema, nullSchema} {
 			if text, err := ToJSON(schema, data); err == nil && !json.Valid(text) {
 				t.Fatalf("ToJSON wrote invalid JSON: %q", text)
 			}

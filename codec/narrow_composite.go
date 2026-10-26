@@ -148,12 +148,18 @@ func appendNarrowColumns(writer *wire.Writer, plan *typePlan, slice *sliceHeader
 	} else {
 		narrow, ints, strings, payloads = gatherTable(plan, slice, stride, buf)
 	}
+	nulls := buf.columns.nulls
 	var choices []dictColumn
 	if buf.dict != nil {
 		choices = buf.dict.tableIDs(plan, strings, rows)
 	}
 	for index := range plan.fields {
 		field := &plan.fields[index]
+		if field.op == opPointer {
+			writePointerColumn(writer, field.key, &nulls[0], rows, field.elemOp == opString)
+			nulls = nulls[1:]
+			continue
+		}
 		if field.op == opString {
 			if len(choices) != 0 {
 				choice := &choices[0]
@@ -386,6 +392,10 @@ func readNarrowColumns(field *planField, data unsafe.Pointer, rows int, body []b
 			if !columns.Skip() {
 				break
 			}
+			continue
+		}
+		if column.op == opPointer {
+			readPointerColumn(&columns, column, data, field.stride, rows, buf)
 			continue
 		}
 		if column.op == opString {

@@ -81,10 +81,11 @@ func columnable(op fieldOp) bool {
 }
 
 // transposable reports whether every field of a plan is columnable, which is
-// what makes a slice of that struct a candidate for a table.
+// what makes a slice of that struct a candidate for a table. A pointer to a
+// scalar is: it goes out as a nullable column (nullable.go).
 func (plan *typePlan) transposable() bool {
 	for _, field := range plan.fields {
-		if !columnable(field.op) {
+		if !columnable(field.op) && field.op != opPointer {
 			return false
 		}
 	}
@@ -147,9 +148,16 @@ type columnBuffers struct {
 	// scans is a short table's integer columns' scans. See gatherScanned.
 	scans   []column.Scan
 	decoded []decodedColumn
+	// nulls is a table's pointer columns as gathered, cut from nullInts,
+	// nullStrings and presence. See nullable.go.
+	nulls       []nullColumn
+	nullInts    []int64
+	nullStrings []string
+	presence    []byte
 	// usedInts and usedStrings are the most of each buffer the current message
 	// has reserved, which is what release judges a large buffer by.
 	usedInts, usedStrings, usedInts32 int
+	usedNullStrings                   int
 }
 
 var columnPool sync.Pool // *columnBuffers
@@ -200,7 +208,15 @@ func (buf *scratch) release() {
 	// alive. Only what this message reserved can hold any: the rest was cleared
 	// when the buffer last came back.
 	clear(columns.strings[:min(columns.usedStrings, cap(columns.strings))])
-	columns.usedInts, columns.usedStrings, columns.usedInts32 = 0, 0, 0
+	clear(columns.nullStrings[:min(columns.usedNullStrings, cap(columns.nullStrings))])
+	if !keepPooled(cap(columns.nullInts), len(columns.nullInts)) {
+		columns.nullInts = nil
+	}
+	if !keepPooled(cap(columns.nullStrings), columns.usedNullStrings) {
+		columns.nullStrings = nil
+	}
+	columns.nulls = columns.nulls[:0]
+	columns.usedInts, columns.usedStrings, columns.usedInts32, columns.usedNullStrings = 0, 0, 0, 0
 	columnPool.Put(columns)
 }
 
@@ -346,6 +362,7 @@ func appendColumns(
 	writer *wire.Writer8, plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratch, dict *dictionaries,
 ) {
 	narrow, ints, strings, payloads := gatherTable(plan, slice, stride, buf)
+	nulls := buf.columns.nulls
 	rows := slice.len
 	var choices []dictColumn
 	if dict != nil {
@@ -353,6 +370,11 @@ func appendColumns(
 	}
 	for index := range plan.fields {
 		column := &plan.fields[index]
+		if column.op == opPointer {
+			writePointerColumn(writer, column.key, &nulls[0], rows, column.elemOp == opString)
+			nulls = nulls[1:]
+			continue
+		}
 		if column.op == opString {
 			if len(choices) != 0 {
 				choice := &choices[0]
@@ -413,6 +435,8 @@ func gatherTable(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratc
 		for index := range plan.fields {
 			column := &plan.fields[index]
 			switch {
+			case column.op == opPointer:
+				// Gathered by gatherPointers, into buffers of their own.
 			case column.op == opString:
 				payloads[stringColumn] += gatherStrings(strings[stringAt+start:stringAt+end], &chunk, stride, column.offset)
 				stringAt += rows
@@ -427,6 +451,7 @@ func gatherTable(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratc
 		}
 	}
 	prefetchSink = sink
+	gatherPointers(plan, slice, stride, buf)
 	return narrow, ints, strings, payloads
 }
 
@@ -477,6 +502,7 @@ func gatherScanned(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scra
 	for index := range plan.fields {
 		field := &plan.fields[index]
 		switch {
+		case field.op == opPointer:
 		case field.op == opString:
 			payloads[stringColumn] = gatherStrings(strings[stringAt:stringAt+rows], slice, stride, field.offset)
 			stringAt += rows
@@ -489,6 +515,7 @@ func gatherScanned(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scra
 			wideAt += rows
 		}
 	}
+	gatherPointers(plan, slice, stride, buf)
 	return narrow, ints, strings, payloads, scans
 }
 
@@ -502,7 +529,7 @@ const prefetchDist = 8
 func (plan *typePlan) intWidths() (narrow, wide int) {
 	for index := range plan.fields {
 		switch op := plan.fields[index].op; {
-		case op == opString:
+		case op == opString, op == opPointer:
 		case op.fitsInt32():
 			narrow++
 		default:
@@ -544,12 +571,15 @@ func gather32[T any](dst []int32, base unsafe.Pointer, stride uintptr, widen fun
 }
 
 // columnCounts is how many of a row type's fields go out as integer columns
-// and how many as string columns.
+// and how many as string columns, pointer columns aside: those have buffers of
+// their own (nullable.go).
 func (plan *typePlan) columnCounts() (ints, strings int) {
 	for index := range plan.fields {
-		if plan.fields[index].op == opString {
+		switch plan.fields[index].op {
+		case opPointer:
+		case opString:
 			strings++
-		} else {
+		default:
 			ints++
 		}
 	}
@@ -774,6 +804,10 @@ func readColumns(columns *wire.Reader8, field *planField, data unsafe.Pointer, r
 			if !columns.Skip() {
 				break
 			}
+			continue
+		}
+		if column.op == opPointer {
+			readPointerColumn(columns, column, data, field.stride, rows, buf)
 			continue
 		}
 		if column.op == opString {

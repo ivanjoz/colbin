@@ -854,6 +854,11 @@ func (r *Reader8) stringList() (int, Reader, bool) {
 	if !ok {
 		return 0, Reader{}, false
 	}
+	if r.buffer[r.at+1]&nullableDetail != 0 {
+		// A nullable column has no count; NullableStrings reads it.
+		r.fail(ErrBadDescriptor)
+		return 0, Reader{}, false
+	}
 	if length > len(r.buffer)-start {
 		r.fail(ErrTruncated)
 		return 0, Reader{}, false
