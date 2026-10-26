@@ -40,6 +40,7 @@ import (
 	"sync"
 	"unsafe"
 
+	"github.com/ivanjoz/colbin/column"
 	"github.com/ivanjoz/colbin/wire"
 )
 
@@ -127,7 +128,9 @@ type columnBuffers struct {
 	strings []string
 	// payloads is a table's string columns' list sizes, summed as they are gathered.
 	payloads []int
-	decoded  []decodedColumn
+	// scans is a short table's integer columns' scans. See gatherScanned.
+	scans   []column.Scan
+	decoded []decodedColumn
 	// usedInts and usedStrings are the most of each buffer the current message
 	// has reserved, which is what release judges a large buffer by.
 	usedInts, usedStrings, usedInts32 int
@@ -345,21 +348,7 @@ const gatherChunk = 32
 // still with one specialised loop per column, never a dispatch per value.
 func gatherTable(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratch) ([]int32, []int64, []string, []int) {
 	rows := slice.len
-	_, stringColumns := plan.columnCounts()
-	narrowColumns, wideColumns := plan.intWidths()
-	columns := buf.reserveTable(rows*wideColumns, rows*stringColumns)
-	columns.usedInts32 = max(columns.usedInts32, rows*narrowColumns)
-	if cap(columns.ints32) < rows*narrowColumns {
-		columns.ints32 = make([]int32, 0, rows*narrowColumns)
-	}
-	narrow := columns.ints32[:rows*narrowColumns]
-	ints := columns.ints[:rows*wideColumns]
-	strings := columns.strings[:rows*stringColumns]
-	if cap(columns.payloads) < stringColumns {
-		columns.payloads = make([]int, stringColumns)
-	}
-	payloads := columns.payloads[:stringColumns]
-	clear(payloads)
+	narrow, ints, strings, payloads, _ := tableBuffers(plan, rows, buf)
 	var sink byte
 	for start := 0; start < rows; start += gatherChunk {
 		end := min(start+gatherChunk, rows)
@@ -392,6 +381,63 @@ func gatherTable(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratc
 }
 
 var prefetchSink byte
+
+// tableBuffers is the scratch a table of rows rows is gathered into: its int32
+// and int64 columns back to back, its string columns, their payloads cleared,
+// and the pooled buffers they are cut from.
+func tableBuffers(plan *typePlan, rows int, buf *scratch) ([]int32, []int64, []string, []int, *columnBuffers) {
+	_, stringColumns := plan.columnCounts()
+	narrowColumns, wideColumns := plan.intWidths()
+	columns := buf.reserveTable(rows*wideColumns, rows*stringColumns)
+	columns.usedInts32 = max(columns.usedInts32, rows*narrowColumns)
+	if cap(columns.ints32) < rows*narrowColumns {
+		columns.ints32 = make([]int32, 0, rows*narrowColumns)
+	}
+	if cap(columns.payloads) < stringColumns {
+		columns.payloads = make([]int, stringColumns)
+	}
+	payloads := columns.payloads[:stringColumns]
+	clear(payloads)
+	return columns.ints32[:rows*narrowColumns], columns.ints[:rows*wideColumns],
+		columns.strings[:rows*stringColumns], payloads, columns
+}
+
+// useScannedTables is whether a short narrow table is gathered by gatherScanned.
+// The tests turn it off to hold it to gatherTable's bytes.
+var useScannedTables = true
+
+// gatherScanned is gatherTable for a table whose columns are short enough to
+// go out scanned (column.Scanned), which makes it one chunk: each integer
+// column's scan is taken as the column is gathered, so the column writer
+// skips the pass it would make for it, and its check for a column of zeros.
+// The scans are in the order of the integer columns.
+func gatherScanned(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratch) (
+	[]int32, []int64, []string, []int, []column.Scan,
+) {
+	rows := slice.len
+	narrow, ints, strings, payloads, columns := tableBuffers(plan, rows, buf)
+	if cap(columns.scans) < len(plan.fields) {
+		columns.scans = make([]column.Scan, 0, len(plan.fields))
+	}
+	scans := columns.scans[:0]
+	narrowAt, wideAt, stringAt, stringColumn := 0, 0, 0, 0
+	for index := range plan.fields {
+		field := &plan.fields[index]
+		switch {
+		case field.op == opString:
+			payloads[stringColumn] = gatherStrings(strings[stringAt:stringAt+rows], slice, stride, field.offset)
+			stringAt += rows
+			stringColumn++
+		case field.op.fitsInt32():
+			scans = append(scans, gatherInts32Scanned(narrow[narrowAt:narrowAt+rows], slice, stride, field))
+			narrowAt += rows
+		default:
+			scans = append(scans, gatherIntsScanned(ints[wideAt:wideAt+rows], slice, stride, field))
+			wideAt += rows
+		}
+	}
+	return narrow, ints, strings, payloads, scans
+}
 
 // prefetchDist is how many chunks ahead gatherTable touches the rows it will
 // gather, which the hardware prefetcher does not bring in fast enough from
@@ -507,6 +553,90 @@ func gather[T any](dst []int64, base unsafe.Pointer, stride uintptr, widen func(
 	for row := range dst {
 		dst[row] = widen(*(*T)(unsafe.Add(base, uintptr(row)*stride)))
 	}
+}
+
+// gatherIntsScanned is gatherInts taking the column's scan as it goes. A float
+// is loaded as its bits and a bool as its byte, which are what gatherInts
+// widens them to.
+func gatherIntsScanned(dst []int64, slice *sliceHeader, stride uintptr, field *planField) column.Scan {
+	base := unsafe.Add(slice.data, field.offset)
+	switch field.op {
+	case opBool, opUint8:
+		return gatherScan[uint8](dst, base, stride)
+	case opInt8:
+		return gatherScan[int8](dst, base, stride)
+	case opInt16:
+		return gatherScan[int16](dst, base, stride)
+	case opUint16:
+		return gatherScan[uint16](dst, base, stride)
+	case opInt32:
+		return gatherScan[int32](dst, base, stride)
+	case opUint32, opFloat32:
+		return gatherScan[uint32](dst, base, stride)
+	case opInt64:
+		return gatherScan[int64](dst, base, stride)
+	case opUint64, opFloat64:
+		return gatherScan[uint64](dst, base, stride)
+	}
+	return column.Scan{}
+}
+
+// gatherInts32Scanned is gatherInts32 taking the column's scan as it goes.
+func gatherInts32Scanned(dst []int32, slice *sliceHeader, stride uintptr, field *planField) column.Scan {
+	base := unsafe.Add(slice.data, field.offset)
+	switch field.op {
+	case opBool, opUint8:
+		return gatherScan32[uint8](dst, base, stride)
+	case opInt8:
+		return gatherScan32[int8](dst, base, stride)
+	case opInt16:
+		return gatherScan32[int16](dst, base, stride)
+	case opUint16:
+		return gatherScan32[uint16](dst, base, stride)
+	case opInt32:
+		return gatherScan32[int32](dst, base, stride)
+	}
+	return column.Scan{}
+}
+
+// gatherable is what gatherScan loads: every field a table column holds, as
+// its integer or its bits.
+type gatherable interface {
+	~int8 | ~int16 | ~int32 | ~int64 | ~uint8 | ~uint16 | ~uint32 | ~uint64
+}
+
+// gatherScan is gather taking the scan column.AppendScanned needs: the extremes
+// and the OR of the zigzagged steps, in registers while the loop loads. It
+// converts rather than taking a widening func: it is too large to inline, and
+// a func it cannot inline is a call per value.
+func gatherScan[T gatherable](dst []int64, base unsafe.Pointer, stride uintptr) column.Scan {
+	first := int64(*(*T)(base))
+	low, high, previous := first, first, first
+	var steps uint64
+	for row := range dst {
+		x := int64(*(*T)(unsafe.Add(base, uintptr(row)*stride)))
+		dst[row] = x
+		low, high = min(low, x), max(high, x)
+		steps |= column.Zigzag(x - previous)
+		previous = x
+	}
+	return column.Scan{Low: low, High: high, Steps: steps}
+}
+
+// gatherScan32 is gatherScan into an int32 column.
+func gatherScan32[T ~int8 | ~int16 | ~int32 | ~uint8 | ~uint16](dst []int32, base unsafe.Pointer, stride uintptr) column.Scan {
+	first := int64(*(*T)(base))
+	low, high, previous := first, first, first
+	var steps uint64
+	for row := range dst {
+		value := int32(*(*T)(unsafe.Add(base, uintptr(row)*stride)))
+		dst[row] = value
+		x := int64(value)
+		low, high = min(low, x), max(high, x)
+		steps |= column.Zigzag(x - previous)
+		previous = x
+	}
+	return column.Scan{Low: low, High: high, Steps: steps}
 }
 
 // gatherStrings reads one string field out of every row and returns what the

@@ -845,6 +845,10 @@ func TestShortColumnsEncodeAsLongOnesDo(t *testing.T) {
 		func(i int) int64 { return math.MinInt64 + int64(i) },
 		func(i int) int64 { return []int64{math.MinInt64, math.MaxInt64, 0, -1}[r.UintN(4)] },
 		func(i int) int64 { return int64(r.Uint64N(3)) },
+		// A span past 2^63 in steps that do not overflow, and the same with one
+		// that does: the span alone does not decide.
+		func(i int) int64 { return int64(1<<63 + uint64(i)<<59) },
+		func(i int) int64 { return int64(1<<63 + uint64(i)<<59 + uint64(i%2)<<62) },
 	}
 	for _, shape := range shapes {
 		for n := 1; n <= shortColumn; n++ {

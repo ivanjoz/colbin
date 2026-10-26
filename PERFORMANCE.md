@@ -331,6 +331,46 @@ the laptop A/B against `bf7151f`, alone on a core, bytes unchanged.
 After it, against msgpack on the laptop: sales decode-reuse 6.1 against 7.6 ms,
 dataset 9.5 against 14.2 ms, reading 123 against 124 ns.
 
+### Short tables
+
+A sale's lines are a table from 8 rows: on sales, 1,870 tables of 8 to 32 rows
+an encode, half its time, at ~130 ns a column of ~16 values. Each column was
+read four times: gathered, checked for all zeros (`Writer.Column`), scanned by
+`appendShort`, and turned into residuals. A/B against `c7fe25a`, bytes
+unchanged.
+
+**Kept**
+
+- **No per-value overflow check in `appendShort`.** Every step lies between
+  low−high and high−low, so none overflows while high−low does not; only a
+  column spanning more than 2^63 is walked again (`stepOverflows`). The check was
+  the costliest line of the scan. Sales encode −7.5%, dataset −4.6%. A test
+  shape spans past 2^63 in steps that do not overflow, which a check of the
+  span alone gets wrong.
+- **A short table's scans taken while it is gathered** (`gatherScanned`,
+  `column.Scan`, `Writer.ColumnScanned`): a table of up to 32 rows is one gather
+  chunk, so each integer column's extremes and steps come out of the gather
+  loop, and the all-zeros check is `Low == High == 0`. With the change above:
+  sales encode −8.9%, dataset −4.7%, TPC-H unchanged; on a 16-row table, 600 →
+  500 ns. Held to `gatherTable`'s bytes by a test over every column op.
+
+**Tried and reverted**
+
+- **The scan in the gather through a widening func**, as `gather` does: +25%.
+  `gather` inlines, so its func does; `gatherScan` is too large to, and the func
+  became a call per value. It converts instead, a float as its bits and a bool
+  as its byte.
+- **The scan as a method on `Scan`** (`s.Step(x, previous)`): +5%, the
+  accumulators in memory rather than registers.
+- **A scalar pack for short columns**, skipping the AVX2 call for two groups of
+  eight: +8%. The kernel pays from one group on.
+- **The flat root through the row program** (reading encode): +53%, then +14%
+  with the writer kept off the heap. On a record of six fields, one of them a
+  list the program does not spell, two kernel entries cost more than
+  `appendScalars`' switch.
+- **Integer list elements stored into room made once** (`appendElements`):
+  +5% on six elements, `slices.Grow` a call where append was not.
+
 ## Lessons for the next pass
 
 - **Go's inliner budget (80) is load-bearing here.** Moving the writers to

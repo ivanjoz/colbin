@@ -18,6 +18,7 @@ import (
 	"reflect"
 	"unsafe"
 
+	"github.com/ivanjoz/colbin/column"
 	"github.com/ivanjoz/colbin/wire"
 )
 
@@ -123,36 +124,55 @@ func appendNarrowTable(writer *wire.Writer, field *planField, at unsafe.Pointer,
 		writer.Close(mark)
 		return
 	}
-	narrow, ints, strings, payloads := gatherTable(field.sub, slice, field.stride, buf)
 	rows := slice.len
+	var narrow []int32
+	var ints []int64
+	var strings []string
+	var payloads []int
+	var scans []column.Scan
+	if useScannedTables && column.Scanned(rows) {
+		narrow, ints, strings, payloads, scans = gatherScanned(field.sub, slice, field.stride, buf)
+	} else {
+		narrow, ints, strings, payloads = gatherTable(field.sub, slice, field.stride, buf)
+	}
 	var choices []dictColumn
 	if buf.dict != nil {
 		choices = buf.dict.tableIDs(field.sub, strings, rows)
 	}
 	for index := range field.sub.fields {
-		column := &field.sub.fields[index]
-		if column.op == opString {
+		field := &field.sub.fields[index]
+		if field.op == opString {
 			if len(choices) != 0 {
 				choice := &choices[0]
 				choices = choices[1:]
 				if !choice.refused {
-					writer.DictColumn(column.key, choice.number, choice.ids)
+					writer.DictColumn(field.key, choice.number, choice.ids)
 					payloads = payloads[1:]
 					strings = strings[rows:]
 					continue
 				}
 			}
-			writer.StringColumnPayload(column.key, strings[:rows:rows], payloads[0])
+			writer.StringColumnPayload(field.key, strings[:rows:rows], payloads[0])
 			payloads = payloads[1:]
 			strings = strings[rows:]
 			continue
 		}
-		if column.op.fitsInt32() {
-			writer.Column32(column.key, narrow[:rows:rows])
+		if field.op.fitsInt32() {
+			if scans != nil {
+				writer.Column32Scanned(field.key, narrow[:rows:rows], scans[0])
+				scans = scans[1:]
+			} else {
+				writer.Column32(field.key, narrow[:rows:rows])
+			}
 			narrow = narrow[rows:]
 			continue
 		}
-		writer.Column(column.key, ints[:rows:rows])
+		if scans != nil {
+			writer.ColumnScanned(field.key, ints[:rows:rows], scans[0])
+			scans = scans[1:]
+		} else {
+			writer.Column(field.key, ints[:rows:rows])
+		}
 		ints = ints[rows:]
 	}
 	writer.Close(mark)

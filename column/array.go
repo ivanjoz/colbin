@@ -42,6 +42,16 @@ func subOverflows(a, b int64) bool {
 	return (a^b)&(a^difference) < 0
 }
 
+// stepOverflows reports whether any delta between neighbours overflows int64.
+func stepOverflows[T Signed](vals []T) bool {
+	for index := 1; index < len(vals); index++ {
+		if subOverflows(int64(vals[index]), int64(vals[index-1])) {
+			return true
+		}
+	}
+	return false
+}
+
 // residualsUnder is how many residuals a transform emits for n values. Delta
 // writes its first value in the clear as a base, so it has one fewer.
 func residualsUnder(transform uint8, n int) int {
@@ -173,22 +183,74 @@ const shortColumn = 32
 // It needs no OR of each transform's residuals: the width of an OR is the bit
 // length of its largest member, and the largest residual raw and frame of
 // reference make is the one of the column's maximum or minimum. So the first
-// pass takes the extremes, whether a delta overflows, and the OR of the steps,
-// which have no such shortcut; the second writes the residuals at the width
-// already chosen.
+// pass takes the extremes and the OR of the steps, which have no such shortcut;
+// the second writes the residuals at the width already chosen.
 func appendShort[T Signed](out []byte, vals []T) []byte {
-	n := len(vals)
+	return appendScanned(out, vals, scanShort(vals))
+}
+
+// Scan is the first pass appendShort makes over a column: its extremes and the
+// OR of its zigzagged steps. A caller that reads the values anyway, as a table
+// gathering its rows does, can take it as it goes (Step) and hand it to
+// AppendScanned, which then makes the second pass only.
+type Scan struct {
+	Low, High int64
+	Steps     uint64
+}
+
+// StartScan is the scan of a column whose first value is first.
+func StartScan(first int64) Scan {
+	return Scan{Low: first, High: first}
+}
+
+// Step adds x, which follows previous in the column, to the scan.
+func (s *Scan) Step(x, previous int64) {
+	s.Low, s.High = min(s.Low, x), max(s.High, x)
+	s.Steps |= zigzag(x - previous)
+}
+
+// Zigzag is the step's form a Scan ORs together, for a caller taking one.
+func Zigzag(step int64) uint64 { return zigzag(step) }
+
+// Zero is whether every value scanned is zero.
+func (s Scan) Zero() bool {
+	return s.Low == 0 && s.High == 0
+}
+
+// Scanned reports whether a column of n values is encoded from a Scan: a
+// column too long for one block goes through the kernels, and one under the
+// ablation's forced transform through appendLong.
+func Scanned(n int) bool {
+	return n > 0 && n <= shortColumn && forcedTransform < 0
+}
+
+// AppendScanned is AppendArray for a column Scanned says is, with its scan
+// already taken: the same bytes.
+func AppendScanned[T Signed](out []byte, vals []T, scan Scan) []byte {
+	return appendScanned(out, vals, scan)
+}
+
+func scanShort[T Signed](vals []T) Scan {
 	first := int64(vals[0])
 	low, high, previous := first, first, first
-	var steps, overflow uint64
+	var steps uint64
 	for _, value := range vals[1:] {
 		x := int64(value)
 		low, high = min(low, x), max(high, x)
-		step := x - previous
-		overflow |= uint64((x ^ previous) & (x ^ step)) // subOverflows' sign bit
-		steps |= zigzag(step)
+		steps |= zigzag(x - previous)
 		previous = x
 	}
+	return Scan{Low: low, High: high, Steps: steps}
+}
+
+func appendScanned[T Signed](out []byte, vals []T, scan Scan) []byte {
+	n := len(vals)
+	first := int64(vals[0])
+	low, high, steps := scan.Low, scan.High, scan.Steps
+	// Every step lies between low−high and high−low, so none overflows while
+	// high−low does not; only a column spanning more than 2^63 is walked again
+	// to see whether one does.
+	overflows := subOverflows(high, low) && stepOverflows(vals)
 
 	zz := low < 0
 	rawWidth := bits.Len64(uint64(high))
@@ -201,7 +263,7 @@ func appendShort[T Signed](out []byte, vals []T) []byte {
 	if frame := 8 + 1 + blockBytes(n, frameWidth); frame < best {
 		transform, zigzagged, w, best = trFOR, false, frameWidth, frame
 	}
-	if overflow>>63 == 0 && n > 1 {
+	if !overflows && n > 1 {
 		stepsWidth := bits.Len64(steps)
 		if cost := 8 + 1 + blockBytes(n-1, stepsWidth); cost < best {
 			transform, zigzagged, w, best = trDelta, true, stepsWidth, cost

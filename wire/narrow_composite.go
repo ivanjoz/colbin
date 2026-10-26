@@ -451,6 +451,28 @@ func (w *Writer) Column32(key uint8, values []int32) {
 	w.Close(mark)
 }
 
+// ColumnScanned is Column for a column whose scan its caller took while
+// gathering it, which column.Scanned says it may: the same bytes, with the
+// passes the scan already made left out.
+func (w *Writer) ColumnScanned(key uint8, values []int64, scan column.Scan) {
+	if scan.Zero() {
+		return
+	}
+	mark := w.openNarrowSized(key, 0, len(values))
+	w.Buffer = column.AppendScanned(w.Buffer, values, scan)
+	w.Close(mark)
+}
+
+// Column32Scanned is ColumnScanned for a column held as int32.
+func (w *Writer) Column32Scanned(key uint8, values []int32, scan column.Scan) {
+	if scan.Zero() {
+		return
+	}
+	mark := w.openNarrowSized(key, 0, len(values))
+	w.Buffer = column.AppendScanned(w.Buffer, values, scan)
+	w.Close(mark)
+}
+
 // StringColumn writes a string column under key, for a narrow-keyed table. It is
 // Writer8.StringColumn with four key bits: a column of nothing but empty strings
 // is omitted at both widths, since its absence already says so.
