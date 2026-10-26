@@ -415,6 +415,10 @@ func appendAnyStringMap(writer *wire.Writer8, value map[string]any, buf *scratch
 // every time — which rules out a golden vector, an ETag, and any two ports
 // agreeing about a map at all.
 func appendAnyEntries(writer *wire.Writer8, value map[string]any, buf *scratch) {
+	if len(value) <= smallAnyMap {
+		appendSmallAnyEntries(writer, value, buf)
+		return
+	}
 	start, count, ordered := buf.pushEntries(value)
 	for index := range count {
 		if buf.err != nil {
@@ -432,6 +436,35 @@ func appendAnyEntries(writer *wire.Writer8, value map[string]any, buf *scratch) 
 	}
 	buf.columns.entries = buf.columns.entries[:start]
 	buf.columns.order = buf.columns.order[:start]
+}
+
+// smallAnyMap is the most entries appendSmallAnyEntries orders on its stack.
+const smallAnyMap = 8
+
+// appendSmallAnyEntries is appendAnyEntries for a map of a few entries, which
+// is what a document's maps mostly are: ordered in arrays of its own frame,
+// where the pooled stacks cost a sync.Pool's get and put on a message of one
+// small map, more than its entries did.
+func appendSmallAnyEntries(writer *wire.Writer8, value map[string]any, buf *scratch) {
+	var entries [smallAnyMap]anyEntry
+	var order [smallAnyMap]uint64
+	count := 0
+	for key, element := range value {
+		if count == smallAnyMap {
+			break // only a map written to while it is encoded gets here
+		}
+		entries[count], order[count] = anyEntry{key, element}, uint64(count)
+		count++
+	}
+	orderEntries(order[:count], entries[:count], 0)
+	for _, sort := range order[:count] {
+		if buf.err != nil {
+			break
+		}
+		entry := &entries[sort&orderIndex]
+		writer.ElementString(entry.key)
+		appendAnyValue(writer, entry.value, buf)
+	}
 }
 
 // anyEntry is a map entry on its way out, its value taken in the iteration so
@@ -491,13 +524,18 @@ func orderEntries(order []uint64, entries []anyEntry, depth int) {
 	for index, sort := range order {
 		key := entries[sort&orderIndex].key
 		longest = max(longest, len(key))
-		var head [8]byte
-		if depth < len(key) {
-			copy(head[:6], key[depth:])
-		}
-		order[index] = binary.BigEndian.Uint64(head[:]) | sort&orderIndex
+		order[index] = keyPrefix(key, depth) | sort&orderIndex
 	}
-	slices.Sort(order)
+	if len(order) <= 12 {
+		// slices.Sort's own insertion sort at this size, without its call.
+		for index := 1; index < len(order); index++ {
+			for at := index; at > 0 && order[at] < order[at-1]; at-- {
+				order[at], order[at-1] = order[at-1], order[at]
+			}
+		}
+	} else {
+		slices.Sort(order)
+	}
 	for run := 0; run < len(order); {
 		end := run + 1
 		for end < len(order) && order[end]>>orderIndexBits == order[run]>>orderIndexBits {
@@ -512,6 +550,21 @@ func orderEntries(order []uint64, entries []anyEntry, depth int) {
 		}
 		run = end
 	}
+}
+
+// keyPrefix is the six bytes of key from depth on in a word's top six, zero
+// past the key's end: one load where eight bytes are there to read, which a
+// copy into an array was not.
+func keyPrefix(key string, depth int) uint64 {
+	if len(key)-depth >= 8 {
+		word := binary.BigEndian.Uint64(unsafe.Slice(unsafe.StringData(key[depth:]), 8))
+		return word &^ orderIndex
+	}
+	var head [8]byte
+	if depth < len(key) {
+		copy(head[:6], key[depth:])
+	}
+	return binary.BigEndian.Uint64(head[:])
 }
 
 // sortTied orders a run of entries by the whole key: keys that differ only past
@@ -739,18 +792,18 @@ func readAnyValue(reader *wire.Reader8, buf *scratch) any {
 		reader.Fail(err)
 		return nil
 	}
-	out := anySink{strings: &buf.strings}
 	// The walk inherits the typed decode's depth and row budget, so that a
 	// dynamic value is bounded by what is left of the message's rather than
 	// starting afresh.
-	walk := walker{to: &out, plans: plans, depth: buf.depth, rowsLeft: buf.rowsLeft}
-	walk.dynamicValue(reader)
-	buf.rowsLeft = walk.rowsLeft
-	if walk.err != nil {
-		reader.Fail(walk.err)
+	read := anyReader{plans: plans, depth: buf.depth, rowsLeft: buf.rowsLeft}
+	read.out.strings = buf.strings
+	value := read.value(reader)
+	buf.rowsLeft, buf.strings = read.rowsLeft, read.out.strings
+	if read.err != nil {
+		reader.Fail(read.err)
 		return nil
 	}
-	return out.root
+	return value
 }
 
 // readAnyDocument reads a map[string]any field's count entries: one walk for
@@ -762,20 +815,19 @@ func readAnyDocument(entries *wire.Reader8, count int, at unsafe.Pointer, buf *s
 		return err
 	}
 	document := make(map[string]any, count)
-	out := anySink{strings: &buf.strings}
-	walk := walker{to: &out, plans: plans, depth: buf.depth, rowsLeft: buf.rowsLeft}
+	read := anyReader{plans: plans, depth: buf.depth, rowsLeft: buf.rowsLeft}
+	read.out.strings = buf.strings
 	for range count {
-		key := entries.ElementStringIn(&buf.strings)
+		key := entries.ElementStringIn(&read.out.strings)
 		if err := entries.Err(); err != nil {
 			return err
 		}
-		walk.dynamicValue(entries)
-		if walk.err != nil {
-			return walk.err
+		document[key] = read.value(entries)
+		if read.err != nil {
+			return read.err
 		}
-		document[key], out.root = out.root, nil
 	}
-	buf.rowsLeft = walk.rowsLeft
+	buf.rowsLeft, buf.strings = read.rowsLeft, read.out.strings
 	*(*map[string]any)(at) = document
 	return nil
 }
@@ -837,6 +889,163 @@ func (w *walker) dynamicValue(reader *wire.Reader8) {
 			"colbin: a dynamic value carries a descriptor this version does not assign"))
 	}
 	w.fail(reader.Err())
+}
+
+// anyReader reads dynamic values into the Go shapes DecodeAny produces: the
+// walk's dynamicValue, spelled for the any sink. Through the sink every value
+// was a call through an interface and a look at the container on top of its
+// stack; here a map's value goes straight into the map and a list's into its
+// slot, which was a fifth of a document's decode.
+//
+// It carries a walker's state but not a walker, whose sink is an interface:
+// one holding the reader's own sink would take the reader to the heap, a sink
+// and a walker allocated for every dynamic value read. What it does not spell
+// — a TYPED value, a key that is a number, and every kind that is an error —
+// it hands a walker of its own, which reads it and fails it exactly as it
+// would have.
+type anyReader struct {
+	plans    []*typePlan
+	err      error
+	depth    int
+	rowsLeft int
+	// out is where the strings are copied and the values boxed.
+	out anySink
+}
+
+func (r *anyReader) fail(err error) {
+	if err != nil && r.err == nil {
+		r.err = err
+	}
+}
+
+// enter and leave are the walker's.
+func (r *anyReader) enter() bool {
+	if r.err != nil {
+		return false
+	}
+	if r.depth >= maxSchemaDepth {
+		r.fail(errTooDeep)
+		return false
+	}
+	r.depth++
+	return true
+}
+
+func (r *anyReader) leave() { r.depth-- }
+
+// borrow is a walker over a sink of the reader's state, for what the reader
+// hands the walk, and give takes the state back from it.
+func (r *anyReader) borrow() (*walker, *anySink) {
+	sink := &anySink{strings: r.out.strings, boxes: r.out.boxes}
+	return &walker{to: sink, err: r.err, plans: r.plans, depth: r.depth, rowsLeft: r.rowsLeft}, sink
+}
+
+func (r *anyReader) give(walk *walker, sink *anySink) {
+	r.out.strings, r.out.boxes = sink.strings, sink.boxes
+	r.err, r.depth, r.rowsLeft = walk.err, walk.depth, walk.rowsLeft
+}
+
+// value reads one value.
+func (r *anyReader) value(reader *wire.Reader8) any {
+	out := &r.out
+	var value any
+	switch reader.ElementKind() {
+	case wire.KindNull:
+		reader.ElementNull()
+	case wire.KindBool:
+		value = reader.ElementBool()
+	case wire.KindInt:
+		if reader.ElementNegative() {
+			value = out.signedBox(reader.ElementInt())
+		} else if magnitude := reader.ElementUint(); magnitude <= math.MaxInt64 {
+			value = out.signedBox(int64(magnitude))
+		} else {
+			value = magnitude
+		}
+	case wire.KindFloat64:
+		value = boxIn(&out.boxes.floats, reader.ElementFloat64(), floatKind)
+	case wire.KindFloat32:
+		value = boxIn(&out.boxes.floats, float64(reader.ElementFloat32()), floatKind)
+	case wire.KindString:
+		value = boxIn(&out.boxes.strings, out.copied(reader.ElementBlob()), stringKind)
+	case wire.KindBytes:
+		value = append([]byte(nil), reader.ElementBytes()...)
+	case wire.KindList:
+		value = r.list(reader)
+	case wire.KindMap:
+		value = r.object(reader)
+	default:
+		walk, sink := r.borrow()
+		walk.dynamicValue(reader)
+		r.give(walk, sink)
+		return sink.root
+	}
+	r.fail(reader.Err())
+	return value
+}
+
+// list is the walker's dynamicList.
+func (r *anyReader) list(reader *wire.Reader8) any {
+	count, elements, ok := reader.ElementList()
+	if !ok {
+		r.fail(reader.Err())
+		return nil
+	}
+	if !r.enter() {
+		return nil
+	}
+	defer r.leave()
+	// A non-nil slice for an empty list, which the wire tells from a null.
+	list := make([]any, count)
+	for index := range list {
+		list[index] = r.value(&elements)
+		if r.err != nil {
+			return nil
+		}
+	}
+	r.fail(elements.Err())
+	return boxIn(&r.out.boxes.arrays, list, arrayKind)
+}
+
+// object is the walker's dynamicMap.
+func (r *anyReader) object(reader *wire.Reader8) any {
+	count, entries, ok := reader.ElementMap()
+	if !ok {
+		r.fail(reader.Err())
+		return nil
+	}
+	if !r.enter() {
+		return nil
+	}
+	defer r.leave()
+	object := make(map[string]any, count)
+	for range count {
+		var key string
+		if entries.ElementKind() == wire.KindString {
+			key = r.out.copied(entries.ElementBlob())
+			if err := entries.Err(); err != nil {
+				r.fail(err)
+				return nil
+			}
+		} else {
+			// A number for a name, or no name at all: dynamicKey's to read or
+			// to refuse, onto a level of the borrowed sink's.
+			walk, sink := r.borrow()
+			sink.stack = append(sink.stack, anyLevel{})
+			ok := walk.dynamicKey(&entries)
+			r.give(walk, sink)
+			if !ok {
+				return nil
+			}
+			key = sink.stack[0].key
+		}
+		object[key] = r.value(&entries)
+		if r.err != nil {
+			return nil
+		}
+	}
+	r.fail(entries.Err())
+	return object
 }
 
 // dynamicInt picks the Go shape an integer comes back as.

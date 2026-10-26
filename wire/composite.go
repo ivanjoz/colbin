@@ -39,6 +39,11 @@ type Mark struct {
 	extra int
 }
 
+// MarkAt is the Mark of a composite whose one-byte length placeholder is at at:
+// for a caller that appends a narrow header and the placeholder to a buffer of
+// its own, and closes it with Close only when the body outgrew the byte.
+func MarkAt(at int) Mark { return Mark{at: at} }
+
 // inlineCompositeLength is what the reserved byte holds before the body grows
 // past it.
 const inlineCompositeLength = 0xFF

@@ -152,6 +152,19 @@ var anyMapType = reflect.TypeFor[map[string]any]()
 // appendMapField writes a map, and nothing at all when it is empty — an absent
 // key means an empty map, exactly as it means a zero scalar.
 func appendMapField(writer *wire.Writer8, field *planField, at unsafe.Pointer, buf *scratch) {
+	if field.sliceType == anyMapType && field.typedMap == nil {
+		// The dynamic document, as its own type: without a reflect.Value for
+		// it, or for each entry, which every value under it would inherit.
+		document := *(*map[string]any)(at)
+		if len(document) == 0 || !buf.enter() {
+			return
+		}
+		mark := writer.OpenMap(field.key, len(document))
+		appendAnyEntries(writer, document, buf)
+		writer.Close(mark)
+		buf.leave()
+		return
+	}
 	value := reflect.NewAt(field.sliceType, at).Elem()
 	count := value.Len()
 	if count == 0 {
@@ -168,15 +181,6 @@ func appendMapField(writer *wire.Writer8, field *planField, at unsafe.Pointer, b
 		own := &wire.Writer8{Buffer: writer.Buffer}
 		field.typedMap.appendWide(own, field.key, at)
 		writer.Buffer = own.Buffer
-		return
-	}
-	if field.sliceType == anyMapType {
-		// The dynamic document, as its own type: without a reflect.Value per
-		// entry, which every value under it would inherit.
-		document := *(*map[string]any)(at)
-		mark := writer.OpenMap(field.key, len(document))
-		appendAnyEntries(writer, document, buf)
-		writer.Close(mark)
 		return
 	}
 	keys := sortedMapKeys(value)

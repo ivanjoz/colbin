@@ -38,7 +38,10 @@ type anySink struct {
 	stack []anyLevel
 	// strings is where the keys and strings are copied, a chunk at a time
 	// rather than one allocation each: a document's are most of what it holds.
-	strings *wire.Arena
+	// A copy of the decode's arena, handed back when the walk is done: a
+	// pointer to it would take the decode's scratch to the heap with the sink,
+	// an allocation on every decode, dynamic values or not.
+	strings wire.Arena
 	boxes   anyBoxes
 }
 
@@ -140,14 +143,9 @@ func (s *anySink) key(name string) {
 // bytes and the message buffer is one the caller reuses.
 func (s *anySink) keyBytes(name []byte) { s.key(s.copied(name)) }
 
-// copied is a string of its own for bytes of the message: in the arena when
-// there is one.
-func (s *anySink) copied(value []byte) string {
-	if s.strings == nil {
-		return string(value)
-	}
-	return s.strings.String(value)
-}
+// copied is a string of its own for bytes of the message, in the arena: the
+// zero one, when the decode has none, allocates a string at a time.
+func (s *anySink) copied(value []byte) string { return s.strings.String(value) }
 
 func (s *anySink) null()                 { s.place(nil) }
 func (s *anySink) boolean(value bool)    { s.place(value) }
@@ -156,12 +154,13 @@ func (s *anySink) text(value string)     { s.place(value) }
 
 // signed boxes a value past 255 itself: one below is an any the runtime makes
 // without an allocation.
-func (s *anySink) signed(value int64) {
+func (s *anySink) signed(value int64) { s.place(s.signedBox(value)) }
+
+func (s *anySink) signedBox(value int64) any {
 	if uint64(value) < 256 {
-		s.place(value)
-		return
+		return value
 	}
-	s.place(boxIn(&s.boxes.ints, value, intKind))
+	return boxIn(&s.boxes.ints, value, intKind)
 }
 
 // textBytes copies, because the result outlives the message buffer. That is the

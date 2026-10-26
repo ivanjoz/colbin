@@ -38,7 +38,9 @@ func appendNarrowStruct(writer *wire.Writer, field *planField, at unsafe.Pointer
 		return
 	}
 	mark := writer.OpenStruct(field.key)
-	if program := field.sub.rows; program != nil && !program.wide && useRowPrograms && !Packed5() {
+	if tree := field.sub.tree; tree != nil && useRowPrograms && !Packed5() {
+		tree.write(writer, at, buf)
+	} else if program := field.sub.rows; program != nil && !program.wide && useRowPrograms && !Packed5() {
 		program.write(writer, at, buf)
 	} else {
 		writeFields(writer, field.sub, at, buf)
@@ -281,7 +283,22 @@ func readNarrowStruct(reader *wire.Reader, field *planField, at unsafe.Pointer, 
 	if !ok {
 		return
 	}
-	readNarrowBody(reader, body, wideKeys, field.sub, at, buf)
+	plan := field.sub
+	if wideKeys || readsByProgram(plan, false) {
+		readNarrowBody(reader, body, wideKeys, plan, at, buf)
+		return
+	}
+	// readNarrowBody and readNarrowRun by hand, for the body a struct of a
+	// narrow type nearly always has: a document is structs inside structs, and
+	// the two frames and a defer were a level's cost as much as its fields.
+	if !buf.enter() {
+		reader.Fail(buf.err)
+		return
+	}
+	sub := wire.NewReader(body)
+	readNarrowFields(&sub, plan, at, buf)
+	buf.leave()
+	reader.Fail(sub.Err())
 }
 
 // readNarrowPointerStruct is readPointerStructField at four key bits.

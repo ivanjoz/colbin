@@ -182,6 +182,9 @@ type typePlan struct {
 	ids  []uint16
 	// rows is the plan compiled for writePlan, or nil. See rows.go.
 	rows *rowProgram
+	// tree is the plan compiled with its value structs inline, or nil: what
+	// writePlan runs before rows. See tree.go.
+	tree *treeProgram
 	// reset clears a record and keeps its slices' arrays, or is nil when the
 	// type is cleared whole. See reset.go.
 	reset *resetProgram
@@ -410,6 +413,7 @@ func (plan *typePlan) finish() {
 		}
 	}
 	plan.rows = compileRows(plan)
+	plan.tree = compileTree(plan)
 }
 
 // sizeFor is a starting capacity for encoding record: sizeHint, plus, for each
@@ -732,6 +736,12 @@ func appendRecord(dst []byte, plan *typePlan, record unsafe.Pointer) ([]byte, er
 	if plan.simple {
 		return appendPlan(dst, plan, record), nil
 	}
+	if tree := plan.tree; tree != nil && tree.pure && useRowPrograms && !Packed5() && !dictionaryOn.Load() {
+		// Nothing in a pure tree takes a scratch or can fail. See tree.go.
+		writer := wire.Writer{Buffer: append(dst, rootStructNarrow)}
+		tree.write(&writer, record, nil)
+		return writer.Buffer, nil
+	}
 	root := rootStructNarrow
 	if plan.isWide {
 		root = rootStructWide
@@ -808,7 +818,9 @@ func writePlan(writer *wire.Writer, plan *typePlan, record unsafe.Pointer, buf *
 	if !buf.enter() {
 		return
 	}
-	if program := plan.rows; program != nil && !program.wide && useRowPrograms && !Packed5() {
+	if tree := plan.tree; tree != nil && useRowPrograms && !Packed5() {
+		tree.write(writer, record, buf)
+	} else if program := plan.rows; program != nil && !program.wide && useRowPrograms && !Packed5() {
 		program.write(writer, record, buf)
 	} else {
 		writeFields(writer, plan, record, buf)
