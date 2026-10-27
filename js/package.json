@@ -1,6 +1,6 @@
 {
   "name": "colbin",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "A columnar binary format for tabular JSON — decode to objects in the browser without JSON text in the middle",
   "type": "module",
   "license": "MIT",
