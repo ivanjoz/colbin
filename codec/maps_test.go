@@ -206,10 +206,10 @@ func TestUnknownMapIsSkipped(t *testing.T) {
 // A key or value the wire has no element form for is refused, with the field
 // named, rather than silently dropped.
 func TestUnsupportedMapsAreRefused(t *testing.T) {
-	// A nil value inside a map has no form on the wire, so a map of pointers is
-	// refused where a map of structs is carried.
-	type mapOfPointers struct {
-		M map[string]*inner `cb:"1"`
+	// A pointer to a scalar keeps nil apart from zero, and an entry has nowhere
+	// to say which, so it is refused where a pointer to a struct is carried.
+	type mapOfScalarPointers struct {
+		M map[string]*int32 `cb:"1"`
 	}
 	type floatKeyed struct {
 		M map[float64]string `cb:"1"`
@@ -217,7 +217,23 @@ func TestUnsupportedMapsAreRefused(t *testing.T) {
 	type structKeyed struct {
 		M map[inner]string `cb:"1"`
 	}
-	for _, value := range []any{mapOfPointers{}, floatKeyed{}, structKeyed{}} {
+	// A list value is a list of structs or of scalars, nothing deeper.
+	type mapOfNestedLists struct {
+		M map[string][][]int32 `cb:"1"`
+	}
+	type mapOfPointerLists struct {
+		M map[string][]*inner `cb:"1"`
+	}
+	type mapOfBytes struct {
+		M map[string][]byte `cb:"1"`
+	}
+	type mapOfAnyLists struct {
+		M map[string][]any `cb:"1"`
+	}
+	for _, value := range []any{
+		mapOfScalarPointers{}, floatKeyed{}, structKeyed{},
+		mapOfNestedLists{}, mapOfPointerLists{}, mapOfBytes{}, mapOfAnyLists{},
+	} {
 		if _, err := Marshal(value); err == nil {
 			t.Fatalf("%T was accepted", value)
 		}

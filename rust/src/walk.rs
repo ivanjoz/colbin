@@ -24,10 +24,10 @@ use alloc::vec::Vec;
 use crate::Error;
 use crate::json::{JsonSink, render_key_run};
 use crate::plan::{
-    self, MAP_ANY, MAP_BOOL, MAP_FLOAT32, MAP_FLOAT64, MAP_INT, MAP_STRING, MAP_STRUCT, MAP_UINT,
-    OP_ANY, OP_ANYS, OP_BOOL, OP_BYTES, OP_FLOAT32, OP_FLOAT64, OP_INT8, OP_INT16, OP_INT32,
-    OP_INT64, OP_MAP, OP_POINTER, OP_STRING, OP_STRINGS, OP_STRUCT, OP_STRUCTS, OP_UINT8,
-    OP_UINT16, OP_UINT32, OP_UINT64, Plan, PlanField,
+    self, MAP_ANY, MAP_BOOL, MAP_FLOAT32, MAP_FLOAT64, MAP_INT, MAP_LIST, MAP_STRING, MAP_STRUCT,
+    MAP_STRUCTS, MAP_UINT, OP_ANY, OP_ANYS, OP_BOOL, OP_BYTES, OP_FLOAT32, OP_FLOAT64, OP_INT8,
+    OP_INT16, OP_INT32, OP_INT64, OP_MAP, OP_POINTER, OP_STRING, OP_STRINGS, OP_STRUCT, OP_STRUCTS,
+    OP_UINT8, OP_UINT16, OP_UINT32, OP_UINT64, Plan, PlanField,
 };
 use crate::section::{self, Schema};
 use crate::wire::{self, Kind, Reader, Reader8, Runs};
@@ -683,7 +683,11 @@ impl<'s> Walker<'s> {
                 MAP_INT => self.number_key(entries.element_int(), true),
                 _ => self.number_key(entries.element_uint() as i64, false),
             }
-            self.map_value(&mut entries, field.value_kind, field.sub)?;
+            match field.value_kind {
+                MAP_STRUCTS => self.map_structs(&mut entries, field.sub)?,
+                MAP_LIST => self.map_list(&mut entries, field.list_kind)?,
+                kind => self.map_value(&mut entries, kind, field.sub)?,
+            }
             entries.err()?;
         }
         self.to.end_object();
@@ -731,6 +735,43 @@ impl<'s> Walker<'s> {
             }
             other => return Err(Error::UnwalkableOp(other)),
         }
+        Ok(())
+    }
+
+    /// A [`MAP_STRUCTS`] value: the key-less list or table a slice of structs
+    /// inside a dynamic value is, behind the struct the section names rather
+    /// than a type tag.
+    fn map_structs(&mut self, entries: &mut Reader8<'_>, sub: Option<u32>) -> Result<(), Error> {
+        let at = sub.ok_or(Error::BadSection)?;
+        self.plan_at(at)?;
+        match entries.element_kind() {
+            Kind::List => {
+                let (count, mut elements) = entries.element_list().ok_or(Error::Truncated)?;
+                self.struct_list(at, count, &mut elements)
+            }
+            Kind::Table => {
+                let (rows, mut columns) = entries.element_table().ok_or(Error::Truncated)?;
+                self.struct_table(at, rows, &mut columns)
+            }
+            _ => Err(Error::BadDescriptor),
+        }
+    }
+
+    /// A [`MAP_LIST`] value: a key-less list of elements of one scalar kind,
+    /// each rendered as a map value of that kind is.
+    fn map_list(&mut self, entries: &mut Reader8<'_>, kind: u8) -> Result<(), Error> {
+        if entries.element_kind() != Kind::List {
+            return Err(Error::BadDescriptor);
+        }
+        let (count, mut elements) = entries.element_list().ok_or(Error::Truncated)?;
+        self.enter()?;
+        self.to.begin_array();
+        for _ in 0..count {
+            self.map_value(&mut elements, kind, None)?;
+            elements.err()?;
+        }
+        self.to.end_array();
+        self.leave();
         Ok(())
     }
 

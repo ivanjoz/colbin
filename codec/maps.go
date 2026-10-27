@@ -30,8 +30,23 @@ package codec
 // A struct value is written the way a list's element is, so a map of structs
 // is `map[K]V` with the elements of a `[]V` behind its keys. It needs no
 // self-describing message: the schema section names the struct by its index in
-// the struct table, as it does a slice of structs' element. A `map[K]*V` is not
-// carried — a nil value inside a map has no form on this wire.
+// the struct table, as it does a slice of structs' element.
+//
+// A slice value is a key-less list behind each key: `map[K][]V` of structs is
+// the list or the table a `[]V` inside a dynamic value is (appendStructsElement),
+// and `map[K][]int32` and the other scalars a list of the elements a scalar map
+// value would be. A key-less list has no four-bit form, so a type holding one of
+// these maps goes wide, as one holding a dynamic value does.
+//
+// # A pointer value is not on the wire
+//
+// `map[K]*V` and `map[K]*[]V` are written as `map[K]V` and `map[K][]V` — the
+// same bytes and the same schema — the way a pointer field is written as its
+// pointee (pointer.go). A nil value is written as an empty one, because a key
+// that is present has to be followed by something and this wire has no null
+// for a typed value; it reads back as a pointer to an empty struct or slice.
+// Every entry a reader fills gets a pointer, so nil does not come back: the
+// distinction a slice field already does not keep between nil and empty.
 //
 // `any` is the escape hatch and the expensive one: an entry of it carries its
 // own type on the wire (dynamic.go), which is what a `map[string]any` needs and
@@ -47,6 +62,7 @@ package codec
 // bytes, and the JSON they render to, a function of the value.
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/bits"
@@ -81,6 +97,14 @@ const (
 	// section's struct table's to say, by an index after the two kinds — the way
 	// a slice of structs names its element. See schema.go.
 	mapStruct
+	// mapStructs is a slice of structs, written as a slice of them inside a
+	// dynamic value is: a key-less list of struct elements, or a table past
+	// tableThreshold rows. The schema names the struct as it does for mapStruct.
+	mapStructs
+	// mapList is a slice of scalars, written as a key-less list of the
+	// elements a map value of the slice's element kind would be. The schema
+	// says that kind in a byte after the value kind.
+	mapList
 
 	// mapKindCount bounds the block, so a section naming a kind this version
 	// does not assign is refused.
@@ -131,18 +155,82 @@ func mapKindOf(t reflect.Type, what string) (mapKind, error) {
 	return 0, fmt.Errorf("a map %s of %s is not carried", what, t)
 }
 
+// mapShape is what a map field's plan needs to know about its type.
+type mapShape struct {
+	keyKind, valueKind mapKind
+	// listKind is a mapList's element kind.
+	listKind mapKind
+	// indirect says the value is a pointer to what valueKind describes.
+	indirect bool
+	// record is the struct a mapStruct or a mapStructs value holds, for its
+	// plan, and stride a mapStructs element's size.
+	record reflect.Type
+	stride uintptr
+}
+
 // mapOpFor resolves a map field, or reports that the type is not one.
-func mapOpFor(fieldType reflect.Type) (keyKind, valueKind mapKind, err error) {
+func mapOpFor(fieldType reflect.Type) (shape mapShape, err error) {
 	if fieldType.Kind() != reflect.Map {
-		return 0, 0, fmt.Errorf("not a map")
+		return shape, fmt.Errorf("not a map")
 	}
-	if keyKind, err = mapKindOf(fieldType.Key(), "key"); err != nil {
-		return 0, 0, err
+	if shape.keyKind, err = mapKindOf(fieldType.Key(), "key"); err != nil {
+		return shape, err
 	}
-	if valueKind, err = mapKindOf(fieldType.Elem(), "value"); err != nil {
-		return 0, 0, err
+	value := fieldType.Elem()
+	if value.Kind() == reflect.Pointer {
+		// A pointer to a struct or a slice, written as its pointee. A pointer
+		// to a scalar is not: its nil and its zero are different values, and an
+		// entry has nowhere to say which (pointer.go keeps them apart for a
+		// field by omitting the key).
+		switch value.Elem().Kind() {
+		case reflect.Struct, reflect.Slice:
+			value, shape.indirect = value.Elem(), true
+		default:
+			return shape, fmt.Errorf("a map value of %s is not carried", fieldType.Elem())
+		}
 	}
-	return keyKind, valueKind, nil
+	if value.Kind() == reflect.Slice {
+		return listShape(shape, fieldType, value)
+	}
+	if shape.valueKind, err = mapKindOf(value, "value"); err != nil {
+		return shape, err
+	}
+	if shape.valueKind == mapStruct {
+		shape.record = value
+	}
+	return shape, nil
+}
+
+// listShape resolves a map whose value is a slice: of structs, or of a kind a
+// scalar map value may be. A slice of anything else — of slices, of pointers,
+// of `any`, a []byte — is refused with the map named.
+func listShape(shape mapShape, mapType, slice reflect.Type) (mapShape, error) {
+	element := slice.Elem()
+	if element.Kind() == reflect.Struct {
+		shape.valueKind, shape.record, shape.stride = mapStructs, element, element.Size()
+		return shape, nil
+	}
+	kind, err := mapKindOf(element, "value")
+	if err != nil || !listElementKind(kind) || element.Kind() == reflect.Uint8 {
+		return shape, fmt.Errorf("a map value of %s is not carried", mapType.Elem())
+	}
+	shape.valueKind, shape.listKind = mapList, kind
+	return shape, nil
+}
+
+// listElementKind says a kind may be a mapList's element: a scalar.
+func listElementKind(kind mapKind) bool {
+	switch kind {
+	case mapString, mapInt, mapUint, mapFloat64, mapBool, mapFloat32:
+		return true
+	}
+	return false
+}
+
+// listValued says a map value is a key-less list, which has no four-bit form.
+// See typePlan.hasMapLists.
+func listValued(kind mapKind) bool {
+	return kind == mapStructs || kind == mapList
 }
 
 // anyMapType is the dynamic document's map, which appendMapField writes without
@@ -203,8 +291,12 @@ func appendMapField(writer *wire.Writer8, field *planField, at unsafe.Pointer, b
 		writeMapValue(writer, field.keyKind, key)
 		switch field.valueKind {
 		case mapStruct:
-			holder.Set(value.MapIndex(key))
-			appendStructElement(writer, field.sub, holder.Addr().UnsafePointer(), buf)
+			appendStructElement(writer, field.sub, mapRecordAt(field, value.MapIndex(key), holder), buf)
+		case mapStructs:
+			slice := mapSliceOf(field, value.MapIndex(key))
+			appendStructsElement(writer, field.sub, &slice, field.stride, buf)
+		case mapList:
+			appendMapList(writer, field, value.MapIndex(key), buf)
 		default:
 			writeMapValue(writer, field.valueKind, value.MapIndex(key))
 		}
@@ -220,11 +312,63 @@ func appendMapField(writer *wire.Writer8, field *planField, at unsafe.Pointer, b
 // written from here, and on the way back each is read into it and copied in.
 // One holder per map rather than one per entry: the walk is done with an entry
 // before the next is copied over it.
+//
+// A map of pointers needs no copy, since what each points at has an address,
+// and keeps the holder zero: it is what a nil value is written from.
 func structHolder(field *planField) reflect.Value {
 	if field.valueKind != mapStruct {
 		return reflect.Value{}
 	}
-	return reflect.New(field.sliceType.Elem()).Elem()
+	record := field.sliceType.Elem()
+	if field.valueIndirect {
+		record = record.Elem()
+	}
+	return reflect.New(record).Elem()
+}
+
+// mapRecordAt is where a struct map value is written from: the entry copied
+// into holder, or what a pointer entry points at — holder's zero for a nil one.
+func mapRecordAt(field *planField, value, holder reflect.Value) unsafe.Pointer {
+	if !field.valueIndirect {
+		holder.Set(value)
+	} else if !value.IsNil() {
+		return value.UnsafePointer()
+	}
+	return holder.Addr().UnsafePointer()
+}
+
+// mapSliceOf is a slice map value's header, through its pointer if it has one;
+// a nil pointer is an empty slice.
+func mapSliceOf(field *planField, value reflect.Value) sliceHeader {
+	if field.valueIndirect {
+		if value.IsNil() {
+			return sliceHeader{}
+		}
+		value = value.Elem()
+	}
+	return sliceHeader{data: value.UnsafePointer(), len: value.Len(), cap: value.Cap()}
+}
+
+// appendMapList writes a scalar slice map value: a key-less list of the
+// elements a map value of its element kind is.
+func appendMapList(writer *wire.Writer8, field *planField, value reflect.Value, buf *scratch) {
+	if field.valueIndirect {
+		value = value.Elem()
+	}
+	count := 0
+	if value.IsValid() {
+		count = value.Len()
+	}
+	if !buf.enter() {
+		writer.Close(writer.OpenElementList(0))
+		return
+	}
+	defer buf.leave()
+	mark := writer.OpenElementList(count)
+	for index := range count {
+		writeMapValue(writer, field.listKind, value.Index(index))
+	}
+	writer.Close(mark)
 }
 
 // sortedMapKeys is a map's keys in the order its entries are written.
@@ -279,6 +423,7 @@ func readMapField(reader *wire.Reader8, field *planField, at unsafe.Pointer, buf
 	built := reflect.MakeMapWithSize(field.sliceType, count)
 	key := reflect.New(field.sliceType.Key()).Elem()
 	value := reflect.New(field.sliceType.Elem()).Elem()
+	list := mapListField(field)
 	for range count {
 		if field.valueKind == mapAny {
 			readCompactKey(&entries, field.keyKind, key)
@@ -296,12 +441,13 @@ func readMapField(reader *wire.Reader8, field *planField, at unsafe.Pointer, buf
 				value.SetZero()
 			}
 		case mapStruct:
-			// value is reused across entries and SetMapIndex copies it, so it is
-			// zeroed first: a field this entry omits must not keep the last one's.
-			value.SetZero()
 			if body, wideKeys, ok := entries.ElementStructBody(); ok {
-				readBody(&entries, body, wideKeys, field.sub, value.Addr().UnsafePointer(), buf)
+				readBody(&entries, body, wideKeys, field.sub, mapValueInto(field, value).Addr().UnsafePointer(), buf)
 			}
+		case mapStructs:
+			readStructsElement(&entries, &list, mapValueInto(field, value).Addr().UnsafePointer(), buf)
+		case mapList:
+			readMapList(&entries, field.listKind, mapValueInto(field, value))
 		default:
 			readMapValue(&entries, field.valueKind, value)
 		}
@@ -313,6 +459,102 @@ func readMapField(reader *wire.Reader8, field *planField, at unsafe.Pointer, buf
 	}
 	target.Set(built)
 }
+
+// mapValueInto is where an entry's struct or slice is read: value itself,
+// zeroed — it is reused across entries and SetMapIndex copies it, so a field
+// this entry omits must not keep the last one's, nor a slice its array — or,
+// for a map of pointers, a new pointee value is made to point at.
+func mapValueInto(field *planField, value reflect.Value) reflect.Value {
+	if !field.valueIndirect {
+		value.SetZero()
+		return value
+	}
+	pointee := reflect.New(value.Type().Elem())
+	value.Set(pointee)
+	return pointee.Elem()
+}
+
+// mapListField is the field a mapStructs value is read as: a slice of the
+// map's structs, which is what newSlice and the table readers take. It is the
+// zero field for any other map.
+func mapListField(field *planField) planField {
+	if field.valueKind != mapStructs {
+		return planField{}
+	}
+	slice := field.sliceType.Elem()
+	if field.valueIndirect {
+		slice = slice.Elem()
+	}
+	return planField{op: opStructs, sub: field.sub, sliceType: slice, stride: field.stride}
+}
+
+// readStructsElement is readStructsField for a key-less list or table, which
+// is what a mapStructs value is: it reads one into the empty slice at at.
+func readStructsElement(reader *wire.Reader8, field *planField, at unsafe.Pointer, buf *scratch) {
+	if !buf.enter() {
+		reader.Fail(buf.err)
+		return
+	}
+	defer buf.leave()
+	switch reader.ElementKind() {
+	case wire.KindList:
+		count, elements, ok := reader.ElementList()
+		if !ok {
+			return
+		}
+		newSlice(field, at, count)
+		data := (*sliceHeader)(at).data
+		for index := range count {
+			body, wideKeys, ok := elements.ElementStructBody()
+			if !ok {
+				reader.Fail(elements.Err())
+				return
+			}
+			readBody(reader, body, wideKeys, field.sub, unsafe.Add(data, uintptr(index)*field.stride), buf)
+			if reader.Err() != nil {
+				return
+			}
+		}
+	case wire.KindTable:
+		rows, columns, ok := reader.ElementTable()
+		if !ok {
+			return
+		}
+		if err := takeRows(&buf.rowsLeft, rows, len(field.sub.fields)); err != nil {
+			reader.Fail(err)
+			return
+		}
+		newSlice(field, at, rows)
+		readColumns(&columns, field, (*sliceHeader)(at).data, rows, buf)
+		reader.Fail(columns.Err())
+	default:
+		reader.Fail(errMapListValue)
+	}
+}
+
+// readMapList reads a mapList value into into, a slice of the element kind's
+// type.
+func readMapList(reader *wire.Reader8, kind mapKind, into reflect.Value) {
+	if reader.ElementKind() != wire.KindList {
+		reader.Fail(errMapListValue)
+		return
+	}
+	count, elements, ok := reader.ElementList()
+	if !ok {
+		return
+	}
+	slice := reflect.MakeSlice(into.Type(), count, count)
+	for index := range count {
+		readMapValue(&elements, kind, slice.Index(index))
+		if elements.Err() != nil {
+			reader.Fail(elements.Err())
+			return
+		}
+	}
+	into.Set(slice)
+}
+
+var errMapListValue = errors.New("colbin: a map whose values are lists holds a value that is not one")
 
 func readMapValue(reader *wire.Reader8, kind mapKind, into reflect.Value) {
 	switch kind {

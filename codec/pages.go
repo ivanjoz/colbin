@@ -111,6 +111,7 @@ func (plan *typePlan) paginate(structType reflect.Type, names, fieldNames []stri
 			}
 		}
 		page.hasDynamic = anyDynamic(page.fields)
+		page.hasMapLists = anyMapLists(page.fields)
 		dynamic = dynamic || page.hasDynamic
 		if at > 0 {
 			page.finish()

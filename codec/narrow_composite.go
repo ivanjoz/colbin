@@ -260,8 +260,7 @@ func appendNarrowMap(writer *wire.Writer, field *planField, at unsafe.Pointer, b
 		}
 		writeNarrowMapValue(writer, field.keyKind, key)
 		if field.valueKind == mapStruct {
-			holder.Set(value.MapIndex(key))
-			appendNarrowElement(writer, field.sub, holder.Addr().UnsafePointer(), buf)
+			appendNarrowElement(writer, field.sub, mapRecordAt(field, value.MapIndex(key), holder), buf)
 			continue
 		}
 		writeNarrowMapValue(writer, field.valueKind, value.MapIndex(key))
@@ -491,8 +490,9 @@ func readNarrowColumns(field *planField, data unsafe.Pointer, rows int, body []b
 }
 
 func readNarrowMap(reader *wire.Reader, field *planField, at unsafe.Pointer, buf *scratch) {
-	if field.valueKind == mapAny {
-		// A map of dynamic values is always wide. See errBadMapValue.
+	if field.valueKind == mapAny || listValued(field.valueKind) {
+		// A map of dynamic values or of lists is always wide. See
+		// errBadMapValue.
 		reader.Fail(errBadMapValue(field.valueKind))
 		return
 	}
@@ -516,10 +516,10 @@ func readNarrowMap(reader *wire.Reader, field *planField, at unsafe.Pointer, buf
 	for range count {
 		readNarrowMapValue(&entries, field.keyKind, key)
 		if field.valueKind == mapStruct {
-			// Zeroed per entry for the reason readMapField gives.
-			value.SetZero()
+			// Zeroed, or pointed at a new record, per entry: see mapValueInto.
 			if body, ok := entries.Element(); ok {
-				readNarrowBody(&entries, body, field.sub.isWide, field.sub, value.Addr().UnsafePointer(), buf)
+				record := mapValueInto(field, value).Addr().UnsafePointer()
+				readNarrowBody(&entries, body, field.sub.isWide, field.sub, record, buf)
 			}
 		} else {
 			readNarrowMapValue(&entries, field.valueKind, value)

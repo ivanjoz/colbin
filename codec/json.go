@@ -1268,9 +1268,10 @@ func (w *walker) narrowMap(reader *wire.Reader, field *planField) {
 		w.fail(errBadMapKey(field.keyKind))
 		return
 	}
-	if field.valueKind == mapAny {
-		// A dynamic value names its own class, which four descriptor bits cannot:
-		// a map of them is always wide, so a section saying otherwise is wrong.
+	if field.valueKind == mapAny || listValued(field.valueKind) {
+		// A dynamic value names its own class, which four descriptor bits cannot,
+		// and a list is key-less: a map of either is always wide, so a section
+		// saying otherwise is wrong.
 		w.fail(errBadMapValue(field.valueKind))
 		return
 	}
@@ -1371,6 +1372,10 @@ func (w *walker) wideMap(reader *wire.Reader8, field *planField) {
 			if body, wideKeys, ok := entries.ElementStructBody(); ok {
 				w.body(field.sub, body, wideKeys)
 			}
+		case mapStructs:
+			w.mapStructs(&entries, field.sub)
+		case mapList:
+			w.mapList(&entries, field.listKind)
 		default:
 			w.fail(errBadMapValue(field.valueKind))
 		}
@@ -1380,6 +1385,72 @@ func (w *walker) wideMap(reader *wire.Reader8, field *planField) {
 		}
 	}
 	w.to.endObject()
+}
+
+// mapStructs walks a mapStructs value: the key-less list or table a slice of
+// structs inside a dynamic value is, behind the struct the schema names rather
+// than a type tag.
+func (w *walker) mapStructs(entries *wire.Reader8, plan *typePlan) {
+	switch entries.ElementKind() {
+	case wire.KindList:
+		count, elements, ok := entries.ElementList()
+		if !ok {
+			w.fail(entries.Err())
+			return
+		}
+		w.structList(count, &elements, plan)
+	case wire.KindTable:
+		rows, columns, ok := entries.ElementTable()
+		if !ok {
+			w.fail(entries.Err())
+			return
+		}
+		w.structTable(rows, &columns, plan)
+	default:
+		w.fail(errMapListValue)
+	}
+}
+
+// mapList walks a mapList value: a key-less list of elements of one scalar
+// kind, which render as the same kind of map value would.
+func (w *walker) mapList(entries *wire.Reader8, kind mapKind) {
+	if entries.ElementKind() != wire.KindList {
+		w.fail(errMapListValue)
+		return
+	}
+	count, elements, ok := entries.ElementList()
+	if !ok {
+		w.fail(entries.Err())
+		return
+	}
+	if !w.enter() {
+		return
+	}
+	defer w.leave()
+	w.to.beginArray(count)
+	for range count {
+		switch kind {
+		case mapString:
+			w.to.text(elements.ElementString())
+		case mapInt:
+			w.to.signed(elements.ElementInt())
+		case mapUint:
+			w.to.unsigned(elements.ElementUint())
+		case mapFloat32:
+			w.floatValue(float32FromReversed(elements.ElementUint()), 32)
+		case mapFloat64:
+			w.floatValue(float64FromReversed(elements.ElementUint()), 64)
+		case mapBool:
+			w.to.boolean(elements.ElementUint() == 1)
+		default:
+			w.fail(errBadMapValue(kind))
+		}
+		w.fail(elements.Err())
+		if w.err != nil {
+			return
+		}
+	}
+	w.to.endArray()
 }
 
 // mapKeyIsRenderable says the kind is one the format accepts as a key. A float

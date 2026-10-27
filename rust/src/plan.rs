@@ -73,7 +73,27 @@ pub const MAP_ANY: u8 = 6;
 /// section's to say, by an index after the two kinds, held in
 /// [`PlanField::sub`].
 pub const MAP_STRUCT: u8 = 7;
-pub const MAP_KIND_COUNT: u8 = 8;
+/// A slice-of-structs map value: the key-less list or table a slice of structs
+/// inside a dynamic value is. The struct is named as for [`MAP_STRUCT`].
+pub const MAP_STRUCTS: u8 = 8;
+/// A slice-of-scalars map value: a key-less list of the elements a map value of
+/// the kind in [`PlanField::list_kind`] would be. The section says that kind in
+/// a byte after the two kinds.
+pub const MAP_LIST: u8 = 9;
+pub const MAP_KIND_COUNT: u8 = 10;
+
+/// Whether a map value kind is a key-less list, which has no four-bit form: a
+/// plan holding one is always wide.
+#[must_use]
+pub const fn list_valued(kind: u8) -> bool {
+    kind == MAP_STRUCTS || kind == MAP_LIST
+}
+
+/// Whether a kind may be a [`MAP_LIST`]'s element: a scalar.
+#[must_use]
+pub const fn list_element_kind(kind: u8) -> bool {
+    kind <= MAP_FLOAT32
+}
 
 /// Whether a field of this op can be a *column*, which is what lets a slice of
 /// the struct holding it be transposed into a table.
@@ -129,12 +149,14 @@ pub struct PlanField {
     pub key: u8,
     pub op: u8,
     /// The child plan's index in [`Schema::plans`], for `OP_STRUCT`,
-    /// `OP_STRUCTS` and an `OP_MAP` of [`MAP_STRUCT`] values.
+    /// `OP_STRUCTS` and an `OP_MAP` of [`MAP_STRUCT`] or [`MAP_STRUCTS`] values.
     pub sub: Option<u32>,
     /// What a pointer points at.
     pub elem_op: u8,
     pub key_kind: u8,
     pub value_kind: u8,
+    /// A [`MAP_LIST`]'s element kind.
+    pub list_kind: u8,
 }
 
 impl Default for PlanField {
@@ -146,6 +168,7 @@ impl Default for PlanField {
             elem_op: OP_BOOL,
             key_kind: MAP_STRING,
             value_kind: MAP_STRING,
+            list_kind: MAP_STRING,
         }
     }
 }

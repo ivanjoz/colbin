@@ -106,10 +106,11 @@ type planField struct {
 	stride    uintptr
 	// Pointers only: the op of what is pointed at. See pointer.go.
 	elemOp fieldOp
-	// Maps only: what their keys and values are. See maps.go. typedMap is the
-	// map's compiled walks, when its type has them. See maps_typed.go.
-	keyKind, valueKind mapKind
-	typedMap           *mapOps
+	// Maps only: what their keys and values are, and a mapList's elements. See
+	// maps.go. typedMap is the map's compiled walks, when its type has them.
+	// See maps_typed.go. A mapStructs map keeps its element's size in stride.
+	keyKind, valueKind, listKind mapKind
+	typedMap                     *mapOps
 	// native says op came from a Go int, uint or uintptr, whose width is the
 	// platform's. The plan reads it at that width; the schema section names the
 	// 64-bit op either way, so a section does not depend on where it was written.
@@ -118,6 +119,9 @@ type planField struct {
 	// struct describes: everything above is the pointee's, and only the walks
 	// that reach the field's memory step through it. See pointer.go.
 	indirect bool
+	// valueIndirect says a map's values are pointers to the structs or slices
+	// valueKind describes. It is not on the wire. See maps.go.
+	valueIndirect bool
 }
 
 type typePlan struct {
@@ -138,6 +142,10 @@ type typePlan struct {
 	// written as a descriptor that names its own class, and a four-bit descriptor
 	// has no room for one, so the scope goes wide. See dynamic.go.
 	hasDynamic bool
+	// hasMapLists says some field is a map whose values are lists, which are
+	// key-less and so have no four-bit form either: the scope goes wide. See
+	// maps.go.
+	hasMapLists bool
 	// byKey maps a wire key to an index into fields, or -1. See find.
 	byKey []int16
 	// sizeHint is what Marshal reserves for a record with no slices of structs.
@@ -291,7 +299,7 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 			fieldType = fieldType.Elem()
 		}
 		op, sub, sliceType, stride, compositeErr := compositeOpFor(fieldType, building)
-		var keyKind, valueKind mapKind
+		var shape mapShape
 		var typedMap *mapOps
 		var elemOp fieldOp
 		// A composite that failed to plan is reported as itself. Only
@@ -307,15 +315,15 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 			switch fieldType.Kind() {
 			case reflect.Map:
 				var err error
-				if keyKind, valueKind, err = mapOpFor(fieldType); err != nil {
+				if shape, err = mapOpFor(fieldType); err != nil {
 					return nil, fmt.Errorf("colbin: %s.%s: %w",
 						typeName(structType), field.Name, err)
 				}
-				op, sliceType, typedMap = opMap, fieldType, typedMapFor(fieldType)
-				if valueKind == mapStruct {
+				op, sliceType, stride, typedMap = opMap, fieldType, shape.stride, typedMapFor(fieldType)
+				if shape.record != nil {
 					// The value's plan, the way a slice of structs holds its
 					// element's: an error in it is reported as itself.
-					if sub, err = planForBuilding(fieldType.Elem(), building); err != nil {
+					if sub, err = planForBuilding(shape.record, building); err != nil {
 						return nil, err
 					}
 				}
@@ -340,17 +348,19 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 			sliceType = fieldType
 		}
 		plan.fields = append(plan.fields, planField{
-			offset:    field.Offset,
-			op:        op,
-			sub:       sub,
-			sliceType: sliceType,
-			stride:    stride,
-			elemOp:    elemOp,
-			keyKind:   keyKind,
-			valueKind: valueKind,
-			typedMap:  typedMap,
-			native:    isNative(fieldType),
-			indirect:  indirect,
+			offset:        field.Offset,
+			op:            op,
+			sub:           sub,
+			sliceType:     sliceType,
+			stride:        stride,
+			elemOp:        elemOp,
+			keyKind:       shape.keyKind,
+			valueKind:     shape.valueKind,
+			listKind:      shape.listKind,
+			typedMap:      typedMap,
+			native:        isNative(fieldType),
+			indirect:      indirect,
+			valueIndirect: shape.indirect,
 		})
 		hashNames = append(hashNames, hashName)
 		fieldNames = append(fieldNames, field.Name)
@@ -378,6 +388,7 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 		}
 		plan.names = hashNames
 		plan.hasDynamic = anyDynamic(plan.fields)
+		plan.hasMapLists = anyMapLists(plan.fields)
 	}
 	plan.envelope = isEnvelope(structType)
 	if plan.envelope {
@@ -510,6 +521,17 @@ func (plan *typePlan) sizeAt(record unsafe.Pointer, depth int) int {
 func anyDynamic(fields []planField) bool {
 	for _, field := range fields {
 		if field.op == opAny || field.op == opAnys || (field.op == opMap && field.valueKind == mapAny) {
+			return true
+		}
+	}
+	return false
+}
+
+// anyMapLists says some field is a map whose values are lists. See
+// typePlan.hasMapLists.
+func anyMapLists(fields []planField) bool {
+	for _, field := range fields {
+		if field.op == opMap && listValued(field.valueKind) {
 			return true
 		}
 	}

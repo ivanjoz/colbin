@@ -44,7 +44,7 @@ const (
 
 // wide reports whether a plan must use eight-bit keys.
 func (plan *typePlan) wide() bool {
-	return plan.anyKeyPastNarrow || plan.derivedKeys || plan.hasDynamic
+	return plan.anyKeyPastNarrow || plan.derivedKeys || plan.hasDynamic || plan.hasMapLists
 }
 
 // appendWide is writePlan for the wide key width.

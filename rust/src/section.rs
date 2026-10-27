@@ -16,6 +16,8 @@
 //! opStruct, opStructs              [structIndex]
 //! opMap                            [keyKind:1] [valueKind:1]
 //! opMap, valueKind MAP_STRUCT      [keyKind:1] [valueKind:1] [structIndex]
+//! opMap, valueKind MAP_STRUCTS     [keyKind:1] [valueKind:1] [structIndex]
+//! opMap, valueKind MAP_LIST        [keyKind:1] [valueKind:1] [listKind:1]
 //! opPointer                        [elemOp:1]
 //! ```
 //!
@@ -44,8 +46,8 @@ use alloc::vec::Vec;
 
 use crate::Error;
 use crate::plan::{
-    MAP_KIND_COUNT, MAP_STRUCT, OP_COUNT, OP_MAP, OP_POINTER, OP_STRUCT, OP_STRUCTS, Plan,
-    PlanField,
+    MAP_KIND_COUNT, MAP_LIST, MAP_STRUCT, MAP_STRUCTS, OP_COUNT, OP_MAP, OP_POINTER, OP_STRUCT,
+    OP_STRUCTS, Plan, PlanField, list_element_kind,
 };
 
 /// The smallest a definition can be, which is what bounds a declared count
@@ -288,8 +290,16 @@ fn parse_desc(cursor: &mut Cursor<'_>, key: u8, table_len: usize) -> Result<Plan
             }
             field.key_kind = key_kind;
             field.value_kind = value_kind;
-            if value_kind == MAP_STRUCT {
-                field.sub = Some(struct_index(cursor, table_len)?);
+            match value_kind {
+                MAP_STRUCT | MAP_STRUCTS => field.sub = Some(struct_index(cursor, table_len)?),
+                MAP_LIST => {
+                    let list_kind = cursor.byte()?;
+                    if !list_element_kind(list_kind) {
+                        return Err(Error::BadSection);
+                    }
+                    field.list_kind = list_kind;
+                }
+                _ => {}
             }
         }
         OP_POINTER => {
@@ -373,8 +383,10 @@ fn append_desc(out: &mut Vec<u8>, field: &PlanField) {
         OP_MAP => {
             out.push(field.key_kind);
             out.push(field.value_kind);
-            if field.value_kind == MAP_STRUCT {
-                append_length(out, field.sub.unwrap_or(0) as usize);
+            match field.value_kind {
+                MAP_STRUCT | MAP_STRUCTS => append_length(out, field.sub.unwrap_or(0) as usize),
+                MAP_LIST => out.push(field.list_kind),
+                _ => {}
             }
         }
         OP_POINTER => out.push(field.elem_op),

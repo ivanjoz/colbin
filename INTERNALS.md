@@ -486,7 +486,7 @@ Entries are pairs of key-less elements (§5.2). A typed map's are sorted by key;
 map of `any` (`mapAny`) is a dynamic container, its keys and values compact (§9.1)
 and in whatever order the writer's map handed them over. Keys are strings or
 integers. Values are a string, an integer, a float, a bool (an unsigned 0 or 1),
-`any`, or a struct.
+`any`, a struct, or a slice of structs or of one of the scalars.
 
 | map kind | value | number |
 |---|---|---|
@@ -498,6 +498,8 @@ integers. Values are a string, an integer, a float, a bool (an unsigned 0 or 1),
 | `mapFloat32` | | 5 |
 | `mapAny` | a dynamic value (§9); wide only | 6 |
 | `mapStruct` | a struct element | 7 |
+| `mapStructs` | a key-less list or table of structs; wide only | 8 |
+| `mapList` | a key-less list of scalar elements; wide only | 9 |
 
 The numbers are format: a schema section names them. The two float widths are
 separate kinds because a reader working from a section has no Go field to read
@@ -507,12 +509,31 @@ the width off.
 bits with a STRUCT descriptor, at four with a length — and the schema section
 names which struct by its index in the struct table (§10). So a map of structs
 needs no self-describing message: a section sent once per connection describes
-it. `map[K]*Struct` is refused, because a nil value inside a map has no form.
+it.
+
+**A slice value** is a key-less list. `map[K][]Struct` (`mapStructs`) writes
+each value as a slice of structs inside a dynamic value is (§9): a LIST of struct
+elements, or past the table threshold a TABLE of columns at eight-bit keys, never
+grouped — with no TYPED tag in front, because the section names the struct by
+index as it does for `mapStruct`. `map[K][]T` of a scalar (`mapList`) writes each
+value as a LIST of the elements a map value of T's kind is, and the section says
+that kind in a byte after the two kinds. `[]byte`, a slice of slices, of pointers
+or of `any` is refused. A key-less list has no four-bit form, so a type holding
+one of these maps is wide, as one holding a dynamic value is.
+
+**A pointer value** is not on the wire. `map[K]*Struct` and `map[K]*[]T` are the
+bytes and the section of `map[K]Struct` and `map[K][]T`, the way a pointer field
+is its pointee (§6.6). A nil value is written as an empty struct or list, since a
+present key needs a value and a typed value has no null; it reads back as a
+pointer to an empty one, and every entry a reader fills gets its own pointee.
+`map[K]*scalar` is refused: its nil and its zero are different values and an
+entry has nowhere to say which.
 
 Go cannot walk a map through an unsafe pointer, so this is the one field kind
 read and written with reflection per entry. A map value has no address either, so
 each struct value is copied into one holder per map on the way out, and read into
-it — zeroed first — on the way in.
+it — zeroed first — on the way in. A map of pointers needs no holder on the way
+out, and reads each entry into a new pointee.
 
 ### 6.5 Pages: more than 255 fields
 
@@ -747,7 +768,7 @@ after it, so a reader that wants only the body adds it to the cursor.
 | op | extra |
 |---|---|
 | `opStruct`, `opStructs`, `opPointerStruct` | `[structIndex]` |
-| `opMap` | `[keyKind:1][valueKind:1]`, then `[structIndex]` when the value kind is `mapStruct` |
+| `opMap` | `[keyKind:1][valueKind:1]`, then `[structIndex]` when the value kind is `mapStruct` or `mapStructs`, or `[listKind:1]` when it is `mapList` |
 | `opPointer` | `[elemOp:1]` |
 | everything else | nothing: an array's element type is in its op |
 

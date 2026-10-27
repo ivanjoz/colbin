@@ -158,6 +158,20 @@ type Catalog struct {
 	Counts *map[string]uint16 `cb:"21"`
 }
 
+// MapLists holds maps whose values are lists — of structs, under the table
+// threshold and past it, and of scalars — and a map of pointers, which are
+// their pointees on the wire. A map of lists has no four-bit form, so MapLists
+// is wide.
+type MapLists struct {
+	Name   string               `cb:"1"`
+	Lines  map[string][]Line    `cb:"2"`
+	One    map[int32]*Line      `cb:"3"`
+	Counts map[string][]int64   `cb:"4"`
+	Names  map[string][]string  `cb:"5"`
+	Ratios map[string][]float64 `cb:"6"`
+	Flags  map[string]*[]bool   `cb:"7"`
+}
+
 // Wide has an id past sixteen, whose key four bits cannot carry, so the type
 // takes eight-bit keys. It is one of three things that do: the others are a
 // field with no id in its tag, whose key is a hash of its name and lands
@@ -345,6 +359,16 @@ func types() []typeCase {
 				Cells:  map[int32]WideCell{-1: {Label: "W", Cents: 1 << 40}, 7: {ProductID: 7}},
 				Tags:   &[]string{"open", "late"},
 				Counts: &map[string]uint16{"doors": 2},
+			}),
+		describe("map-of-lists", "maps of lists of structs, as a list and as a table, of scalar lists, and of pointers",
+			&MapLists{
+				Name:   "groups",
+				Lines:  map[string][]Line{"few": makeLines(2), "many": makeLines(12), "none": {}},
+				One:    map[int32]*Line{-1: {SKU: "A1", Qty: 3}, 2: nil},
+				Counts: map[string][]int64{"c": {1, -2, 1 << 50}},
+				Names:  map[string][]string{"n": {"a", "", "el niño"}},
+				Ratios: map[string][]float64{"r": {0.5, -2}},
+				Flags:  map[string]*[]bool{"on": {true, false}, "nil": nil},
 			}),
 		describe("maps", "one entry each, which keeps the case about a map's framing",
 			&Maps{

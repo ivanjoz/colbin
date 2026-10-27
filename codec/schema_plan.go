@@ -159,6 +159,11 @@ func parseStructDef(plan *typePlan, plans []*typePlan, data []byte) ([]byte, err
 			return nil, fmt.Errorf(
 				"colbin: a schema section puts a dynamic value under a four-bit key")
 		}
+		// A map of lists is wide for the same reason: its values are key-less.
+		if field := &plan.fields[index]; !plan.isWide && field.op == opMap && listValued(field.valueKind) {
+			return nil, fmt.Errorf(
+				"colbin: a schema section puts a map of lists under a four-bit key")
+		}
 	}
 	return data, nil
 }
@@ -282,8 +287,21 @@ func parseDesc(field *planField, plans []*typePlan, data []byte) ([]byte, error)
 		if field.valueKind, err = mapKindCode(data[1]); err != nil {
 			return nil, err
 		}
-		if field.valueKind == mapStruct {
+		switch field.valueKind {
+		case mapStruct, mapStructs:
 			return parseStructIndex(field, plans, data[2:])
+		case mapList:
+			if len(data) < 3 {
+				return nil, errShortSection
+			}
+			if field.listKind, err = mapKindCode(data[2]); err != nil {
+				return nil, err
+			}
+			if !listElementKind(field.listKind) {
+				return nil, fmt.Errorf(
+					"colbin: a schema section gives a map lists of kind %d, which is not a scalar", field.listKind)
+			}
+			return data[3:], nil
 		}
 		return data[2:], nil
 	case opPointer:

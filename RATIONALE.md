@@ -1531,8 +1531,53 @@ wrong kind. Go reads a map value through reflection, so each struct is copied
 into one holder per map on the way out and read into it on the way in; the
 holder is zeroed per entry, or a field one entry omits would keep the last
 one's. `map[K]*Struct` stays refused, since a nil value inside a map has no
-form. The Rust walk renders a wide map of structs and still refuses every
+form (until maps of slices, below, wrote a nil one as empty). The Rust walk renders a wide map of structs and still refuses every
 narrow map; the derive does not do maps of structs.
+
+## Maps of slices, and maps of pointers
+
+**Context** — A service answered `map[string]*[]Record` keyed by list id, and
+the encoder refused it; the obvious rewrite, `map[string][]Record`, was refused
+too. A map value could be a scalar, a struct or `any`, and nothing else, and
+`map[K]*Struct` had been refused since maps of structs because a nil value
+inside a map has no form. Wrapping each list in a struct would have changed the
+JSON a browser reads.
+
+**Considered** — A null code for a nil entry, so a map of pointers kept nil
+apart from empty. It is the same question pointers to collections answered
+(above), and the same answer: a shape no other field has, in three
+implementations, for a distinction the format already does not make for a
+slice. A grouped table per value, as a field's table can be: a map value is
+written by the code a dynamic value's table is, which is never grouped, and a
+list per key is the case the grouping was not built for.
+
+**Decision** — Two map kinds, `mapStructs = 8` and `mapList = 9`. A slice of
+structs is the key-less list or table a `[]T` inside a dynamic value already is
+(`appendStructsElement`), with the struct named by index after the two kinds as
+`mapStruct` does, so a section sent once per connection describes it. A slice
+of scalars is a key-less list of the elements the scalar's own map kind writes,
+and the section names that kind in one byte after the two. No new wire
+primitive: every byte of a value is one a dynamic value could already hold. A
+key-less list has no four-bit form, so a type holding one of these maps is
+wide — a flag beside `hasDynamic`, not `hasDynamic` itself, which would also
+route the type through the self-describing walk for dynamic values.
+
+A pointer value is its pointee, as a pointer field is: `map[K]*Struct` and
+`map[K]*[]T` are the bytes and the section of `map[K]Struct` and `map[K][]T`.
+A nil one is written as an empty struct or list and reads back as a pointer to
+one; every entry gets its own pointee. `map[K]*scalar` stays refused, since
+there an empty value and a zero one are the same bytes and nil and zero are
+different values.
+
+**What it cost** — Two kinds and a byte of section, so an older reader refuses
+a section naming them, which is a minor version. No byte changes for a type
+without such a map, and `planField` stays 80 bytes: the element kind and the
+pointer flag fit in padding, and a `mapStructs` keeps its element's size in
+`stride`, which a map did not use. Scalar lists are written per element through
+reflection, as every other map value is. The narrow map paths learn only the
+pointer case and refuse a list kind, which a section can name but this encoder
+never writes narrow. The Rust walk and the module render both kinds; the derive
+does not write maps of lists, as it does not write maps of structs.
 
 ## A narrow nibble that sizes the field
 

@@ -172,6 +172,11 @@ Pointers distinguish "absent" from "zero":
   value the format writes just to mark presence.
 - A pointer to a slice or a map is encoded as the slice or the map.
 
+Map values may be scalars, strings, structs, `any`, or slices of structs or of
+scalars: `map[K][]Struct` writes each value as a list, or as a table past 8
+rows. `map[K]*Struct` and `map[K]*[]T` are encoded as their pointees, a nil
+value as an empty one. A type holding a map of slices uses K8.
+
 ### Slices of structs become tables
 
 A `[]Struct` whose element fields are all columnable switches layout at
@@ -470,7 +475,8 @@ so that colbin's `go.mod` stays free of protobuf.
   type. Give a changed field a new id.
 - **Untagged ids depend on field names and declaration order**, as described
   under [Field ids](#field-ids-tags-are-optional).
-- **Not supported yet:** fixed-size arrays, `map[K]*Struct` and `map[any]T`.
+- **Not supported yet:** fixed-size arrays, `map[any]T`, `map[K]*scalar` and
+  map values nested deeper than a slice (`map[K][][]T`, `map[K][]*T`).
   `int` and `uint` are encoded as 64-bit.
 - **An empty slice and a nil slice are the same on the wire.** Both decode as
   nil, and a pointer to an empty slice decodes as a nil pointer.

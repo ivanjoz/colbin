@@ -927,6 +927,41 @@ func catalog() *Catalog {
 	}
 }
 
+// Groups holds maps whose values are lists — of structs, under the table
+// threshold and past it, and of every scalar kind — and maps of pointers, which
+// are their pointees on the wire. A map of lists has no four-bit form, so
+// Groups is wide.
+type Groups struct {
+	Name   string               `cb:"1"`
+	Rows   map[string][]Row     `cb:"2"`
+	Ptrs   map[string]*[]Inner  `cb:"3"`
+	One    map[int32]*Inner     `cb:"4"`
+	Ints   map[string][]int64   `cb:"5"`
+	Names  map[uint16][]string  `cb:"6"`
+	Floats map[string][]float64 `cb:"7"`
+	Halves map[string][]float32 `cb:"8"`
+	Flags  map[string][]bool    `cb:"9"`
+	Big    map[string][]uint64  `cb:"10"`
+}
+
+func groups() *Groups {
+	ptrs := []Inner{{SKU: "A1", Qty: 3}, {}}
+	return &Groups{
+		Name: "groups",
+		Rows: map[string][]Row{"few": rowsOf(3), "many": rowsOf(20), "none": {}},
+		Ptrs: map[string]*[]Inner{"set": &ptrs, "nil": nil},
+		One:  map[int32]*Inner{-1: {SKU: "B2", Cents: 1 << 40}, 2: nil},
+		Ints: map[string][]int64{"i": {1, -2, 1 << 50}, "empty": {}},
+		Names: map[uint16][]string{
+			1: {"a", "", "el niño"},
+		},
+		Floats: map[string][]float64{"f": {0.5, -1e300, 0}},
+		Halves: map[string][]float32{"h": {1.5, -0.25}},
+		Flags:  map[string][]bool{"b": {true, false}},
+		Big:    map[string][]uint64{"u": {0, 18446744073709551615}},
+	}
+}
+
 func walks() []walkCase {
 	var out []walkCase
 	add := func(name, about string, value any) {
@@ -1016,6 +1051,8 @@ func walks() []walkCase {
 		catalog())
 	add("doc.map-of-structs-absent", "every map and pointer empty or nil, so absent and null",
 		&Catalog{Name: "none", Tags: &[]string{}})
+	add("doc.map-of-lists", "maps of lists of structs, as a list and as a table, of every scalar list, and of pointers",
+		groups())
 	add("doc.nullable-columns", "pointer fields of a table: some rows nil, none nil, every row nil",
 		maybeRows(20))
 	add("doc.nullable-columns-all-present", "a table of pointer fields in which every row holds a value",

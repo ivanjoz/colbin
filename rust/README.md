@@ -224,8 +224,12 @@ map's entries take their type from the schema and need a second element codec.
 A `map[string]any` is never narrow — a dynamic value forces its scope wide — so
 this is only reachable through a typed map in a small struct. A map of structs
 in a wide run renders: the section names the value's struct by index after the
-two kinds (`MAP_STRUCT`), and each value is a list element. The derive does not
-write or read one; its maps hold scalars and strings.
+two kinds (`MAP_STRUCT`), and each value is a list element. A map of slices
+renders too: of structs (`MAP_STRUCTS`), each value the key-less list or table a
+typed record run inside a dynamic value is, without the tag; of scalars
+(`MAP_LIST`), each value a key-less list of the elements the kind byte after the
+two kinds names. The derive does not write or read either; its maps hold scalars
+and strings.
 
 ## Status
 

@@ -62,6 +62,10 @@ type fuzzWide struct {
 	Tags   *[]string            `cb:"26"`
 	Rows   *map[uint16]fuzzLeaf `cb:"27"`
 	Maps   fuzzNarrowMaps       `cb:"28"`
+	// Maps of lists, of structs and of scalars, and of pointers. See maps.go.
+	Lists   map[string]*[]fuzzLeaf `cb:"29"`
+	Scalars map[int32][]string     `cb:"30"`
+	Records map[string]*fuzzLeaf   `cb:"31"`
 	// Past 255, so the type is paged: Late is on the second page, and Last on
 	// the third with the second linking to it. See pages.go.
 	Late string `cb:"300"`
@@ -90,6 +94,11 @@ func FuzzUnmarshal(f *testing.F) {
 			ByName: map[string]fuzzLeaf{"x": {B: 9}}, Ints: &[]int32{-1},
 			Self: &map[string]fuzzNarrowMaps{"inner": {Ints: &[]int32{2}}},
 		},
+		Lists: map[string]*[]fuzzLeaf{
+			"few": {{A: 1}, {S: "s"}}, "many": ptr(make([]fuzzLeaf, tableThreshold)),
+		},
+		Scalars: map[int32][]string{-1: {"a", ""}},
+		Records: map[string]*fuzzLeaf{"r": {B: 3}},
 	}
 	for _, value := range []any{&narrow, &wide} {
 		for _, encode := range []func(any) ([]byte, error){Marshal, MarshalSelfDescribing} {
