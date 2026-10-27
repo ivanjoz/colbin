@@ -115,6 +115,42 @@ func TestASliceRootDescribesItself(t *testing.T) {
 	}
 }
 
+// recordGroup names its fields the way a JSON API does: the `json` name is
+// what a reader sees, whatever the `cb` tag numbers or calls the field.
+type recordGroup struct {
+	IndexID int16   `json:"ig" cb:"1"`
+	Hash    int32   `json:"id" cb:"key,2"`
+	Values  []int64 `json:"igVal"`
+	Records []grant `json:"records,omitempty" cb:"4"`
+	Counter int32   `json:"-" cb:"5"`
+	Note    string  `json:",omitempty"`
+}
+
+func TestTheJSONTagNamesTheField(t *testing.T) {
+	groups := []recordGroup{{IndexID: -9127, Hash: -36807714, Values: []int64{20752},
+		Records: []grant{{AccesoID: 10, Nivel: 4}}, Counter: 7, Note: "n"}}
+
+	data, err := MarshalSelfDescribing(groups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := ToJSON(nil, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// `json:"-"` keeps the field in colbin under its Go name; only `cb:"-"` drops it.
+	sameJSON(t, out, []byte(`[{"ig":-9127,"id":-36807714,"igVal":[20752],`+
+		`"records":[{"AccesoID":10,"Nivel":4}],"Counter":7,"Note":"n"}]`))
+
+	var back []recordGroup
+	if err := Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(back, groups) {
+		t.Fatalf("round trip gave %+v, want %+v", back, groups)
+	}
+}
+
 func TestAMapRootDescribesItself(t *testing.T) {
 	counts := map[string]int32{"a": 1, "b": 2}
 

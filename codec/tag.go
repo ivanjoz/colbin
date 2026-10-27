@@ -20,6 +20,20 @@ const noFieldID = -1
 //	                            needs a name
 //	Name string `cb:"-"`        not encoded at all
 //
+// # The name comes from `json` first
+//
+// A field's name — the one the schema carries, the one the JSON view and the
+// dynamic paths write, and the one an unnumbered field hashes to its key — is
+// its `json` tag's name whenever that tag gives one, ahead of a name in the
+// `cb` tag, which is ahead of the Go name. The `cb` number only places the
+// field on the wire; it never names it.
+//
+//	ID int64 `json:"id" cb:"1"`         field id 1, called "id"
+//	ID int64 `json:"id" cb:"key,1"`     field id 1, still called "id"
+//	ID int64 `json:"id"`                id from fnv8("id"), called "id"
+//
+// `json:"-"` does not drop the field: only `cb:"-"` does.
+//
 // # Ids are one-based
 //
 // The first field is `cb:"1"`. Narrow keys hold ids 1..16 and wide keys hold
@@ -56,9 +70,6 @@ func parseCbTag(field reflect.StructField) (name string, explicitID int, skip bo
 	if tag == "-" {
 		return "", noFieldID, true, nil
 	}
-	if tag == "" {
-		return field.Name, noFieldID, false, nil
-	}
 	named := false
 	for _, token := range strings.Split(tag, ",") {
 		if token == "" {
@@ -74,7 +85,22 @@ func parseCbTag(field reflect.StructField) (name string, explicitID int, skip bo
 			name, named = token, true
 		}
 	}
+	if jsonName, ok := jsonTagName(field); ok {
+		name = jsonName
+	}
 	return name, explicitID, false, nil
+}
+
+// jsonTagName is the name encoding/json gives a field, when its `json` tag
+// gives one. `json:"-"` and `json:",omitempty"` name nothing, and leave the
+// field to the `cb` tag and the Go name.
+func jsonTagName(field reflect.StructField) (string, bool) {
+	tag, ok := field.Tag.Lookup("json")
+	if !ok || tag == "-" {
+		return "", false
+	}
+	name, _, _ := strings.Cut(tag, ",")
+	return name, name != ""
 }
 
 // numeric says a tag token is meant as a number: a digit, or a sign and one.

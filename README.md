@@ -122,6 +122,12 @@ relative order:
 - Reordering is only unsafe when two names hash to the same byte, because
   declaration order decides which one moves.
 
+**A field's name comes from its `json` tag.** The name in the schema, in the
+JSON view, and the one an unnumbered field hashes is the `json` tag's name when
+there is one, then a name in the `cb` tag, then the Go name. The `cb` number
+only places the field on the wire. So ``ID int64 `json:"id" cb:"1"` `` is id 1,
+called `id`. `json:"-"` does not drop a field; `cb:"-"` does.
+
 What an untagged type costs, measured on a six-field record: derived keys span
 0–255, so the type always uses K8. That is one extra byte per present field:
 33 B instead of 27, and 44 ns instead of 38 to encode. Decode time is the same.
