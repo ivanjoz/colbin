@@ -218,13 +218,13 @@ writes. Every case is checked under both deliveries — the out-of-band section 
 the standalone message — because a record inside an `any` encodes differently
 under each and has to render the same either way.
 
-One gap, and it predates this: a map field in a *narrow* key run is refused with
-`Error::Unsupported`. A four-bit descriptor has no room for a class, so a narrow
-map's entries take their type from the schema and need a second element codec.
-A `map[string]any` is never narrow — a dynamic value forces its scope wide — so
-this is only reachable through a typed map in a small struct. A map of structs
-in a wide run renders: the section names the value's struct by index after the
-two kinds (`MAP_STRUCT`), and each value is a list element. A map of slices
+Maps render at both key widths. A four-bit descriptor has no room for a class,
+so a *narrow* map's entries take their type from the schema and are read by the
+narrow element readers; a `map[string]any` and a map of slices are never narrow,
+since their values are key-less values with a class of their own. A map of
+structs renders: the section names the value's struct by index after the two
+kinds (`MAP_STRUCT`), and each value is a list element. A pointer to a struct
+(op 27) renders as the struct, or as null when its key is absent. A map of slices
 renders too: of structs (`MAP_STRUCTS`), each value the key-less list or table a
 typed record run inside a dynamic value is, without the tag; of scalars
 (`MAP_LIST`), each value a key-less list of the elements the kind byte after the

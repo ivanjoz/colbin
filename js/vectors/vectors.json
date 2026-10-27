@@ -322,6 +322,24 @@
       "corruptions": 243
     },
     {
+      "name": "pointer-structs",
+      "about": "pointers to structs, present, nil and at a zero struct: a nil one is null",
+      "wide": false,
+      "ids": {
+        "Backup": 2,
+        "Name": 0,
+        "Primary": 1,
+        "Self": 4,
+        "Zero": 3
+      },
+      "section": "4502000500044e616d650b01075072696d6172791b0102064261636b75701b0103045a65726f1b01040453656c661b0000030003534b550b010351747906020543656e747304",
+      "message": "04701c04054131113c004c0608696e6e6572",
+      "selfDescribing": "d44502000500044e616d650b01075072696d6172791b0102064261636b75701b0103045a65726f1b01040453656c661b0000030003534b550b010351747906020543656e74730404701c04054131113c004c0608696e6e6572",
+      "json": "{\"Name\":\"p\",\"Primary\":{\"SKU\":\"A1\",\"Qty\":2,\"Cents\":0},\"Zero\":{\"SKU\":\"\",\"Qty\":0,\"Cents\":0},\"Self\":{\"Name\":\"inner\",\"Primary\":null,\"Backup\":null,\"Zero\":null,\"Self\":null},\"Backup\":null}",
+      "refused": 17,
+      "corruptions": 54
+    },
+    {
       "name": "map-of-lists",
       "about": "maps of lists of structs, as a list and as a table, of scalar lists, and of pointers",
       "wide": true,

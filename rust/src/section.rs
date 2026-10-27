@@ -14,6 +14,7 @@
 //! ```text
 //! scalars, string, bytes, arrays   —   (the op names the element type)
 //! opStruct, opStructs              [structIndex]
+//! opPointerStruct                  [structIndex]
 //! opMap                            [keyKind:1] [valueKind:1]
 //! opMap, valueKind MAP_STRUCT      [keyKind:1] [valueKind:1] [structIndex]
 //! opMap, valueKind MAP_STRUCTS     [keyKind:1] [valueKind:1] [structIndex]
@@ -46,8 +47,8 @@ use alloc::vec::Vec;
 
 use crate::Error;
 use crate::plan::{
-    MAP_KIND_COUNT, MAP_LIST, MAP_STRUCT, MAP_STRUCTS, OP_COUNT, OP_MAP, OP_POINTER, OP_STRUCT,
-    OP_STRUCTS, Plan, PlanField, list_element_kind,
+    MAP_KIND_COUNT, MAP_LIST, MAP_STRUCT, MAP_STRUCTS, OP_COUNT, OP_MAP, OP_POINTER,
+    OP_POINTER_STRUCT, OP_STRUCT, OP_STRUCTS, Plan, PlanField, list_element_kind,
 };
 
 /// The smallest a definition can be, which is what bounds a declared count
@@ -281,7 +282,9 @@ fn parse_desc(cursor: &mut Cursor<'_>, key: u8, table_len: usize) -> Result<Plan
     };
 
     match op {
-        OP_STRUCT | OP_STRUCTS => field.sub = Some(struct_index(cursor, table_len)?),
+        OP_STRUCT | OP_STRUCTS | OP_POINTER_STRUCT => {
+            field.sub = Some(struct_index(cursor, table_len)?);
+        }
         OP_MAP => {
             let key_kind = cursor.byte()?;
             let value_kind = cursor.byte()?;
@@ -379,7 +382,9 @@ pub fn build(schema: &Schema) -> Vec<u8> {
 fn append_desc(out: &mut Vec<u8>, field: &PlanField) {
     out.push(field.op);
     match field.op {
-        OP_STRUCT | OP_STRUCTS => append_length(out, field.sub.unwrap_or(0) as usize),
+        OP_STRUCT | OP_STRUCTS | OP_POINTER_STRUCT => {
+            append_length(out, field.sub.unwrap_or(0) as usize);
+        }
         OP_MAP => {
             out.push(field.key_kind);
             out.push(field.value_kind);

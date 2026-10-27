@@ -962,6 +962,44 @@ func groups() *Groups {
 	}
 }
 
+// Pointed holds pointers to structs (op 27): present, nil, and pointing at a
+// zero struct, which is an empty body rather than an absent key. A nil one
+// renders null where a by-value struct renders an object of zeros. Pointed is
+// narrow and PointedWide wide, so both key widths are here.
+type Pointed struct {
+	Name    string   `cb:"1"`
+	Primary *Inner   `cb:"2"`
+	Backup  *Inner   `cb:"3"`
+	Zero    *Inner   `cb:"4"`
+	Value   Inner    `cb:"5"`
+	Self    *Pointed `cb:"6"`
+}
+
+type PointedWide struct {
+	Name    string    `cb:"1"`
+	Primary *WideLine `cb:"2"`
+	Missing *WideLine `cb:"3"`
+	Far     int32     `cb:"40"`
+}
+
+// NarrowMaps holds maps in a four-bit run, whose entries take their types from
+// the section: every scalar kind, structs narrow and wide, and a map of one
+// entry, which is the whole body with no count in front.
+type NarrowMaps struct {
+	Name   string             `cb:"1"`
+	Labels map[string]string  `cb:"2"`
+	Counts map[int64]int32    `cb:"3"`
+	Sizes  map[uint16]uint64  `cb:"4"`
+	Ratios map[string]float64 `cb:"5"`
+	Halves map[string]float32 `cb:"6"`
+	Flags  map[string]bool    `cb:"7"`
+	Items  map[string]Inner   `cb:"8"`
+	Wide   map[int32]WideLine `cb:"9"`
+	One    map[string]string  `cb:"10"`
+	Ptrs   map[string]*Inner  `cb:"11"`
+	Empty  map[string]Inner   `cb:"12"`
+}
+
 func walks() []walkCase {
 	var out []walkCase
 	add := func(name, about string, value any) {
@@ -1051,6 +1089,29 @@ func walks() []walkCase {
 		catalog())
 	add("doc.map-of-structs-absent", "every map and pointer empty or nil, so absent and null",
 		&Catalog{Name: "none", Tags: &[]string{}})
+	add("doc.narrow-maps", "maps in a four-bit run: every scalar kind, narrow and wide structs, one entry, pointers",
+		&NarrowMaps{
+			Name:   "n",
+			Labels: map[string]string{"env": "prod", "": "blank", "ñ": "el niño"},
+			Counts: map[int64]int32{-1 << 40: -7, 0: 0, 3: 1 << 30},
+			Sizes:  map[uint16]uint64{1: 18446744073709551615, 65535: 0},
+			Ratios: map[string]float64{"a": 0.5, "b": -1e300},
+			Halves: map[string]float32{"h": 1.5},
+			Flags:  map[string]bool{"on": true, "off": false},
+			Items:  map[string]Inner{"a": {SKU: "A1", Qty: 3}, "zero": {}},
+			Wide:   map[int32]WideLine{-1: {SKU: "W", Cents: 1 << 40}, 7: {Quantity: 7}},
+			One:    map[string]string{"only": "one"},
+			Ptrs:   map[string]*Inner{"set": {SKU: "P"}, "nil": nil},
+		})
+	add("doc.pointer-structs", "pointers to structs: present, nil, at a zero struct, and recursive",
+		&Pointed{
+			Name: "p", Primary: &Inner{SKU: "A1", Qty: 2}, Zero: &Inner{},
+			Value: Inner{SKU: "V"}, Self: &Pointed{Name: "inner"},
+		})
+	add("doc.pointer-structs-wide", "pointers to wide structs in a wide run, one nil",
+		&PointedWide{Name: "w", Primary: &WideLine{SKU: "W", Cents: 1 << 40}, Far: 7})
+	add("dynamic.pointer-structs", "a record holding pointers to structs, inside a dynamic list",
+		Doc{"rows": []any{Pointed{Name: "a", Primary: &Inner{SKU: "S"}}, Pointed{Name: "b"}}})
 	add("doc.map-of-lists", "maps of lists of structs, as a list and as a table, of every scalar list, and of pointers",
 		groups())
 	add("doc.nullable-columns", "pointer fields of a table: some rows nil, none nil, every row nil",

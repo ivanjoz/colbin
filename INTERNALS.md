@@ -1210,13 +1210,8 @@ with E404.
 
 What the code does not do yet, or does inconsistently:
 
-- **Rust does not know op 27** (pointer to a struct): its `OP_COUNT` is 27, so the
-  Rust walk, the module and the npm package refuse a section from a Go type with a
-  `*Struct` field. The walk would also need to render an absent one as `null`.
-- **The Rust walk refuses a map in a narrow run** (`Error::Unsupported`); a narrow
-  map's elements take their types from the schema and need a second element
-  reader. Wide maps, including maps of structs, render. `inspect.rs` steps over
-  narrow maps instead, and does not merge pages.
+- **`inspect.rs` steps over narrow maps** rather than spanning their entries, and
+  does not merge pages. The walk renders maps at both key widths.
 - **Rust has no typed encode or decode of list columns, paged tables or
   dictionary columns**: the derive and `build.rs` write and read nullable columns,
   and the walk renders all of them (the corpus covers it), but a struct with a

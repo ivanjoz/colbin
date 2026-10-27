@@ -16,19 +16,6 @@ test('the type tier is present', () => {
 })
 
 for (const c of cases) {
-  // A narrow map's entries take their type from the schema and need a second
-  // element codec. The Rust walk refuses rather than guessing — see "Dynamic
-  // values" in rust/README.md. The page never produces one: JSON objects infer
-  // to structs.
-  if (c.name === 'maps') {
-    test(`${c.name}: refused as unsupported, not guessed at`, () => {
-      must(wasm, wasm.exports.set_schema(put(wasm, unhex(c.section))), 'set_schema')
-      assert.equal(wasm.exports.decode(put(wasm, unhex(c.message))), -1)
-      assert.match(failure(wasm), /does not render maps/)
-    })
-    continue
-  }
-
   test(`${c.name}: out-of-band schema`, () => {
     must(wasm, wasm.exports.set_schema(put(wasm, unhex(c.section))), 'set_schema')
     const length = must(wasm, wasm.exports.decode(put(wasm, unhex(c.message))), 'decode')

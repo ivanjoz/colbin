@@ -26,8 +26,8 @@ use crate::json::{JsonSink, render_key_run};
 use crate::plan::{
     self, MAP_ANY, MAP_BOOL, MAP_FLOAT32, MAP_FLOAT64, MAP_INT, MAP_LIST, MAP_STRING, MAP_STRUCT,
     MAP_STRUCTS, MAP_UINT, OP_ANY, OP_ANYS, OP_BOOL, OP_BYTES, OP_FLOAT32, OP_FLOAT64, OP_INT8,
-    OP_INT16, OP_INT32, OP_INT64, OP_MAP, OP_POINTER, OP_STRING, OP_STRINGS, OP_STRUCT, OP_STRUCTS,
-    OP_UINT8, OP_UINT16, OP_UINT32, OP_UINT64, Plan, PlanField,
+    OP_INT16, OP_INT32, OP_INT64, OP_MAP, OP_POINTER, OP_POINTER_STRUCT, OP_STRING, OP_STRINGS,
+    OP_STRUCT, OP_STRUCTS, OP_UINT8, OP_UINT16, OP_UINT32, OP_UINT64, Plan, PlanField,
 };
 use crate::section::{self, Schema};
 use crate::wire::{self, Kind, Reader, Reader8, Runs};
@@ -499,7 +499,7 @@ impl<'s> Walker<'s> {
 
     fn narrow_value(&mut self, reader: &mut Reader<'_>, field: &PlanField) -> Result<(), Error> {
         match field.op {
-            OP_STRUCT => {
+            OP_STRUCT | OP_POINTER_STRUCT => {
                 let (body, wide) = reader.struct_body().ok_or(Error::Truncated)?;
                 let at = field.sub.ok_or(Error::BadSection)?;
                 self.message(at, body, wide)
@@ -511,7 +511,7 @@ impl<'s> Walker<'s> {
                     self.narrow_list(reader, field)
                 }
             }
-            OP_MAP => Err(Error::Unsupported),
+            OP_MAP => self.narrow_map(reader, field),
             OP_POINTER => self.narrow_scalar(reader, field.elem_op),
             op => self.narrow_scalar(reader, op),
         }
@@ -575,7 +575,7 @@ impl<'s> Walker<'s> {
 
     fn wide_value(&mut self, reader: &mut Reader8<'_>, field: &PlanField) -> Result<(), Error> {
         match field.op {
-            OP_STRUCT => {
+            OP_STRUCT | OP_POINTER_STRUCT => {
                 let (body, wide) = reader.struct_body().ok_or(Error::Truncated)?;
                 let at = field.sub.ok_or(Error::BadSection)?;
                 self.message(at, body, wide)
@@ -652,13 +652,83 @@ impl<'s> Walker<'s> {
 
     // ---- maps ---------------------------------------------------------------
 
-    /// A map, whose entries are pairs of key-less values: no field ids, no
-    /// schema lookup, just the kinds the section named once for all of them.
-    ///
-    /// There is no narrow twin. A four-bit descriptor has no room for a class,
-    /// so a narrow map's entries take their type from the schema — readable, but
-    /// a second element codec, and `narrow_value` refuses it until there is a
-    /// message that needs it.
+    /// A map in a four-bit run. Its entries carry no class — a four-bit
+    /// descriptor has no room for one — so each takes its type from the kinds
+    /// the section named, through the narrow element readers. A dynamic value
+    /// and a list value are key-less values with a class of their own, which is
+    /// why a map of either is always wide: a section saying otherwise is wrong.
+    fn narrow_map(&mut self, reader: &mut Reader<'_>, field: &PlanField) -> Result<(), Error> {
+        let (count, mut entries) = reader.map().ok_or(Error::Truncated)?;
+        if !map_key_is_renderable(field.key_kind)
+            || field.value_kind == MAP_ANY
+            || plan::list_valued(field.value_kind)
+        {
+            return Err(Error::UnwalkableOp(field.op));
+        }
+        self.enter()?;
+        self.to.begin_object();
+        for _ in 0..count {
+            match field.key_kind {
+                MAP_STRING => {
+                    let name = entries.element_string();
+                    entries.err()?;
+                    self.to.key_bytes(name.as_bytes());
+                }
+                MAP_INT => self.number_key(entries.element_int(), true),
+                _ => self.number_key(entries.element_uint() as i64, false),
+            }
+            self.narrow_map_value(&mut entries, field.value_kind, field.sub)?;
+            entries.err()?;
+        }
+        self.to.end_object();
+        self.leave();
+        Ok(())
+    }
+
+    /// [`Walker::map_value`] at four key bits. A struct value is a narrow
+    /// list's element — a length and a body — whose key width the section says,
+    /// because nothing on the wire does.
+    fn narrow_map_value(
+        &mut self,
+        entries: &mut Reader<'_>,
+        kind: u8,
+        sub: Option<u32>,
+    ) -> Result<(), Error> {
+        match kind {
+            MAP_STRING => {
+                let text = entries.element_string();
+                entries.err()?;
+                self.to.text_bytes(text.as_bytes());
+            }
+            MAP_INT => self.to.signed(entries.element_int()),
+            MAP_UINT => self.to.unsigned(entries.element_uint()),
+            MAP_FLOAT32 => {
+                let bits = (entries.element_uint() as u32).swap_bytes();
+                if !self.to.float(f64::from(f32::from_bits(bits)), 32) {
+                    return Err(Error::NotJson);
+                }
+            }
+            MAP_FLOAT64 => {
+                let bits = entries.element_uint().swap_bytes();
+                if !self.to.float(f64::from_bits(bits), 64) {
+                    return Err(Error::NotJson);
+                }
+            }
+            MAP_BOOL => self.to.boolean(entries.element_uint() == 1),
+            MAP_STRUCT => {
+                let at = sub.ok_or(Error::BadSection)?;
+                let wide = self.plan_at(at)?.is_wide;
+                let body = entries.element().ok_or(Error::Truncated)?;
+                return self.message(at, body, wide);
+            }
+            other => return Err(Error::UnwalkableOp(other)),
+        }
+        Ok(())
+    }
+
+    /// A map at eight key bits, whose entries are pairs of key-less values: no
+    /// field ids, no schema lookup, just the kinds the section named once for
+    /// all of them.
     fn wide_map(&mut self, reader: &mut Reader8<'_>, field: &PlanField) -> Result<(), Error> {
         let (count, mut entries) = reader.map().ok_or(Error::Truncated)?;
         if !map_key_is_renderable(field.key_kind) {

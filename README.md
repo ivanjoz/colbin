@@ -484,8 +484,8 @@ so that colbin's `go.mod` stays free of protobuf.
   side must run the same version, and a mismatch shows up as corrupt data
   rather than a version error.
 - **Known implementation gaps** are listed in
-  [INTERNALS §20](INTERNALS.md#20-known-gaps). For example, the Rust reader
-  does not yet handle a pointer to a struct (op 27), or narrow maps.
+  [INTERNALS §20](INTERNALS.md#20-known-gaps). For example, the Rust
+  derive does not write maps of structs or of slices.
 
 ## Implementations
 

@@ -55,10 +55,14 @@ pub const OP_POINTER: u8 = 24;
 /// which says on the wire what it is. See [`crate::wire::Kind`].
 pub const OP_ANY: u8 = 25;
 pub const OP_ANYS: u8 = 26;
+/// A pointer to a struct: the body of [`OP_STRUCT`], with the key omitted when
+/// the pointer is nil, so an absent one renders as null rather than as an object
+/// of zeros. The section names the struct as for [`OP_STRUCT`].
+pub const OP_POINTER_STRUCT: u8 = 27;
 
 /// Bounds the block, so a section naming an op this version does not assign is
 /// refused rather than indexed on.
-pub const OP_COUNT: u8 = 27;
+pub const OP_COUNT: u8 = 28;
 
 pub const MAP_STRING: u8 = 0;
 pub const MAP_INT: u8 = 1;

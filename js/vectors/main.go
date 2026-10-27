@@ -158,6 +158,16 @@ type Catalog struct {
 	Counts *map[string]uint16 `cb:"21"`
 }
 
+// Pointed holds pointers to structs, which a nil one leaves out of the run and
+// the module renders as null.
+type Pointed struct {
+	Name    string   `cb:"1"`
+	Primary *Line    `cb:"2"`
+	Backup  *Line    `cb:"3"`
+	Zero    *Line    `cb:"4"`
+	Self    *Pointed `cb:"5"`
+}
+
 // MapLists holds maps whose values are lists — of structs, under the table
 // threshold and past it, and of scalars — and a map of pointers, which are
 // their pointees on the wire. A map of lists has no four-bit form, so MapLists
@@ -360,6 +370,8 @@ func types() []typeCase {
 				Tags:   &[]string{"open", "late"},
 				Counts: &map[string]uint16{"doors": 2},
 			}),
+		describe("pointer-structs", "pointers to structs, present, nil and at a zero struct: a nil one is null",
+			&Pointed{Name: "p", Primary: &Line{SKU: "A1", Qty: 2}, Zero: &Line{}, Self: &Pointed{Name: "inner"}}),
 		describe("map-of-lists", "maps of lists of structs, as a list and as a table, of scalar lists, and of pointers",
 			&MapLists{
 				Name:   "groups",

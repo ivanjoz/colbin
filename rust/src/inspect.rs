@@ -43,9 +43,9 @@ use crate::Error;
 use crate::json::JsonSink;
 use crate::plan::{
     OP_ANY, OP_ANYS, OP_BOOL, OP_BYTES, OP_FLOAT32, OP_FLOAT64, OP_INT8, OP_INT8S, OP_INT16,
-    OP_INT16S, OP_INT32, OP_INT32S, OP_INT64, OP_INT64S, OP_MAP, OP_POINTER, OP_STRING, OP_STRINGS,
-    OP_STRUCT, OP_STRUCTS, OP_UINT8, OP_UINT16, OP_UINT16S, OP_UINT32, OP_UINT32S, OP_UINT64,
-    OP_UINT64S, Plan, PlanField,
+    OP_INT16S, OP_INT32, OP_INT32S, OP_INT64, OP_INT64S, OP_MAP, OP_POINTER, OP_POINTER_STRUCT,
+    OP_STRING, OP_STRINGS, OP_STRUCT, OP_STRUCTS, OP_UINT8, OP_UINT16, OP_UINT16S, OP_UINT32,
+    OP_UINT32S, OP_UINT64, OP_UINT64S, Plan, PlanField,
 };
 use crate::section::Schema;
 use crate::wire::{Reader, Reader8, Runs};
@@ -268,7 +268,7 @@ impl SpanWalker {
         offset: usize,
     ) -> Result<(), Error> {
         match field.op {
-            OP_STRUCT => {
+            OP_STRUCT | OP_POINTER_STRUCT => {
                 let (body, wide) = reader.struct_body().ok_or(Error::Truncated)?;
                 let inner = offset + reader.cursor() - body.len();
                 let sub = self.sub_plan(schema, field)?;
@@ -505,7 +505,7 @@ impl SpanWalker {
         offset: usize,
     ) -> Result<(), Error> {
         match field.op {
-            OP_STRUCT => {
+            OP_STRUCT | OP_POINTER_STRUCT => {
                 let (body, wide) = reader.struct_body().ok_or(Error::Truncated)?;
                 let inner = offset + reader.cursor() - body.len();
                 let sub = self.sub_plan(schema, field)?;
@@ -689,6 +689,7 @@ fn type_name(field: &PlanField) -> String {
         OP_UINT64S => "[]uint64",
         OP_STRINGS => "[]string",
         OP_STRUCT => "struct",
+        OP_POINTER_STRUCT => "*struct",
         OP_STRUCTS => "[]struct",
         OP_MAP => "map",
         OP_ANY => "any",
