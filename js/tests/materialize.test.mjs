@@ -8,7 +8,10 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { load, put, take, failure, must } from './harness.mjs'
 import { documents, textOf } from './documents.mjs'
-import { readRows } from '../src/materialize.ts'
+import { readRows, readColumns } from '../src/materialize.ts'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { root } from './harness.mjs'
 
 const wasm = await load()
 const encoder = new TextEncoder()
@@ -44,11 +47,20 @@ test('a bare-array table materializes to the same rows as its JSON', () => {
   assert.deepEqual(rows, doc.json)
 })
 
-for (const name of [
-  'flat-object',
-  'records-past-the-table-threshold',
-  'records-under-the-table-threshold',
-]) {
+test('a root object whose one field is a table materializes to that object', () => {
+  const doc = findDoc('records-past-the-table-threshold')
+  const { message, section } = buildMessage(textOf(doc))
+  const length = materializeLength(message, section)
+  assert.ok(length > 0, `expected a table buffer, got length ${length}`)
+  const buffer = take(wasm, length).buffer
+  assert.deepEqual(readRows(buffer), doc.json)
+  assert.deepEqual(readRows(buffer, { allowGenerated: false }), doc.json)
+  const columns = readColumns(buffer)
+  assert.equal(columns.field, 'rows')
+  assert.equal(columns.rowCount, doc.json.rows.length)
+})
+
+for (const name of ['flat-object', 'records-under-the-table-threshold']) {
   test(`${name}: not this fast path's shape, materialize signals 0`, () => {
     const doc = findDoc(name)
     const { message, section } = buildMessage(textOf(doc))
@@ -112,4 +124,68 @@ test('every prefix of a table message is a diagnostic, never a trap', () => {
       failure(wasm) // must have a diagnostic, not throw reading it
     }
   }
+})
+
+// Go's corpus: every document Go wrote whose root the materializer covers must
+// read back as Go's own JSON — nullable, dictionary and grouped tables among
+// them, which only Go's writer produces.
+const unhex = (text) => Uint8Array.from(text.match(/../g) ?? [], (b) => parseInt(b, 16))
+const corpus = JSON.parse(readFileSync(join(root, '..', 'rust', 'vectors', 'vectors.json'), 'utf8'))
+const walks = corpus.walks.filter((w) => w.name.startsWith('doc.'))
+
+/** Numbers past 2^53 come back as bigint here and rounded from JSON.parse. */
+const rounded = (value) =>
+  JSON.parse(JSON.stringify(value, (_, v) => (typeof v === 'bigint' ? Number(v) : v)))
+
+test("Go's table documents materialize to Go's JSON, generated and fallback builders", () => {
+  const covered = []
+  for (const walk of walks) {
+    const length = materializeLength(unhex(walk.message), unhex(walk.section))
+    assert.ok(length >= 0, `${walk.name}: materialize failed`)
+    if (length === 0) continue
+    covered.push(walk.name)
+    const buffer = take(wasm, length).buffer
+    const want = JSON.parse(walk.json)
+    assert.deepEqual(rounded(readRows(buffer)), want, `${walk.name}: generated builder`)
+    // Same keys in the same order as the JSON path, which deepEqual does not check.
+    assert.equal(JSON.stringify(rounded(readRows(buffer))), JSON.stringify(want), `${walk.name}: key order`)
+    assert.deepEqual(
+      rounded(readRows(buffer, { allowGenerated: false })),
+      want,
+      `${walk.name}: fallback builder`,
+    )
+  }
+  for (const name of [
+    'doc.nullable-columns',
+    'doc.dictionary-columns',
+    'doc.grouped-records',
+    'doc.paged-table',
+  ]) {
+    assert.ok(covered.includes(name), `${name} no longer materializes: ${covered}`)
+  }
+})
+
+test('a nullable column reads as null in rows and in columns', () => {
+  const walk = walks.find((w) => w.name === 'doc.nullable-columns')
+  const length = materializeLength(unhex(walk.message), unhex(walk.section))
+  const buffer = take(wasm, length).buffer
+  const want = JSON.parse(walk.json)
+  const table = readColumns(buffer)
+  assert.ok(table, 'one table, so a column table')
+  const wantRows = Array.isArray(want) ? want : Object.values(want)[0]
+  let nulls = 0
+  for (const column of table.columns) {
+    for (let i = 0; i < table.rowCount; i++) {
+      const expected = wantRows[i][column.name]
+      const isNull = column.valid ? ((column.valid[i >> 3] >> (i & 7)) & 1) === 0 : false
+      assert.equal(isNull, expected === null, `${column.name}[${i}] validity`)
+      if (isNull) {
+        nulls++
+        if (column.kind === 'bool' || column.kind === 'string') assert.equal(column.values[i], null)
+      } else {
+        assert.equal(Number(column.values[i]), Number(expected), `${column.name}[${i}]`)
+      }
+    }
+  }
+  assert.ok(nulls > 0, 'the fixture has nulls')
 })

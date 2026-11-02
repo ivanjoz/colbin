@@ -90,10 +90,15 @@ the result rather than being thrown.
 When the message is a table — a list of records, which is the shape this format
 is for — `unmarshal` never writes JSON text. The module hands over columns in a
 flat typed buffer and the objects are built in JavaScript from a generated,
-monomorphic row builder cached per schema.
+monomorphic row builder cached per schema. That covers a list of records at the
+root, and a root object whose every field is one (`{"rows": [...]}`, which is
+what a Go `struct { Rows []Row }` sends), with nullable columns, dictionary
+strings, grouped tables and paged row types of more than 255 fields. A table is
+eight or more records; fewer are written as a plain list.
 
-Anything else (a nested document, a heterogeneous list, a bare object) falls
-back to the JSON-text path automatically. `codec.lastPath` says which ran, so a
+Anything else (a nested document, a heterogeneous list, a list column inside a
+record, an object with a field that is not a table) falls back to the JSON-text
+path automatically. `codec.lastPath` says which ran, so a
 caller can find out they are on the slower one without guessing.
 
 The fast path is also the one that is **exact past 2^53**: a column whose values

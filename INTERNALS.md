@@ -1099,23 +1099,45 @@ equivalent JSON (`js/tests/bench.mjs --check`).
 The buffer (`materialize.rs`, read by `js/src/materialize.ts`):
 
 ```
-u32 version = 1, u32 rows, u32 fieldCount
-per field:  u8 kind (0 bool, 1 int, 2 float, 3 string), u8 flags, u16 nameLength, name
-padding to 8, then one run per field, each padded to 8:
-  bool    a bitmap, ⌈rows / 8⌉ bytes
-  int     rows × i64
-  float   rows × f64
-  string  (rows + 1) × u32 offsets, then the column's bytes
+u32 version = 2, u32 shape (0 array, 1 object), u32 tableCount
+per table:
+  u16 nameLength, name           the root field's name; empty for an envelope
+  padding to 8
+  u32 rows, u32 fieldCount
+  per field:  u8 kind (0 bool, 1 int, 2 float, 3 string), u8 flags, u16 nameLength, name
+  padding to 8, then per field, each run padded to 8:
+    nullable only: a validity bitmap, ⌈rows / 8⌉ bytes, bit set = the row holds a value
+    bool    a bitmap, ⌈rows / 8⌉ bytes
+    int     rows × i64
+    float   rows × f64
+    string  (rows + 1) × u32 offsets, then the column's bytes
 ```
 
 Flags: bit 0 signed, bit 1 a value exceeds 2⁵³ (the column is read as `BigInt`),
-bit 2 every string is ASCII. A row builder is generated per field signature with
-`new Function` and cached; under a CSP that forbids it, a generic builder is used.
+bit 2 every string is ASCII, bit 3 nullable (a null row holds a zero or an empty
+string in the value run, and the bitmap says which). A row builder is generated
+per field signature with `new Function` and cached; under a CSP that forbids it,
+a generic builder is used. A reader refuses a version it does not know.
 
-It covers what a table at the root is: an envelope (§2.2) whose field is a
-`[]struct` written as a table — eight or more rows of columnable fields. Anything
-else takes the JSON path, which is exact except that integers above 2⁵³ round in
-`JSON.parse`.
+It covers the tables at the root of a message, each a `[]struct` written as a
+table (eight or more rows of columnable fields):
+
+- an envelope (§2.2): shape 0, and `unmarshal` returns the array;
+- a root struct whose **every** field is such a table (`struct { Rows []Row }`,
+  or several side by side): shape 1, and `unmarshal` returns an object with one
+  array per field, in the order the message wrote them — the object the JSON
+  path renders. A root field the message left out, or one that is not a table,
+  sends the whole message to the JSON path.
+
+Within a table it covers plain, nullable (pointer) and dictionary columns — the
+ids are resolved to their strings in the module — grouped tables, and paged row
+types, whose pages' fields are columns in line where the JSON walk writes them.
+A list column has no flat form, and neither does anything that is not a table;
+those take the JSON path, which is exact except that integers above 2⁵³ round in
+`JSON.parse`. `columns()` hands back the one table's columns, with a `valid`
+bitmap on a nullable column (and `null` in a `bool` or `string` column's values),
+and `field` naming the root field when the root is a struct; for a root of
+several tables it returns `null`.
 
 ---
 

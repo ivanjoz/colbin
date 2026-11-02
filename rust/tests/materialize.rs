@@ -6,10 +6,9 @@
 //! The corpus comparison is against **Go's own JSON**, not against
 //! `walk::to_json` — the two sinks share a walk but not a codec path, so
 //! comparing them to each other would miss a bug the two happened to share.
-//! Only cases where the root is the shape the materializer covers (a one-field
-//! envelope — the top level was a bare array or scalar — whose field the wire
-//! encoded as a table) are checked here; everything else returns `Ok(None)`
-//! and is `walk.rs`'s test's responsibility.
+//! Only cases where the root is a shape the materializer covers (an envelope,
+//! or a root struct whose every field is a table) are checked here; everything
+//! else returns `Ok(None)` and is `walk.rs`'s test's responsibility.
 
 use colbin::materialize::message_to_buffer;
 use colbin::section;
@@ -80,13 +79,58 @@ fn read_u32(buf: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(buf[at..at + 4].try_into().unwrap())
 }
 
+type Rows = Vec<Vec<(String, Option<Cell>)>>;
+
+/// What a buffer decodes to: the one table's rows for an envelope, or the root
+/// object's tables by name, in the order the buffer holds them.
+enum Decoded {
+    Array(Rows),
+    Object(Vec<(String, Rows)>),
+}
+
+impl Decoded {
+    fn rows(self) -> Rows {
+        match self {
+            Decoded::Array(rows) => rows,
+            Decoded::Object(mut tables) => {
+                assert_eq!(tables.len(), 1, "expected a single table");
+                tables.remove(0).1
+            }
+        }
+    }
+}
+
 /// A second, independent reader of the buffer `materialize::to_buffer` writes
 /// — deliberately not sharing code with it, so a bug in the writer has to
 /// also be a bug in this reader to slip past the comparison below.
-fn decode_buffer(buf: &[u8]) -> Vec<Vec<(String, Cell)>> {
-    assert_eq!(read_u32(buf, 0), 1, "buffer version");
-    let rows = read_u32(buf, 4) as usize;
-    let field_count = read_u32(buf, 8) as usize;
+fn decode_buffer(buf: &[u8]) -> Decoded {
+    assert_eq!(read_u32(buf, 0), 2, "buffer version");
+    let shape = read_u32(buf, 4);
+    let table_count = read_u32(buf, 8) as usize;
+    let mut at = 12;
+    let mut tables = Vec::with_capacity(table_count);
+    for _ in 0..table_count {
+        let name_len = read_u16(buf, at) as usize;
+        let name = String::from_utf8(buf[at + 2..at + 2 + name_len].to_vec()).expect("UTF-8 name");
+        at = (at + 2 + name_len).next_multiple_of(8);
+        let (rows, next) = decode_table(buf, at);
+        at = next;
+        tables.push((name, rows));
+    }
+    match shape {
+        0 => {
+            assert_eq!(tables.len(), 1, "an envelope holds one table");
+            assert_eq!(tables[0].0, "", "an envelope's table has no name");
+            Decoded::Array(tables.remove(0).1)
+        }
+        1 => Decoded::Object(tables),
+        other => panic!("unknown shape {other}"),
+    }
+}
+
+fn decode_table(buf: &[u8], start: usize) -> (Rows, usize) {
+    let rows = read_u32(buf, start) as usize;
+    let field_count = read_u32(buf, start + 4) as usize;
 
     struct Header {
         kind: u8,
@@ -94,7 +138,7 @@ fn decode_buffer(buf: &[u8]) -> Vec<Vec<(String, Cell)>> {
         name: String,
     }
 
-    let mut at = 12;
+    let mut at = start + 8;
     let mut headers = Vec::with_capacity(field_count);
     for _ in 0..field_count {
         let kind = buf[at];
@@ -106,37 +150,44 @@ fn decode_buffer(buf: &[u8]) -> Vec<Vec<(String, Cell)>> {
     }
     at = at.next_multiple_of(8);
 
-    let mut rows_out: Vec<Vec<(String, Cell)>> =
-        (0..rows).map(|_| Vec::with_capacity(field_count)).collect();
+    let mut rows_out: Rows = (0..rows).map(|_| Vec::with_capacity(field_count)).collect();
     for header in &headers {
+        let valid: Option<Vec<bool>> = if header.flags & 0b1000 != 0 {
+            let bits = (0..rows)
+                .map(|row| (buf[at + (row >> 3)] >> (row & 7)) & 1 == 1)
+                .collect();
+            at = (at + rows.div_ceil(8)).next_multiple_of(8);
+            Some(bits)
+        } else {
+            None
+        };
+        let mut cells: Vec<Cell> = Vec::with_capacity(rows);
         match header.kind {
             0 => {
-                let len = rows.div_ceil(8);
-                for (row, row_out) in rows_out.iter_mut().enumerate() {
+                for row in 0..rows {
                     let bit = (buf[at + (row >> 3)] >> (row & 7)) & 1;
-                    row_out.push((header.name.clone(), Cell::Bool(bit == 1)));
+                    cells.push(Cell::Bool(bit == 1));
                 }
-                at += len;
+                at += rows.div_ceil(8);
             }
             1 => {
                 let signed = header.flags & 0b001 != 0;
-                for (row, row_out) in rows_out.iter_mut().enumerate() {
+                for row in 0..rows {
                     let bits =
                         u64::from_le_bytes(buf[at + row * 8..at + row * 8 + 8].try_into().unwrap());
-                    let cell = if signed {
+                    cells.push(if signed {
                         Cell::Signed(bits as i64)
                     } else {
                         Cell::Unsigned(bits)
-                    };
-                    row_out.push((header.name.clone(), cell));
+                    });
                 }
                 at += rows * 8;
             }
             2 => {
-                for (row, row_out) in rows_out.iter_mut().enumerate() {
+                for row in 0..rows {
                     let value =
                         f64::from_le_bytes(buf[at + row * 8..at + row * 8 + 8].try_into().unwrap());
-                    row_out.push((header.name.clone(), Cell::Float(value)));
+                    cells.push(Cell::Float(value));
                 }
                 at += rows * 8;
             }
@@ -149,18 +200,47 @@ fn decode_buffer(buf: &[u8]) -> Vec<Vec<(String, Cell)>> {
                 let blob_at = offsets_at + (rows + 1) * 4;
                 let blob_len = offsets[rows];
                 let blob = &buf[blob_at..blob_at + blob_len];
-                for (row, row_out) in rows_out.iter_mut().enumerate() {
+                for row in 0..rows {
                     let text = std::str::from_utf8(&blob[offsets[row]..offsets[row + 1]])
                         .expect("UTF-8 blob");
-                    row_out.push((header.name.clone(), Cell::Str(text.to_string())));
+                    cells.push(Cell::Str(text.to_string()));
                 }
                 at = blob_at + blob_len;
             }
             other => panic!("unknown column kind {other}"),
         }
         at = at.next_multiple_of(8);
+        for (row, cell) in cells.into_iter().enumerate() {
+            let present = valid.as_ref().is_none_or(|valid| valid[row]);
+            rows_out[row].push((header.name.clone(), present.then_some(cell)));
+        }
     }
-    rows_out
+    (rows_out, at)
+}
+
+fn rows_match(name: &str, got_rows: &Rows, want_rows: &[serde_json::Value]) {
+    assert_eq!(got_rows.len(), want_rows.len(), "{name}: row count");
+    for (row, (got_row, want_row)) in got_rows.iter().zip(want_rows).enumerate() {
+        let want_object = want_row.as_object().expect("a row is an object");
+        assert_eq!(
+            got_row.len(),
+            want_object.len(),
+            "{name}: row {row}: field count"
+        );
+        for (field, cell) in got_row {
+            let want_value = want_object
+                .get(field)
+                .unwrap_or_else(|| panic!("{name}: row {row}: Go's object has no {field:?}"));
+            let path = format!("{name}: row {row}.{field}");
+            match cell {
+                Some(cell) => cell_matches(cell, want_value, &path),
+                None => assert!(
+                    want_value.is_null(),
+                    "{path}: null, but Go wrote {want_value}"
+                ),
+            }
+        }
+    }
 }
 
 #[test]
@@ -184,22 +264,44 @@ fn table_shaped_documents_materialize_to_what_go_wrote() {
 
         let want: serde_json::Value = serde_json::from_str(want_text)
             .unwrap_or_else(|e| panic!("{name}: Go's own JSON: {e}"));
-        let want_rows = want.as_array().unwrap_or_else(|| {
-            panic!("{name}: materialized a table but Go's JSON root is not an array")
-        });
-
-        let got_rows = decode_buffer(&buf);
-        assert_eq!(got_rows.len(), want_rows.len(), "{name}: row count");
-        for (row, (got_row, want_row)) in got_rows.iter().zip(want_rows).enumerate() {
-            for (field, cell) in got_row {
-                let want_value = want_row
-                    .get(field)
-                    .unwrap_or_else(|| panic!("{name}: row {row}: Go's object has no {field:?}"));
-                cell_matches(cell, want_value, &format!("{name}: row {row}.{field}"));
+        match decode_buffer(&buf) {
+            Decoded::Array(rows) => {
+                let want_rows = want.as_array().unwrap_or_else(|| {
+                    panic!("{name}: materialized an array but Go's JSON root is not one")
+                });
+                rows_match(name, &rows, want_rows);
+            }
+            Decoded::Object(tables) => {
+                let want_object = want.as_object().unwrap_or_else(|| {
+                    panic!("{name}: materialized an object but Go's JSON root is not one")
+                });
+                assert_eq!(tables.len(), want_object.len(), "{name}: root field count");
+                for (field, rows) in &tables {
+                    let want_rows = want_object[field]
+                        .as_array()
+                        .unwrap_or_else(|| panic!("{name}: {field} is not an array in Go's JSON"));
+                    rows_match(&format!("{name}.{field}"), rows, want_rows);
+                }
             }
         }
     }
 
+    // The shapes the fast path grew to cover, so a regression to the JSON path
+    // is a failure here rather than a silent slowdown.
+    for must in [
+        "doc.records",
+        "doc.nullable-columns",
+        "doc.nullable-columns-all-present",
+        "doc.dictionary-columns",
+        "doc.grouped-records",
+        "doc.nulls-and-missing-keys",
+        "doc.paged-table",
+    ] {
+        assert!(
+            covered.contains(&must),
+            "{must} no longer materializes: {covered:?}"
+        );
+    }
     assert!(
         !covered.is_empty(),
         "no case in the corpus exercised the table fast path — check the corpus still has an \
@@ -243,7 +345,7 @@ fn a_table_column_past_2_53_is_flagged_and_exact() {
     let buf = message_to_buffer(Some(&schema), &encoded.message)
         .expect("a well-formed message")
         .expect("a bare-array root past the table threshold is this fast path's shape");
-    let rows = decode_buffer(&buf);
+    let rows = decode_buffer(&buf).rows();
     assert_eq!(rows.len(), 12);
     for (i, row) in rows.iter().enumerate() {
         let (_, big) = row
@@ -251,7 +353,7 @@ fn a_table_column_past_2_53_is_flagged_and_exact() {
             .find(|(name, _)| name == "big")
             .expect("big column");
         match big {
-            Cell::Signed(v) => assert_eq!(*v, SNOWFLAKE, "row {i}"),
+            Some(Cell::Signed(v)) => assert_eq!(*v, SNOWFLAKE, "row {i}"),
             _ => panic!("row {i}: expected a signed column"),
         }
     }

@@ -111,7 +111,7 @@ type Dictionaries = Vec<Vec<Vec<u8>>>;
 /// ```text
 /// section := [byteLength] [dictCount] ( [entryCount] ( [size] [bytes] )* )*
 /// ```
-fn parse_dictionaries(data: &[u8]) -> Result<(Dictionaries, &[u8]), Error> {
+pub(crate) fn parse_dictionaries(data: &[u8]) -> Result<(Dictionaries, &[u8]), Error> {
     let section_error = Error::BadDictionary;
     let (size, width) = wire::read_count(data).ok_or(Error::BadDictionary)?;
     if size > data.len() - width {
@@ -1420,14 +1420,14 @@ pub(crate) struct Gathered<'a> {
     pub(crate) strings: Vec<Vec<&'a [u8]>>,
     /// A nullable column's presence, `None` for a column every row holds a
     /// value of; `next` is where the row being written reads its value from.
-    presence: Vec<Option<&'a [u8]>>,
+    pub(crate) presence: Vec<Option<&'a [u8]>>,
     next: Vec<usize>,
     /// Which of the message's dictionaries a string column's ids index. The ids
     /// are in `ints`, and resolved as the rows are written.
-    dict: Vec<Option<usize>>,
+    pub(crate) dict: Vec<Option<usize>>,
     /// A paged row type's next pages, by the index of their link: each a table
     /// of the same rows.
-    pages: Vec<Option<Box<Gathered<'a>>>>,
+    pub(crate) pages: Vec<Option<Box<Gathered<'a>>>>,
     /// The element tables of list columns by field index, `lengths` each row's
     /// count of elements and `cursor` the element the row being written starts at.
     lists: Vec<Option<Box<Gathered<'a>>>>,
@@ -1504,14 +1504,12 @@ impl<'a> Gathered<'a> {
         }
     }
 
-    /// Whether any column is something the plain gather does not hold: a
-    /// nullable, dictionary, page or list column.
+    /// Whether any column, its pages' included, is a list column, which the
+    /// flat buffer of [`crate::materialize`] has no form for.
     #[cfg(feature = "materialize")]
-    pub(crate) fn is_plain(&self) -> bool {
-        self.presence.iter().all(Option::is_none)
-            && self.dict.iter().all(Option::is_none)
-            && self.pages.iter().all(Option::is_none)
-            && self.lists.iter().all(Option::is_none)
+    pub(crate) fn has_lists(&self) -> bool {
+        self.lists.iter().any(Option::is_some)
+            || self.pages.iter().flatten().any(|page| page.has_lists())
     }
 
     /// Rewinds where each nullable column's next value is read from, and each
@@ -1744,50 +1742,6 @@ impl<'a> Gathered<'a> {
             columns.err()?;
         }
         columns.err()
-    }
-
-    /// Gathers a whole table body, each group's rows after the one before's, so
-    /// that a grouped table reads as the table it was cut from. A column a
-    /// group leaves out is zeros, or empty strings, for that group's rows.
-    #[cfg(feature = "materialize")]
-    pub(crate) fn read_table(
-        schema: &Schema,
-        at: u32,
-        rows: usize,
-        group_rows: usize,
-        body: &'a [u8],
-        wide: bool,
-    ) -> Result<Self, Error> {
-        let plan = schema.plan(at).ok_or(Error::BadSection)?;
-        if group_rows == 0 {
-            let mut whole = Self::new(plan.fields.len());
-            whole.read(schema, at, body, rows, wide, false, 0)?;
-            return Ok(whole);
-        }
-        let mut whole = Self::new(plan.fields.len());
-        let mut start = 0;
-        for run in Runs::new(rows, group_rows, body) {
-            let (size, columns) = run?;
-            let mut group = Self::new(plan.fields.len());
-            group.read(schema, at, columns, size, wide, false, 0)?;
-            for (index, field) in plan.fields.iter().enumerate() {
-                if !group.present[index] && !whole.present[index] {
-                    continue;
-                }
-                whole.present[index] = true;
-                if field.op == OP_STRING {
-                    let strings = &mut whole.strings[index];
-                    strings.resize(start, &[]);
-                    strings.extend(group.strings[index].iter().take(size));
-                } else {
-                    let ints = &mut whole.ints[index];
-                    ints.resize(start, 0);
-                    ints.extend(group.ints[index].iter().take(size));
-                }
-            }
-            start += size;
-        }
-        Ok(whole)
     }
 }
 
