@@ -72,6 +72,7 @@ package codec
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"sync"
 	"unsafe"
 
@@ -292,10 +293,20 @@ func (builder *sectionBuilder) appendDesc(dst []byte, field *planField) []byte {
 // schema nearly twice over for every record. Send Schema.Bytes() once per
 // connection instead, and keep this for the single document that has nowhere to
 // put one. `go test ./corpus -run ReportSchema -v` prints the ratio per table.
-func MarshalSelfDescribing(v any) ([]byte, error) {
+func MarshalSelfDescribing(v any) ([]byte, error) { return AppendSelfDescribing(nil, v) }
+
+// AppendSelfDescribing is MarshalSelfDescribing onto dst, for a caller with a
+// buffer to reuse. On an error dst comes back as it was.
+//
+// The room for the message is reserved up front the way Marshal reserves it —
+// the plan's estimate for this record, scaled by what the last encodes of the
+// type came to — so a body of megabytes is one allocation of about its size,
+// not a dozen doublings that allocate twice that and copy it all along. The
+// body is Marshal's byte for byte, so the two share the learned ratio.
+func AppendSelfDescribing(dst []byte, v any) ([]byte, error) {
 	value, plan, err := addressable(v)
 	if err != nil {
-		return nil, err
+		return dst, err
 	}
 	record := unsafe.Pointer(value.UnsafeAddr())
 	root := rootStructNarrowSchema
@@ -303,15 +314,29 @@ func MarshalSelfDescribing(v any) ([]byte, error) {
 		root = rootStructWideSchema
 	}
 	if plan.hasDynamic {
-		return marshalDynamic(root, plan, record)
+		message, err := marshalDynamic(root, plan, record)
+		if err != nil {
+			return dst, err
+		}
+		if dst == nil {
+			return message, nil
+		}
+		return append(dst, message...), nil
 	}
 	schema, err := schemaForRoot(value.Type())
 	if err != nil {
-		return nil, err
+		return dst, err
 	}
-	dst := make([]byte, 0, 1+len(schema.section)+plan.sizeHint)
-	dst = append(append(dst, root), schema.section...)
-	return appendRun(dst, plan, record)
+	need, estimate := plan.reserve(record)
+	out := slices.Grow(dst, 1+len(schema.section)+need)
+	out = append(append(out, root), schema.section...)
+	bodyStart := len(out)
+	out, err = appendRun(out, plan, record)
+	if err != nil {
+		return dst, err
+	}
+	plan.learn(estimate, len(out)-bodyStart)
+	return out, nil
 }
 
 // marshalDynamic is MarshalSelfDescribing for a type that can reach a struct the

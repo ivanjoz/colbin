@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -352,5 +353,68 @@ func TestUnassignedRootBytesAreStillRefused(t *testing.T) {
 		if err := Unmarshal([]byte{root}, &back); err == nil {
 			t.Fatalf("root %#02x was accepted", root)
 		}
+	}
+}
+
+type catalogRow struct {
+	ID          int32   `cb:"1"`
+	Name        string  `cb:"2"`
+	Description string  `cb:"3"`
+	CategoryIDs []int32 `cb:"4"`
+	Price       int32   `cb:"5"`
+}
+
+func makeCatalogRows(count int) []catalogRow {
+	rows := make([]catalogRow, count)
+	for index := range rows {
+		rows[index] = catalogRow{
+			ID:          int32(index + 1),
+			Name:        fmt.Sprintf("Product %06d standard presentation", index),
+			Description: fmt.Sprintf("Description of product %d, with text of a typical length.", index),
+			CategoryIDs: []int32{int32(index % 40), int32(40 + index%15)},
+			Price:       int32(500 + index%20_000),
+		}
+	}
+	return rows
+}
+
+// AppendSelfDescribing writes after what dst holds exactly the message
+// MarshalSelfDescribing returns.
+func TestAppendSelfDescribingMatchesMarshal(t *testing.T) {
+	rows := makeCatalogRows(300)
+	message, err := MarshalSelfDescribing(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := []byte("prefix")
+	appended, err := AppendSelfDescribing(bytes.Clone(prefix), rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(appended[:len(prefix)], prefix) || !bytes.Equal(appended[len(prefix):], message) {
+		t.Fatal("AppendSelfDescribing wrote a different message than MarshalSelfDescribing")
+	}
+}
+
+// A large self-describing body is reserved once, at about its size, once the
+// type's ratio is learned — not grown by doubling, which allocates about twice
+// the message and copies it along the way.
+func TestSelfDescribingReservesTheBodyOnce(t *testing.T) {
+	rows := makeCatalogRows(20_000)
+	if _, err := MarshalSelfDescribing(rows); err != nil { // learns the size ratio
+		t.Fatal(err)
+	}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	message, err := MarshalSelfDescribing(rows)
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocated := after.TotalAlloc - before.TotalAlloc
+	t.Logf("message %d bytes, allocated %d bytes, capacity %d", len(message), allocated, cap(message))
+	if allocated > uint64(len(message))*3/2 {
+		t.Fatalf("encoding a %d-byte message allocated %d bytes", len(message), allocated)
 	}
 }

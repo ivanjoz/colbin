@@ -151,6 +151,12 @@ func ParseSchema(section []byte) (*Schema, error) { return codec.ParseSchema(sec
 // what `[]Sale` costs, and written with Marshal costs several times more.
 func MarshalSelfDescribing(v any) ([]byte, error) { return codec.MarshalSelfDescribing(v) }
 
+// AppendSelfDescribing is MarshalSelfDescribing onto dst, for a caller with a
+// buffer to reuse. On an error dst comes back as it was.
+func AppendSelfDescribing(dst []byte, v any) ([]byte, error) {
+	return codec.AppendSelfDescribing(dst, v)
+}
+
 // ToJSON renders a message as JSON using schema. Pass a nil schema for a message
 // written by MarshalSelfDescribing, which carries its own and is read with it
 // whatever schema is passed.
