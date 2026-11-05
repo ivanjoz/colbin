@@ -195,7 +195,7 @@ func newSectionBuilder(root *typePlan) *sectionBuilder {
 // value can name a struct the type alone never mentions — `map[string]any`
 // holding a `[]User` is described by walking the value, not the type. So the
 // table grows while the body is written, and bytes() is called after. See
-// marshalDynamic in dynamic.go.
+// appendDynamicSelfDescribing.
 type sectionBuilder struct {
 	index map[*typePlan]int
 	defs  [][]byte
@@ -314,14 +314,7 @@ func AppendSelfDescribing(dst []byte, v any) ([]byte, error) {
 		root = rootStructWideSchema
 	}
 	if plan.hasDynamic {
-		message, err := marshalDynamic(root, plan, record)
-		if err != nil {
-			return dst, err
-		}
-		if dst == nil {
-			return message, nil
-		}
-		return append(dst, message...), nil
+		return appendDynamicSelfDescribing(dst, root, plan, record)
 	}
 	schema, err := schemaForRoot(value.Type())
 	if err != nil {
@@ -339,35 +332,37 @@ func AppendSelfDescribing(dst []byte, v any) ([]byte, error) {
 	return out, nil
 }
 
-// marshalDynamic is MarshalSelfDescribing for a type that can reach a struct the
-// type itself never names.
+// appendDynamicSelfDescribing is AppendSelfDescribing for a type that can reach
+// a struct the type itself never names.
 //
 // The section cannot be resolved from the type and then written, because a
 // `map[string]any` holding a `[]Sale` says nothing about Sale until the value is
-// walked. So the body goes into its own buffer with the table open, the walk
-// adds every struct it meets, and the section is serialised afterwards — which
-// is also why this one is not cached, while every static type's is.
-func marshalDynamic(root byte, plan *typePlan, record unsafe.Pointer) ([]byte, error) {
+// walked. So the body is written first with the table open, the walk adds every
+// struct it meets, and the section is serialised afterwards and inserted behind
+// the root byte — which is also why this one is not cached, while every static
+// type's is. The insert moves the body inside the buffer: a typed run reserves
+// room for the section (reserveRun), so a large body is not copied out again.
+func appendDynamicSelfDescribing(dst []byte, root byte, plan *typePlan, record unsafe.Pointer) ([]byte, error) {
 	builder := newSectionBuilder(plan)
+	messageStart := len(dst)
+	var out []byte
+	var err error
 	if plan.dynamicRoot != 0 {
 		// The document is the message: its root byte, the section, and its
 		// entries or its value, with the struct table the walk filled.
-		body, err := appendDynamicRoot(make([]byte, 0, plan.sizeHint), plan, record, builder)
+		out, err = appendDynamicRoot(slices.Grow(dst, plan.sizeHint), plan, record, builder)
 		if err != nil {
-			return nil, err
+			return dst, err
 		}
-		section := builder.bytes()
-		dst := make([]byte, 0, len(section)+len(body))
-		return append(append(append(dst, body[0]|rootSchema), section...), body[1:]...), nil
+		out[messageStart] |= rootSchema
+	} else {
+		buf := scratch{section: builder}
+		out, err = appendRunInto(append(slices.Grow(dst, plan.sizeHint), root), plan, record, &buf)
+		if err != nil {
+			return dst, err
+		}
 	}
-	buf := scratch{section: builder}
-	body, err := appendRunInto(make([]byte, 0, plan.sizeHint), plan, record, &buf)
-	if err != nil {
-		return nil, err
-	}
-	section := builder.bytes()
-	dst := make([]byte, 0, 1+len(section)+len(body))
-	return append(append(append(dst, root), section...), body...), nil
+	return slices.Insert(out, messageStart+1, builder.bytes()...), nil
 }
 
 // appendRun writes a plan's key run onto dst, whose root descriptor, with

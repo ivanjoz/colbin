@@ -2,6 +2,7 @@ package codec
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"runtime"
@@ -394,27 +395,59 @@ func TestAppendSelfDescribingMatchesMarshal(t *testing.T) {
 	if !bytes.Equal(appended[:len(prefix)], prefix) || !bytes.Equal(appended[len(prefix):], message) {
 		t.Fatal("AppendSelfDescribing wrote a different message than MarshalSelfDescribing")
 	}
+
+	// The dynamic path inserts its section behind a body already written. One
+	// key, so the map's order cannot make the two differ.
+	document := map[string]any{"records": &rows}
+	message, err = MarshalSelfDescribing(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appended, err = AppendSelfDescribing(bytes.Clone(prefix), document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(appended[:len(prefix)], prefix) || !bytes.Equal(appended[len(prefix):], message) {
+		t.Fatal("AppendSelfDescribing wrote a different dynamic message than MarshalSelfDescribing")
+	}
+	// A dynamic root is read as a document, so it is checked through its JSON.
+	text, err := ToJSON(nil, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Records []catalogRow `json:"records"`
+	}
+	if err := json.Unmarshal(text, &decoded); err != nil || !reflect.DeepEqual(decoded.Records, rows) {
+		t.Fatalf("the dynamic message does not render back to its rows: %v", err)
+	}
 }
 
 // A large self-describing body is reserved once, at about its size, once the
 // type's ratio is learned — not grown by doubling, which allocates about twice
-// the message and copies it along the way.
+// the message and copies it along the way. Both shapes: a slice at the root, and
+// the slice under a map[string]any key, which is how API responses are built.
 func TestSelfDescribingReservesTheBodyOnce(t *testing.T) {
 	rows := makeCatalogRows(20_000)
-	if _, err := MarshalSelfDescribing(rows); err != nil { // learns the size ratio
-		t.Fatal(err)
-	}
-	var before, after runtime.MemStats
-	runtime.GC()
-	runtime.ReadMemStats(&before)
-	message, err := MarshalSelfDescribing(rows)
-	runtime.ReadMemStats(&after)
-	if err != nil {
-		t.Fatal(err)
-	}
-	allocated := after.TotalAlloc - before.TotalAlloc
-	t.Logf("message %d bytes, allocated %d bytes, capacity %d", len(message), allocated, cap(message))
-	if allocated > uint64(len(message))*3/2 {
-		t.Fatalf("encoding a %d-byte message allocated %d bytes", len(message), allocated)
+	for name, document := range map[string]any{
+		"slice root": rows,
+		"dynamic map": map[string]any{"records": &rows, "removed": []int32{1, 2, 3}},
+	} {
+		if _, err := MarshalSelfDescribing(document); err != nil { // learns the size ratio
+			t.Fatal(err)
+		}
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		message, err := MarshalSelfDescribing(document)
+		runtime.ReadMemStats(&after)
+		if err != nil {
+			t.Fatal(err)
+		}
+		allocated := after.TotalAlloc - before.TotalAlloc
+		t.Logf("%s: message %d bytes, allocated %d bytes", name, len(message), allocated)
+		if allocated > uint64(len(message))*3/2 {
+			t.Fatalf("%s: encoding a %d-byte message allocated %d bytes", name, len(message), allocated)
+		}
 	}
 }

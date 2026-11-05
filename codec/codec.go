@@ -157,6 +157,9 @@ type typePlan struct {
 	// sizeRatio is what the last encodes came to against sizeFor, in
 	// sizeRatioShift fixed point, or zero before the first. See reserve.
 	sizeRatio atomic.Uint32
+	// runSizeRatio is sizeRatio for a run of these records inside a dynamic
+	// value. See reserveRun.
+	runSizeRatio atomic.Uint32
 	// canTable says every field of this plan is a column the column codec
 	// carries, which is what lets a slice of it be transposed. See table.go.
 	canTable bool
@@ -485,15 +488,50 @@ const sizeRatioShift = 12
 // so that encodes of one type on many goroutines are not all storing to the
 // same cache line.
 func (plan *typePlan) learn(estimate, actual int) {
+	learnSizeRatio(&plan.sizeRatio, estimate, actual)
+}
+
+func learnSizeRatio(sizeRatio *atomic.Uint32, estimate, actual int) {
 	if estimate <= 0 {
 		return
 	}
 	ratio := min(uint64(actual+actual>>4)<<sizeRatioShift/uint64(estimate), math.MaxUint32)
-	old := uint64(plan.sizeRatio.Load())
+	old := uint64(sizeRatio.Load())
 	if ratio > old+old>>4 || ratio < old-old>>4 {
-		plan.sizeRatio.Store(uint32(max(ratio, 1)))
+		sizeRatio.Store(uint32(max(ratio, 1)))
 	}
 }
+
+// reserveRun is reserve for a run of slice's records written as one value
+// inside a dynamic document — the `[]Product` under a map[string]any's key,
+// which is how most API responses are shaped. The record count is only known
+// there, not from the root's type, so without this the run grew by doubling.
+//
+// A run is not a message, so its ratio is kept apart from sizeRatio. It also
+// leaves runSectionRoom spare: a self-describing message puts its schema
+// section in front of a body already written, and the room lets that move the
+// body inside the buffer instead of copying it into a new one.
+func (plan *typePlan) reserveRun(slice *sliceHeader) (need, estimate int) {
+	if slice.len == 0 {
+		return 0, 0
+	}
+	row := plan.sizeHint
+	if len(plan.structSlices) > 0 {
+		row = plan.sizeAt(slice.data, 1)
+	}
+	estimate = slice.len * row
+	need = estimate
+	if ratio := plan.runSizeRatio.Load(); ratio != 0 {
+		need = int(min(uint64(estimate)*uint64(ratio)>>sizeRatioShift, math.MaxInt32))
+	}
+	return need + min(runSectionRoom, need/4), estimate
+}
+
+// runSectionRoom is the most reserveRun leaves spare for a schema section: a
+// few struct descriptions, which is what a response names. A small run gets a
+// quarter of itself instead — copying a small body costs nothing, and a 4 KB
+// spare on every incremental sync's few hundred bytes would.
+const runSectionRoom = 4 << 10
 
 // sizeEstimateDepth is how far down first rows sizeFor looks. It is a bound
 // rather than the type's depth because a slice can hold itself: x[0].Rows = x.

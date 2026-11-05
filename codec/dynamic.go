@@ -30,7 +30,7 @@ package codec
 // # Which means the section is built from the value
 //
 // A struct only reachable through an `any` is not in the type, so the table
-// cannot be resolved from the type alone. `marshalDynamic` therefore writes the
+// cannot be resolved from the type alone. `appendDynamicSelfDescribing` therefore writes the
 // body first, with the section builder open, and emits the section after — the
 // indices a TYPED tag names are assigned as the walk meets them.
 //
@@ -52,6 +52,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"slices"
 	"sort"
 	"unsafe"
 
@@ -386,7 +387,11 @@ func appendTypedSequence(writer *wire.Writer8, value reflect.Value, buf *scratch
 	}
 	typedTag(writer, buf.section.structIndex(plan), compact)
 	slice := sliceHeader{data: value.UnsafePointer(), len: value.Len(), cap: value.Cap()}
+	need, estimate := plan.reserveRun(&slice)
+	writer.Buffer = slices.Grow(writer.Buffer, need)
+	runStart := len(writer.Buffer)
 	appendStructsElement(writer, plan, &slice, elemType.Size(), buf)
+	learnSizeRatio(&plan.runSizeRatio, estimate, len(writer.Buffer)-runStart)
 	return true
 }
 
