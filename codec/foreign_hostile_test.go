@@ -295,9 +295,14 @@ func mustRootPlan(t *testing.T, rootType reflect.Type) *typePlan {
 // planField is read once per field per message, so what the foreign decode added
 // to it has to live in the padding it already had.
 func TestPlanFieldDidNotGrow(t *testing.T) {
-	const want = 80
+	// 80 on 64 bits with the three bools and five bytes of padding; 44 where a
+	// pointer, uintptr and interface word are four bytes.
+	want := uintptr(80)
+	if unsafe.Sizeof(uintptr(0)) == 4 {
+		want = 44
+	}
 	if got := unsafeSizeofPlanField(); got != want {
-		t.Fatalf("planField is %d bytes, was %d before the foreign decode (80 with the three bools and five bytes of padding)", got, want)
+		t.Fatalf("planField is %d bytes, was %d before the foreign decode", got, want)
 	}
 }
 

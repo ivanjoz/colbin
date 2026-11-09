@@ -692,7 +692,15 @@ pub fn encode(text: &[u8], flags: u32, diag: &mut Diag) -> Option<Encoded> {
         return None;
     };
     let section = crate::section::build(&inferred.schema);
-    write_message(&doc, inferred.schema, inferred.root, section, text, flags, diag)
+    write_message(
+        &doc,
+        inferred.schema,
+        inferred.root,
+        section,
+        text,
+        flags,
+        diag,
+    )
 }
 
 /// A document the caller already has as a [`Doc`], and the section it inferred
@@ -739,7 +747,12 @@ pub const BLOB_HEADER: usize = 32;
 #[must_use]
 pub fn encode_blob(blob: &[u8], flags: u32, diag: &mut Diag) -> Option<Encoded> {
     let refuse = |diag: &mut Diag, why: &str| {
-        diag.fail(crate::diag::D_CORRUPT, -1, "", format!("the fast path's document is malformed: {why}"));
+        diag.fail(
+            crate::diag::D_CORRUPT,
+            -1,
+            "",
+            format!("the fast path's document is malformed: {why}"),
+        );
         None
     };
     let word = |at: usize| -> Option<usize> {

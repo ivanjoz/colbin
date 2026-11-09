@@ -428,9 +428,12 @@ func TestAppendSelfDescribingMatchesMarshal(t *testing.T) {
 // the message and copies it along the way. Both shapes: a slice at the root, and
 // the slice under a map[string]any key, which is how API responses are built.
 func TestSelfDescribingReservesTheBodyOnce(t *testing.T) {
+	if raceEnabled {
+		t.Skip("the race detector doubles what slices.Grow allocates; see race_on_test.go")
+	}
 	rows := makeCatalogRows(20_000)
 	for name, document := range map[string]any{
-		"slice root": rows,
+		"slice root":  rows,
 		"dynamic map": map[string]any{"records": &rows, "removed": []int32{1, 2, 3}},
 	} {
 		if _, err := MarshalSelfDescribing(document); err != nil { // learns the size ratio
