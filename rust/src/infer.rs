@@ -127,7 +127,11 @@ impl Obs {
 struct FieldObs {
     name: Vec<u8>,
     obs: u32,
+    /// How many of the objects merged into the position carried this key.
     present: u32,
+    /// The ordinal of the last object that did, so a key repeated inside one
+    /// object is counted once.
+    last: u32,
 }
 
 /// An inferred schema: the struct table a section is written from, and the
@@ -368,6 +372,7 @@ impl<'a, 'd> Inferrer<'a, 'd> {
                     name,
                     obs: child_obs,
                     present: 0,
+                    last: 0,
                 });
                 slot = Some(held.fields.len() - 1);
             }
@@ -378,9 +383,13 @@ impl<'a, 'd> Inferrer<'a, 'd> {
                 let objects = held.objects;
                 let field = &mut held.fields[slot];
                 // A duplicate key overwrites, as `JSON.parse` does, so the count
-                // still reflects records rather than occurrences.
-                if field.present < objects {
-                    field.present = objects;
+                // still reflects records rather than occurrences. It is a count,
+                // not "the latest object": a key absent from record 1 and present
+                // in record 2 is not present in every record, and setting this to
+                // `objects` made it look as if it were.
+                if field.last != objects {
+                    field.last = objects;
+                    field.present += 1;
                 }
                 (field.obs, field.name.clone())
             };

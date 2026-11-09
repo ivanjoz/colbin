@@ -281,7 +281,9 @@ func (builder *sectionBuilder) appendDesc(dst []byte, field *planField) []byte {
 //	[0xD4 or 0xDC] [section] [the ordinary body]
 //
 // The body is byte for byte what Marshal writes, and Unmarshal accepts either
-// form — it steps over a section it does not need. So a self-describing message
+// form: it steps over a section that is the type's own. A section that is not —
+// the browser's, which numbers its fields its own way — it reads the message
+// through, matching fields by name (foreign.go). So a self-describing message
 // decodes into the Go type *and* into JSON, which is the property worth keeping.
 //
 // v may be a slice or a map as well as a struct, and the envelope that carries

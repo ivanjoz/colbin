@@ -247,9 +247,22 @@ describes itself in finite space. It can travel two ways:
   `Marshal` produces.
 - **Embedded** (`MarshalSelfDescribing`). This is **colbin/JSON**, the
   self-describing mode: root byte `0xD4`/`0xDC`, then the section, then the
-  body. The body is byte for byte what `Marshal` writes. `Unmarshal` skips the
-  section, and `ToJSON(nil, msg)` renders the message with no schema and no Go
-  type available.
+  body. The body is byte for byte what `Marshal` writes. `Unmarshal` skips a
+  section that is the Go type's own, and reads the message *through* any other
+  one, matching fields by name (see below). `ToJSON(nil, msg)` renders the
+  message with no schema and no Go type available.
+
+A browser can therefore send a payload to a Go backend with no schema of its own:
+`codec.marshal(value).standalone` goes into `colbin.Unmarshal` and lands in the
+typed Go value. The browser numbers its fields 0, 1, 2 and types every integer as
+`int64`, so the decoder matches each field to the Go one by **name** (json tag
+first, then the Go name), skips fields the Go type does not have, leaves fields
+the message does not have at zero, and converts numbers to the field's type —
+refusing, with the field's name, a value that does not fit (`int64` 70000 into an
+`int16`) and a float into an integer. Send `.standalone`, not `.message`: a
+message with no section has nothing to match by and is read by the Go type's own
+field ids. A foreign decode of 500 products costs about 1.3× the same records
+written by Go and about a tenth of `ToJSON` followed by `encoding/json`.
 
 The section is 38 to 448 bytes for the types measured here. On a table or a
 document that is under 1% of the message. On a single small record it is most
@@ -452,15 +465,14 @@ records under Node 24 (`bun run bench` in `js/`):
 
 ### Against msgpack and vtprotobuf
 
-On AWS Lambda, x86 and Graviton2, with TPC-H SF 0.1 as the neutral corpus.
-colbin is the smallest on every case: 50.7 MB on TPC-H normalized against
-vtprotobuf's 68.2 MB and msgpack's 170.8 MB. It is faster on every TPC-H
-operation:
-- encode is 1.07–1.39× msgpack and 1.14–2.15× vtprotobuf;
-- decode is 1.24–2.27× msgpack and 1.35–2.37× vtprotobuf.
+On AWS Lambda x86_64, on TPC-H, TPC-DS, Public BI and SchemaStore. colbin is
+the smallest on every dataset: 1.6–4.2× under msgpack and 1.1–1.6× under
+vtprotobuf. On the three table datasets it is the fastest decode, 1.5–1.7×
+msgpack and 1.5–2.0× vtprotobuf, and its encode is level with msgpack
+(1.00–1.15×) and 1.3–1.8× vtprotobuf.
 
-It still loses encode to msgpack on the synthetic sales and dataset cases
-(0.87–0.98×). Every number is in [PERFORMANCE.md](PERFORMANCE.md#where-it-stands-at-v070).
+It loses on small documents: on SchemaStore encode is 0.79× msgpack and 0.88×
+vtprotobuf. Every number is in [PERFORMANCE.md](PERFORMANCE.md).
 
 ### Reproducing
 

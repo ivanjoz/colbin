@@ -146,6 +146,9 @@ type scratch struct {
 	// dict is the message's string dictionaries, on the dictionary path only.
 	// See dictionary.go.
 	dict *dictionaries
+	// foreign is the conversions of the foreign plan this decode runs through, for
+	// the fields whose op is opConvert. nil on every other decode. See foreign.go.
+	foreign *foreignPlan
 }
 
 // columnBuffers is the transposition buffer, pooled across messages: a table of
@@ -866,6 +869,10 @@ func readColumns(columns *wire.Reader8, field *planField, data unsafe.Pointer, r
 			if !columns.Skip() {
 				break
 			}
+			continue
+		}
+		if column.op == opConvert {
+			readConvertedColumn(columns, column, data, field.stride, rows, buf)
 			continue
 		}
 		if column.op == opPointer {

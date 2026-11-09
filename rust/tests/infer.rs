@@ -166,6 +166,29 @@ fn a_missing_key_and_an_explicit_null_both_become_pointers() {
     }
 }
 
+/// A key missing from a record in the *middle* is still missing from a record.
+/// The count of records carrying it once followed the latest one, so a key that
+/// was absent from record 1 and back in record 2 looked present in all of them,
+/// and the missing record decoded as a zero instead of a null.
+#[test]
+fn a_key_missing_from_a_middle_record_is_a_pointer() {
+    for text in [
+        r#"[{"a":1,"b":0},{"b":2},{"a":3,"b":4}]"#,
+        r#"[{"a":1,"b":0},{"b":2},{"a":3,"b":4},{"a":5,"b":6}]"#,
+    ] {
+        let inferred = schema_of(text).expect("infer");
+        let record = inferred.schema.plan(1).expect("the record struct");
+        assert_eq!(record.names, ["a", "b"], "{text}");
+        assert_eq!(record.fields[0].op, OP_POINTER, "{text}");
+        assert_eq!(record.fields[0].elem_op, OP_INT64, "{text}");
+        assert_eq!(record.fields[1].op, OP_INT64, "{text}");
+    }
+    // A key repeated inside one object is still one record.
+    let inferred = schema_of(r#"[{"a":1,"a":2},{"a":3}]"#).expect("infer");
+    let record = inferred.schema.plan(1).expect("the record struct");
+    assert_eq!(record.fields[0].op, OP_INT64);
+}
+
 #[test]
 fn one_float_promotes_the_whole_column() {
     let inferred = schema_of(r#"[{"v":1},{"v":2.5},{"v":3}]"#).expect("infer");

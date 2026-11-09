@@ -33,6 +33,13 @@ func Append(dst []byte, v any) ([]byte, error) { return codec.Append(dst, v) }
 // left holding whatever it had. A slice in dst lends its array, as in
 // encoding/json: a list that fits in its capacity is decoded into it, so a slice
 // taken from dst before the call sees its elements overwritten.
+//
+// A message carrying a schema section that is not dst's own — the browser's
+// `codec.marshal(...).standalone` — is read through that section: fields are
+// matched to dst's by name (json tag first, then the Go name), unknown ones are
+// skipped, missing ones stay zero, and numbers are converted to the field's type
+// and refused if they do not fit. A message with no section is read by dst's own
+// field ids, so a browser sends `.standalone`, not `.message`.
 func Unmarshal(data []byte, dst any) error { return codec.Unmarshal(data, dst) }
 
 // FieldIDs reports the id of every field, counting from one as the tags do, for
@@ -140,7 +147,9 @@ func ParseSchema(section []byte) (*Schema, error) { return codec.ParseSchema(sec
 
 // MarshalSelfDescribing encodes v with its schema section in front of it, so the
 // message stands alone. The body behind the section is byte for byte what
-// Marshal writes, and Unmarshal accepts either form.
+// Marshal writes, and Unmarshal accepts either form: a section that is the type's
+// own is stepped over, and one that is not — the browser's — is read through,
+// matching fields by name.
 //
 // It is the wrong default for a stream — see Schema — and the right one for a
 // single document that has nowhere to put a schema of its own.

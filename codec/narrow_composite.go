@@ -450,6 +450,10 @@ func readNarrowColumns(field *planField, data unsafe.Pointer, rows int, body []b
 			}
 			continue
 		}
+		if column.op == opConvert {
+			readConvertedColumn(&columns, column, data, field.stride, rows, buf)
+			continue
+		}
 		if column.op == opPointer {
 			if column.elemOp != opString || buf.dict == nil ||
 				!buf.dict.readDictPointer(&columns, column, data, field.stride, rows) {

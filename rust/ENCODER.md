@@ -197,6 +197,16 @@ way it did in AssemblyScript — `str::parse::<f64>` is correctly rounded, and t
 513 float literals in `rust/vectors/vectors.json`, every expected bit pattern
 from Go's `strconv.ParseFloat`, are what say so.
 
+The browser package has a second way in, `encode_doc`: JavaScript walks the live
+object once, applies these same inference rules, and writes the parsed-document
+arrays and the section into one blob (`build::encode_blob`, which validates every
+length and index via `Doc::from_parts` before walking). Output is byte-identical
+to the text path; `js/tests/fast.test.mjs` pins that, and anything the walk
+cannot reproduce falls back to the text path.
+
+Presence is counted per record, not per occurrence: a key absent from a record in
+the middle makes the field a pointer (it once followed the latest record only).
+
 ---
 
 ## 6. What a round trip does not restore

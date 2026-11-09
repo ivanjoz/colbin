@@ -116,6 +116,37 @@ pub extern "C" fn encode(len: usize, flags: u32) -> i32 {
     }
 }
 
+/// A document the caller has already walked, to a colbin message: `encode`
+/// without the JSON text, its scan and its inference.
+///
+/// The input buffer holds what `colbin::build::encode_blob` documents — the
+/// arrays of a parsed document and the section inferred for it, which the
+/// browser package writes straight from live objects. Everything else is as
+/// `encode`: the message length, or -1 with a diagnostic, and the section at
+/// `section()`.
+#[cfg(feature = "encode")]
+#[allow(unsafe_code, reason = "an exported symbol must not be mangled")]
+#[unsafe(no_mangle)]
+pub extern "C" fn encode_doc(len: usize, flags: u32) -> i32 {
+    let mut diag = Diag::new();
+    let built = INPUT.with_borrow(|input| {
+        input
+            .get(..len)
+            .map(|blob| build::encode_blob(blob, flags, &mut diag))
+    });
+    let Some(built) = built else {
+        return fail_err(&colbin::Error::Truncated);
+    };
+    match built {
+        Some(encoded) => {
+            LAST_SECTION.with_borrow_mut(|held| *held = encoded.section);
+            remember_diag(&diag.encode());
+            ok(encoded.message)
+        }
+        None => fail_bytes(diag.encode()),
+    }
+}
+
 /// The schema section for the last encode, to send once per connection.
 #[cfg(feature = "encode")]
 #[allow(unsafe_code, reason = "an exported symbol must not be mangled")]

@@ -492,11 +492,20 @@ impl<'a, 'd> Builder<'a, 'd> {
             return None;
         }
         let name = plan.names.get(index)?.as_bytes();
+        // Records of one shape carry their keys in the order the schema numbered
+        // them, so the field's own position is where to look first. A document
+        // holds a key once — the scan resolves a duplicate when it parses, and
+        // the browser's walk has none to write — so a hit there is *the* value,
+        // and the scan below is only for a record that is missing something.
+        let count = self.doc.count(node);
+        if index < count && self.doc.key_of(node, index) == name {
+            return Some(self.doc.child_at(node, index));
+        }
         // The last occurrence wins, as `JSON.parse` does. Taking the first was a
         // real bug the self-check caught the first time it ran, on a document
         // with a duplicate key.
         let mut found = None;
-        for at in 0..self.doc.count(node) {
+        for at in 0..count {
             if self.doc.key_of(node, at) == name {
                 found = Some(self.doc.child_at(node, at));
             }
@@ -683,21 +692,145 @@ pub fn encode(text: &[u8], flags: u32, diag: &mut Diag) -> Option<Encoded> {
         return None;
     };
     let section = crate::section::build(&inferred.schema);
+    write_message(&doc, inferred.schema, inferred.root, section, text, flags, diag)
+}
+
+/// A document the caller already has as a [`Doc`], and the section it inferred
+/// for it, to a colbin message: the encode with the scan and the inference taken
+/// out. This is what the browser module's fast path calls, after JavaScript has
+/// walked its own objects once, inferred the schema on the way and written the
+/// arrays — so no JSON text is built and none is parsed.
+///
+/// The section is *trusted to describe the document* in the way inference's own
+/// output is: the body is written from it, and a field whose value is not what
+/// the section says is written as that type's zero rather than refused. What is
+/// not trusted is its syntax, which [`crate::section::parse`] checks.
+///
+/// The caller owns the oracle: the text path is what a document this refuses, or
+/// one it is unsure of, goes through, and its output is what this must equal.
+#[must_use]
+pub fn encode_doc(doc: &Doc, section: Vec<u8>, flags: u32, diag: &mut Diag) -> Option<Encoded> {
+    let schema = match crate::section::parse(&section) {
+        Ok(schema) => schema,
+        Err(err) => {
+            diag.fail(
+                crate::diag::D_CORRUPT,
+                -1,
+                "",
+                format!("the fast path wrote a section it cannot read: {err}"),
+            );
+            return None;
+        }
+    };
+    write_message(doc, schema, doc.root(), section, &[], flags, diag)
+}
+
+/// What [`encode_blob`] reads: eight little-endian `u32`s —
+/// `nodes, children, text bytes, section bytes, root, 0, 0, 0` — and then, packed
+/// with no padding between them, the arrays of a [`Doc`] in this order: `kind`
+/// (1 byte a node), `num` (8), `a` (4), `b` (4), `child` (4 a child), `key_a` (4),
+/// `key_b` (4), the text, and the section.
+pub const BLOB_HEADER: usize = 32;
+
+/// [`encode_doc`] over one buffer, which is what crosses the wasm boundary: the
+/// caller writes the arrays where it has room for them and the module reads them
+/// out, checking every length against the buffer and every index against the
+/// arrays ([`Doc::from_parts`]) before it walks anything.
+#[must_use]
+pub fn encode_blob(blob: &[u8], flags: u32, diag: &mut Diag) -> Option<Encoded> {
+    let refuse = |diag: &mut Diag, why: &str| {
+        diag.fail(crate::diag::D_CORRUPT, -1, "", format!("the fast path's document is malformed: {why}"));
+        None
+    };
+    let word = |at: usize| -> Option<usize> {
+        let bytes = blob.get(at..at + 4)?;
+        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize)
+    };
+    let (Some(nodes), Some(children), Some(text_len), Some(section_len), Some(root)) =
+        (word(0), word(4), word(8), word(12), word(16))
+    else {
+        return refuse(diag, "the header is short");
+    };
+    // The arrays' total, in 64 bits so a header claiming four billion nodes cannot
+    // wrap a 32-bit sum into something the buffer holds.
+    let need = (BLOB_HEADER as u64)
+        + nodes as u64 * (1 + 8 + 4 + 4)
+        + children as u64 * 12
+        + text_len as u64
+        + section_len as u64;
+    if need != blob.len() as u64 {
+        return refuse(diag, "the lengths do not add up to the buffer");
+    }
+    let mut at = BLOB_HEADER;
+    let mut take = |len: usize| {
+        let part = &blob[at..at + len];
+        at += len;
+        part
+    };
+    let kind = take(nodes).to_vec();
+    let num = take(nodes * 8)
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| u64::from_le_bytes(*c))
+        .collect();
+    let mut words = |len: usize| -> Vec<u32> {
+        take(len * 4)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
+            .collect()
+    };
+    let a = words(nodes);
+    let b = words(nodes);
+    let child = words(children);
+    let key_a = words(children);
+    let key_b = words(children);
+    let text = take(text_len).to_vec();
+    let section = take(section_len).to_vec();
+    let Some(doc) = Doc::from_parts(crate::json::parse::DocParts {
+        kind,
+        num,
+        a,
+        b,
+        child,
+        key_a,
+        key_b,
+        text,
+        root: root as u32,
+    }) else {
+        return refuse(diag, "an index points outside it");
+    };
+    encode_doc(&doc, section, flags, diag)
+}
+
+/// The body, behind the root byte and the section when asked for, and the
+/// self-check under [`VERIFY`]: what both entry points end in.
+fn write_message(
+    doc: &Doc,
+    schema: Schema,
+    root: u32,
+    section: Vec<u8>,
+    text: &[u8],
+    flags: u32,
+    diag: &mut Diag,
+) -> Option<Encoded> {
     let self_describing = flags & SELF_DESCRIBING != 0;
 
-    let mut message = Vec::with_capacity(text.len());
-    let mut builder = Builder::new(&doc, &inferred.schema, diag);
+    let mut message = Vec::with_capacity(text.len().max(1024));
+    let mut builder = Builder::new(doc, &schema, diag);
     builder.pack_strings = flags & PACK_STRINGS != 0;
     if self_describing {
-        message.push(if inferred.schema.root().is_wide {
+        message.push(if schema.root().is_wide {
             ROOT_STRUCT_WIDE | ROOT_SCHEMA
         } else {
             ROOT_STRUCT_NARROW | ROOT_SCHEMA
         });
         message.extend_from_slice(&section);
-        builder.run(&mut message, 0, inferred.root);
+        builder.run(&mut message, 0, root);
     } else {
-        builder.build(&mut message, inferred.root, false);
+        builder.build(&mut message, root, false);
     }
     if !diag.ok() {
         diag.locate(text);
@@ -721,12 +854,12 @@ pub fn encode(text: &[u8], flags: u32, diag: &mut Diag) -> Option<Encoded> {
             }
         };
         let wide = split.root & 0x08 != 0;
-        let schema = split.schema.unwrap_or(inferred.schema);
+        let schema = split.schema.unwrap_or(schema);
         let body = split.body;
 
         match crate::walk::to_json(&schema, body, wide) {
             Ok(json) => {
-                if !crate::verify::verify(&doc, inferred.root, &json, diag) {
+                if !crate::verify::verify(doc, root, &json, diag) {
                     return None;
                 }
             }

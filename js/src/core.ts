@@ -23,6 +23,7 @@
 // in it to preempt.
 
 import { ColbinError, type Diagnostic } from './errors.ts'
+import { buildBlob } from './fast.ts'
 import { readRows, readColumns, type ColumnTable, type ReadRowsOptions } from './materialize.ts'
 
 /** Encode flags, mirroring `colbin::build`. */
@@ -41,6 +42,8 @@ type Exports = {
   alloc(n: number): number
   result_ptr(): number
   encode(len: number, flags: number): number
+  /** Absent from a module built before the fast path, which is then not used. */
+  encode_doc?(len: number, flags: number): number
   section(): number
   set_schema(len: number): number
   decode(len: number): number
@@ -145,6 +148,10 @@ export type DecodeOptions = {
  * fallback for anything that is not the table shape INTERNALS.md §16.3 covers. */
 export type Path = 'materialize' | 'json'
 
+/** Which path an encode took: `doc` walked the objects once and handed the module
+ * a document, `json` went through `JSON.stringify` and the text scan. */
+export type EncodePath = 'doc' | 'json'
+
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
@@ -163,6 +170,7 @@ export class Codec {
   #applied: Uint8Array | null = null
   #held: Uint8Array | null = null
   #lastPath: Path = 'json'
+  #lastEncodePath: EncodePath = 'json'
 
   private constructor(exports: Exports) {
     this.#exports = exports
@@ -201,6 +209,11 @@ export class Codec {
    * it landed on the slow one should not have to guess. */
   get lastPath(): Path {
     return this.#lastPath
+  }
+
+  /** Which path the last {@link marshal} took. `doc` is the fast one. */
+  get lastEncodePath(): EncodePath {
+    return this.#lastEncodePath
   }
 
   /**
@@ -272,10 +285,30 @@ export class Codec {
   marshal(value: unknown, options: MarshalOptions = {}): Marshaled {
     const e = this.#exports
     this.#needs('encode', 'encode', 'rebuild the module with --features encode')
-    const text = typeof value === 'string' ? value : JSON.stringify(value)
     const flags = options.verify ? VERIFY : 0
 
-    const length = this.#call(e.encode(this.#write(encoder.encode(text)), flags))
+    // The fast path: the objects are walked once, and the module writes the body
+    // from the document and the section that walk produced. It declines whatever
+    // the text path would warn about, refuse or round differently — and so does
+    // the module, which returns a negative length for a document it does not
+    // accept — and then the text path answers, which is also where its
+    // diagnostics come from.
+    let length = -1
+    if (typeof value !== 'string' && typeof e.encode_doc === 'function') {
+      const blob = buildBlob(value)
+      if (blob !== null) {
+        const at = e.alloc(blob.length)
+        blob.copyTo(new Uint8Array(e.memory.buffer), at)
+        length = e.encode_doc(blob.length, flags)
+      }
+    }
+    if (length >= 0) {
+      this.#lastEncodePath = 'doc'
+    } else {
+      this.#lastEncodePath = 'json'
+      const text = typeof value === 'string' ? value : JSON.stringify(value)
+      length = this.#call(e.encode(this.#write(encoder.encode(text)), flags))
+    }
     const message = this.#result(length)
     const section = this.#result(this.#call(e.section()))
     // Warnings ride in the same envelope as errors, and reading them

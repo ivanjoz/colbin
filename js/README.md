@@ -53,7 +53,18 @@ const { message, section, standalone, warnings } = codec.marshal(rows)
 stands, which is the only way to carry an integer past 2^53 in: by the time it
 is a JavaScript `Number`, it has already been rounded.
 
-`standalone` is the same document with its section in front of it. It is
+A value is not stringified: `marshal` walks the live objects once, infers the
+schema, and hands the module the parsed document plus its section (`encode_doc`
+in the wasm ABI), skipping the JSON text, its UTF-8 copy and its re-parse — about
+3x faster on a 500-row table. The output is byte-identical to the text path,
+which stays the oracle and the fallback for anything `JSON.stringify` would
+treat specially (`toJSON`, `Date`, `Map`, `bigint`, integers past 2^53, depth
+over 60, type conflicts). `codec.lastEncodePath` is `'doc'` or `'json'`.
+
+`standalone` is the same document with its section in front of it. It is what to
+send to a Go backend: `colbin.Unmarshal` reads it through its section, matching
+fields to the Go type's by name, so the page needs no schema from the server.
+`message` alone has nothing to match by, and Go refuses it. It is
 composed on first read, not encoded a second time.
 
 Pass `{ verify: true }` to decode the message back and walk it against the

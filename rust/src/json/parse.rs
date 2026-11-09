@@ -72,7 +72,96 @@ pub struct Doc {
     root: u32,
 }
 
+/// The arrays of a document built by something other than [`parse`] — the
+/// browser module's fast path, which writes them straight from live JavaScript
+/// objects. See [`Doc::from_parts`].
+#[derive(Debug, Default)]
+pub struct DocParts {
+    pub kind: Vec<u8>,
+    pub num: Vec<u64>,
+    pub a: Vec<u32>,
+    pub b: Vec<u32>,
+    pub child: Vec<u32>,
+    pub key_a: Vec<u32>,
+    pub key_b: Vec<u32>,
+    pub text: Vec<u8>,
+    pub root: u32,
+}
+
 impl Doc {
+    /// A document from its arrays, which are checked rather than trusted.
+    ///
+    /// The source offsets are all zero: the writer had no text to point into, and
+    /// the only use of them is a diagnostic. What is checked is everything a walk
+    /// indexes by — every string span inside the text, every container's children
+    /// inside the child table, every child a node *after* its parent, which is
+    /// what keeps a crafted table from being a cycle — so a document that passes
+    /// cannot make the encoder index out of bounds or recurse without end.
+    ///
+    /// Returns `None` for one that does not, and the caller falls back to the text
+    /// path, which is the oracle.
+    #[must_use]
+    pub fn from_parts(parts: DocParts) -> Option<Self> {
+        let DocParts {
+            kind,
+            num,
+            a,
+            b,
+            child,
+            key_a,
+            key_b,
+            text,
+            root,
+        } = parts;
+        let nodes = kind.len();
+        if num.len() != nodes || a.len() != nodes || b.len() != nodes || root as usize >= nodes {
+            return None;
+        }
+        if key_a.len() != child.len() || key_b.len() != child.len() || nodes > u32::MAX as usize {
+            return None;
+        }
+        let within = |start: u32, len: u32, bound: usize| start as usize + len as usize <= bound;
+        for node in 0..nodes {
+            match kind[node] {
+                K_NULL | K_BOOL | K_INT | K_UINT | K_FLOAT => {}
+                K_STRING => {
+                    if !within(a[node], b[node], text.len()) {
+                        return None;
+                    }
+                }
+                K_ARRAY | K_OBJECT => {
+                    if !within(a[node], b[node], child.len()) {
+                        return None;
+                    }
+                    let first = a[node] as usize;
+                    for slot in first..first + b[node] as usize {
+                        // After its parent: a document is a tree, not a graph.
+                        if (child[slot] as usize) <= node || child[slot] as usize >= nodes {
+                            return None;
+                        }
+                        if kind[node] == K_OBJECT && !within(key_a[slot], key_b[slot], text.len()) {
+                            return None;
+                        }
+                    }
+                }
+                _ => return None,
+            }
+        }
+        let off = alloc::vec![0u32; nodes];
+        Some(Self {
+            kind,
+            num,
+            a,
+            b,
+            off,
+            child,
+            key_a,
+            key_b,
+            text,
+            root,
+        })
+    }
+
     /// The document's top-level value.
     #[must_use]
     #[inline]

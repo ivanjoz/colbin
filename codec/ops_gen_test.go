@@ -175,7 +175,9 @@ import (
 		for _, arm := range reads {
 			fmt.Fprintf(&out, "case %s:\n%s\n", arm[0], arm[1])
 		}
-		out.WriteString("default:\nreader.Fail(errNotValueOp(field.op))\n}\n}\n")
+		// The default is where a foreign plan's converted field lands, so the
+		// conversion costs the arms above nothing. See foreign.go.
+		fmt.Fprintf(&out, "default:\nreadConverted%s(reader, field, at, buf)\n}\n}\n", width.suffix)
 
 		walk := "narrowScalar"
 		if width.suffix != "" {

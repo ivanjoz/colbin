@@ -122,7 +122,18 @@ type planField struct {
 	// valueIndirect says a map's values are pointers to the structs or slices
 	// valueKind describes. It is not on the wire. See maps.go.
 	valueIndirect bool
+	// conv is one more than the index of this field's conversion in the foreign
+	// plan being decoded through, for a field whose op is opConvert, and zero
+	// otherwise. It sits in the padding after the bools, so the struct is no larger
+	// than it was. See foreign.go.
+	conv uint32
 }
+
+// opConvert is a field of a foreign plan whose value is read as the section says
+// it is and stored as the Go type holds it. It is not a wire op: it is past
+// opCount, so a section can never name it, and it is not in the generated value
+// switches — they reach it through their default arm, which is a cold one.
+const opConvert fieldOp = 250
 
 type typePlan struct {
 	fields []planField
@@ -973,6 +984,15 @@ func Marshal(v any) ([]byte, error) {
 // A slice in dst lends its array: a list that fits in its capacity is decoded
 // into it, as encoding/json does, so a slice taken from dst before the call sees
 // its elements overwritten. A field the message omits is still nil.
+//
+// A message that carries a schema section other than dst's own — what the
+// browser's codec.marshal writes as `.standalone` — is read through that section:
+// each of its fields is matched to a field of dst by name (the json tag first,
+// then the Go name), one the type does not have is skipped, one the message does
+// not have stays zero, and an integer or float is converted to the field's type,
+// refused if it does not fit. A message with no section is read by dst's own
+// field ids as always, which a browser message does not match: send `.standalone`.
+// See INTERNALS.md §11.8.
 func Unmarshal(data []byte, dst any) error {
 	pointer := reflect.ValueOf(dst)
 	if pointer.Kind() != reflect.Pointer || pointer.IsNil() {
@@ -995,6 +1015,28 @@ func Unmarshal(data []byte, dst any) error {
 		return errBadRoot(data, value.Type())
 	}
 	record := unsafe.Pointer(value.UnsafeAddr())
+	if section != nil {
+		foreign, err := foreignFor(value.Type(), plan, section)
+		if err != nil {
+			return errDecoding(value.Type(), err)
+		}
+		if foreign != nil {
+			held := plan.reset.holds(record)
+			if held {
+				plan.reset.reset(record)
+			} else {
+				value.SetZero()
+			}
+			err := unmarshalForeign(body, section, wide, foreign, record)
+			if held {
+				plan.reset.settle(record)
+			}
+			if err != nil {
+				return errDecoding(value.Type(), err)
+			}
+			return nil
+		}
+	}
 	if program := plan.flatReads; program != nil && !wide && useRowPrograms && program.readFlat(body, record) {
 		return nil
 	}
@@ -1257,6 +1299,28 @@ func (codec *Codec[T]) Unmarshal(data []byte, value *T) error {
 			return unmarshalDynamicRoot(data, codec.plan, unsafe.Pointer(value), codec.what)
 		}
 		return errBadRoot(data, codec.what)
+	}
+	if section != nil {
+		foreign, err := foreignFor(codec.what, codec.plan, section)
+		if err != nil {
+			return errDecoding(codec.what, err)
+		}
+		if foreign != nil {
+			held := codec.plan.reset.holds(unsafe.Pointer(value))
+			if held {
+				codec.plan.reset.reset(unsafe.Pointer(value))
+			} else {
+				*value = *new(T)
+			}
+			err := unmarshalForeign(body, section, wide, foreign, unsafe.Pointer(value))
+			if held {
+				codec.plan.reset.settle(unsafe.Pointer(value))
+			}
+			if err != nil {
+				return errDecoding(codec.what, err)
+			}
+			return nil
+		}
 	}
 	if program := codec.plan.flatReads; program != nil && !wide && useRowPrograms &&
 		program.readFlat(body, unsafe.Pointer(value)) {

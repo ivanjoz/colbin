@@ -748,7 +748,8 @@ means comes from a schema both sides already have. A browser, a `jq`-style tool 
 a dynamically typed client has none, so the schema can be sent as bytes — once per
 connection (`Schema.Bytes`), or in front of a message (`MarshalSelfDescribing`,
 root bytes 0xD4 / 0xDC). The body behind a section is byte for byte what `Marshal`
-writes, and `Unmarshal` steps over a section it does not need.
+writes. `Unmarshal` steps over a section that is the Go type's own and reads the
+message *through* any other (§11.8).
 
 ```
 section   := [byteLength] [structCount] structDef{structCount}
@@ -893,6 +894,79 @@ COLBIN_UPDATE=1 go test ./codec -run TestValueOpsAreGenerated
 
 Encoding a flat plan cannot fail. A nested one can: a value nesting deeper than
 128 levels, or a dynamic value with no form (§9).
+
+### 11.8 Foreign sections
+
+A message is read by key against the Go type's plan, and the keys are the type's.
+The browser's encoder has no type: it numbers fields 0, 1, 2 in first-seen order,
+writes every integer as an `int64` and every fractional column as a `float64`
+(`rust/ENCODER.md` §2–§3), and describes that in the section it puts in front of
+the message. Reading its key 0 as the Go type's key 0 reads the wrong field at the
+wrong op.
+
+So when a message carries a section that is **not byte-equal to the type's own**
+(`schemaForRoot(type).section`), `Unmarshal` decodes it through the section
+(`codec/foreign.go`):
+
+1. The section is parsed (`ParseSchema`, already hardened) and each struct of it is
+   paired with the Go struct it is read into. Fields are matched **by name** — the
+   name the section writer uses: json tag, then the `cb` tag's name, then the Go
+   name — so a frontend and a backend deployed at different times still agree, and
+   a `cb` tag can change without the client knowing. An envelope root (§2.2) pairs
+   with a Go slice or map and an object root with a struct; the other pairing is
+   refused.
+2. The result is an ordinary `typePlan` whose keys, key width and ops are the
+   section's and whose offsets are the Go type's, so the narrow, wide and table
+   readers run unchanged. A section field the Go type does not have is left out of
+   the plan and stepped over like any unknown key; a Go field the section does not
+   carry stays zero. A struct pair sharing no field by name is refused, since
+   decoding it into zeros would go unnoticed.
+3. Where the two sides disagree on what a value is, the field's op is `opConvert`
+   (an internal op, `250`, that no section can name) and its conversion is read
+   from a table in the scratch (`foreign_convert.go`). The readers reach it through
+   the *default* arm of their op switches, so a field both sides agree on costs
+   nothing extra. It is decided once per field when the plan is built, never per
+   value:
+
+| section | Go field | rule |
+|---|---|---|
+| any integer op | any integer | range-checked per value; refused on overflow, naming the field |
+| any integer op | `float32`, `float64` | allowed |
+| `float32`, `float64` | `float32`, `float64` | allowed; a finite value too large for a `float32` is refused |
+| `float32`, `float64` | any integer | **refused** when the plan is built |
+| integer arrays | other integer arrays | per element, range-checked |
+| pointer to T | `T` or `*T` | null is zero, or nil |
+| T | `*T` | present, so non-nil |
+| struct, `*struct`, `[]struct` | the same | recurse; a table or list reads the same |
+| map, `any`, `[]any` | the same op, same kinds | read as is; a map of structs is refused |
+| anything else that differs | | **refused**, naming the section's op, the Go type and the path |
+
+A refusal at plan time costs nothing per message and is the same for every message
+that carries the section. An overflow names the Go field (`Product.Qty`), the
+section's op, the value and, in a table, the row.
+
+The wire does not differ for an integer, which is a magnitude whatever width its
+type declared, so the conversion is a range check. What it cannot be is a read at
+the Go type's signedness, because the inline table parts at nibble 3 (the value 4
+to an unsigned reader and −1 to a signed one); the conversion reads at the
+*section's* class and converts what it read. A float is never stored in an integer,
+whatever its value: a column of whole numbers today is not one tomorrow.
+
+A translation costs a walk of the section and the type, so it is cached by
+`(type, section bytes)`. The section comes from a peer, so the cache is bounded:
+eight translations per type, least recently used out, and none for a section over
+64 KB. A miss is a rebuild, never a wrong decode. A type that reaches an `any`
+(or a map of them) keeps the old path, because the section it writes is per
+message, not per type (§9).
+
+A bare message with no section (`.message` in the browser) has nothing to read and
+fails as it always did: send `.standalone`.
+
+Foreign decode of 500 products from the browser is 1.3–1.4× the time of the same
+records written by Go, and an order of magnitude faster than `ToJSON` then
+`encoding/json` (`codec/foreign_bench_test.go`). Go-to-Go decode is unchanged: the
+check is one nil test for a message with no section and one cached lookup and a
+`bytes.Equal` for one with it.
 
 ### 11.7 Generated codecs
 
@@ -1247,8 +1321,12 @@ What the code does not do yet, or does inconsistently:
   struct writes its structs as maps of field names.
 - **The encoder does not enforce the row limit**: a transposable slice past 2²²
   rows is written as a table every decoder refuses.
-- **A table column is scattered into a narrower field without a range check**,
-  where a scalar field would be refused.
+- **A table column is scattered into a narrower field without a range check** on
+  the Go-to-Go path, where a scalar field would be refused. A *foreign* section's
+  table columns are range-checked (§11.8).
+- **A foreign section is not read into a paged type, a map of structs or a type
+  that reaches an `any`** (§11.8); the first two are refused, the last keeps the
+  ordinary path. Name matching is exact: there is no case-insensitive fallback.
 - **The derive does not do `Option<Struct>`, maps of structs or pages**, and the
   JSON encoder writes no maps, blobs or pointers to structs (`rust/ENCODER.md`).
 - **The module's decode diagnostics use code 2**, which the encoder's diagnostics

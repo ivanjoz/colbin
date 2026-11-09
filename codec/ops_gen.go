@@ -421,7 +421,7 @@ func readField(reader *wire.Reader, field *planField, record unsafe.Pointer, buf
 	case opPointerStruct:
 		readNarrowPointerStruct(reader, field, at, buf)
 	default:
-		reader.Fail(errNotValueOp(field.op))
+		readConverted(reader, field, at, buf)
 	}
 }
 
@@ -848,7 +848,7 @@ func readWideField(reader *wire.Reader8, field *planField, record unsafe.Pointer
 			*(*[]any)(at) = readAnyList(reader, buf)
 		}
 	default:
-		reader.Fail(errNotValueOp(field.op))
+		readConvertedWide(reader, field, at, buf)
 	}
 }
 
