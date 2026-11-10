@@ -119,6 +119,12 @@ func appendCompactList(writer *wire.Writer8, values []any, buf *scratch) {
 		if buf.err != nil {
 			break
 		}
+		// A list of numbers, a coordinate or a series, is one compare an
+		// element here and the whole type switch through appendCompactValue.
+		if number, ok := value.(float64); ok {
+			writer.CompactFloat64(number)
+			continue
+		}
 		appendCompactValue(writer, value, buf)
 	}
 	buf.leave()

@@ -1,8 +1,12 @@
 package wire
 
 import (
+	"bytes"
 	"math"
+	"math/bits"
 	"testing"
+
+	"github.com/ivanjoz/colbin/internal/wirefmt"
 )
 
 // listOf writes a key-less list of values built by fill, and returns a reader
@@ -394,6 +398,50 @@ func TestTruncatedDynamicValuesAreRefused(t *testing.T) {
 		if refused := reader.Err() != nil; refused == between[cut] {
 			t.Fatalf("a cut at %d of %d: refused %v, between values %v",
 				cut, len(whole), refused, between[cut])
+		}
+	}
+}
+
+// CompactFloat64 finds a whole number by converting the float there and back,
+// which must pick exactly the values math.Trunc picks: nothing outside an
+// int64, no NaN, no infinity and no negative zero. The bytes are held to the
+// writer spelled with math.Trunc.
+func TestCompactFloat64WholeNumbers(t *testing.T) {
+	byTrunc := func(value float64) []byte {
+		var w Writer8
+		reversed := bits.ReverseBytes64(math.Float64bits(value))
+		width := (bits.Len64(reversed) + 7) >> 3
+		if value == math.Trunc(value) && math.Abs(value) < 1<<63 && !(value == 0 && math.Signbit(value)) {
+			whole := int64(value)
+			if uint64(whole) <= compactFixMax {
+				return []byte{compactSmall + uint8(whole)}
+			}
+			magnitude := uint64(whole)
+			if whole < 0 {
+				magnitude = -magnitude
+			}
+			size := 1
+			if whole < 0 || magnitude >= uint64(compactMap) {
+				size += (bits.Len64(magnitude) + 7) >> 3
+			}
+			if 1+size < 1+width {
+				w.Buffer = append(w.Buffer, compactWhole)
+				w.CompactInt(whole)
+				return w.Buffer
+			}
+		}
+		return wirefmt.AppendMagnitude(append(w.Buffer, compactFloat64+uint8(width)), reversed, width)
+	}
+	values := []float64{0, math.Copysign(0, -1), 1, -1, 0.5, -0.5, 15, 16, 31, 32, 255, 256, -255, 65536,
+		1e15, 1e18, -1e18, 1 << 53, 1<<53 + 2, -(1 << 53), 1 << 62, 1 << 63, -(1 << 63),
+		math.Nextafter(1<<63, 0), math.Nextafter(-(1 << 63), 0), math.Nextafter(1<<63, math.Inf(1)),
+		1 << 64, 1e300, -1e300, math.MaxFloat64, math.SmallestNonzeroFloat64,
+		math.Inf(1), math.Inf(-1), math.NaN(), 3.25, 1e-9, 123456789.5}
+	for _, value := range values {
+		var writer Writer8
+		writer.CompactFloat64(value)
+		if want := byTrunc(value); !bytes.Equal(writer.Buffer, want) {
+			t.Errorf("%v: wrote % x, math.Trunc's writer % x", value, writer.Buffer, want)
 		}
 	}
 }

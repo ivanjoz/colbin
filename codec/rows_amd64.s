@@ -62,6 +62,10 @@ loop:
 	MOVBLZX 1(SI)(R12*8), R13
 	MOVL    4(SI)(R12*8), R14
 	ADDQ    R8, R14
+	TESTL   $0x20, DX            // rowIndirect
+	JNZ     indirect
+
+direct:
 	CMPL    DX, $10              // rowBool
 	JA      text
 	JEQ     boolean
@@ -77,6 +81,55 @@ loop:
 	MOVQ    (R14), AX
 	BSWAPQ  AX
 	JMP     uint
+
+indirect:
+	// A pointer to a number, a bool or a string: nothing when nil, and the
+	// pointee as the field would be written otherwise. A zero pointee is the
+	// caller's, which writes it out; it is tested at the pointee's own width,
+	// because a wider load could run off its page.
+	MOVQ  (R14), R14
+	TESTQ R14, R14
+	JZ    next
+	ANDL  $0x1F, DX
+	CMPL  DX, $11                // rowString
+	JEQ   zeroText
+	CMPL  DX, $10                // rowBool
+	JEQ   zero8
+	CMPL  DX, $8                 // rowFloat32
+	JEQ   zero32
+	JA    zero64                 // rowFloat64
+	MOVL  DX, AX                 // an integer: its low two bits are its width
+	ANDL  $3, AX
+	CMPL  AX, $1
+	JB    zero8
+	JEQ   zero16
+	CMPL  AX, $2
+	JEQ   zero32
+
+zero64:
+	CMPQ (R14), $0
+	JEQ  finish
+	JMP  direct
+
+zero32:
+	CMPL (R14), $0
+	JEQ  finish
+	JMP  direct
+
+zero16:
+	CMPW (R14), $0
+	JEQ  finish
+	JMP  direct
+
+zero8:
+	CMPB (R14), $0
+	JEQ  finish
+	JMP  direct
+
+zeroText:
+	CMPQ 8(R14), $0
+	JEQ  finish
+	JMP  direct
 
 float32:
 	MOVL   (R14), AX

@@ -405,7 +405,7 @@ func appendColumns(
 			if column.elemOp == opString && len(choices) != 0 {
 				choice, choices = &choices[0], choices[1:]
 			}
-			writePointerColumn(writer, column.key, &nulls[0], rows, column.elemOp, choice)
+			writePointerColumnWide(writer, column.key, &nulls[0], rows, column.elemOp, choice)
 			nulls = nulls[1:]
 			continue
 		}
@@ -484,6 +484,12 @@ const gatherChunk = 32
 func gatherTable(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratch) ([]int32, []int64, []string, []int) {
 	rows := slice.len
 	narrow, ints, strings, payloads, _ := tableBuffers(plan, rows, buf)
+	nulls := preparePointers(plan, rows, buf)
+	// The pointer columns take a few chunks at a time where the rows are
+	// narrow: about pointerSpan bytes of rows, so that a call per column is
+	// not paid every 32 rows of a table whose rows are a few words.
+	pointerRows := max(gatherChunk, min(8*gatherChunk, pointerSpan/int(max(stride, 1))&^(gatherChunk-1)))
+	pointersFrom := 0
 	var sink byte
 	for start := 0; start < rows; start += gatherChunk {
 		end := min(start+gatherChunk, rows)
@@ -499,7 +505,8 @@ func gatherTable(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratc
 			column := &plan.fields[index]
 			switch {
 			case column.op == opPointer, column.op == opStruct, column.op == opStructs:
-				// Gathered by gatherPointers, into buffers of their own, a page
+				// Gathered by gatherPointerChunk below, into buffers of their
+				// own and with the rest of the chunk still in cache, a page
 				// link by its page's gatherTable (appendPageTable) and a list
 				// column by its elements' (appendListColumn).
 			case column.op == opString:
@@ -514,11 +521,19 @@ func gatherTable(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratc
 				wideAt += rows
 			}
 		}
+		if len(nulls) != 0 && (end-pointersFrom >= pointerRows || end == rows) {
+			gatherPointerChunk(plan, nulls, unsafe.Add(slice.data, uintptr(pointersFrom)*stride), stride,
+				pointersFrom, end-pointersFrom)
+			pointersFrom = end
+		}
 	}
 	prefetchSink = sink
-	gatherPointers(plan, slice, stride, buf)
 	return narrow, ints, strings, payloads
 }
+
+// pointerSpan is how many bytes of rows gatherTable gathers the pointer columns
+// of at a time, between one chunk and eight.
+const pointerSpan = 8 << 10
 
 // prefetchSink keeps gatherTable's touch loads from being dropped as dead.
 //

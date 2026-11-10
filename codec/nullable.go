@@ -56,13 +56,21 @@ func (plan *typePlan) pointerColumns() (ints, strings int) {
 // gatherPointers gathers a table's pointer columns into the buffer's nulls, in
 // field order. A table with none leaves them empty.
 func gatherPointers(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratch) {
+	if nulls := preparePointers(plan, slice.len, buf); len(nulls) != 0 {
+		gatherPointerChunk(plan, nulls, slice.data, stride, 0, slice.len)
+	}
+}
+
+// preparePointers cuts a table's pointer columns out of the buffer, empty, for
+// gatherPointerChunk to fill a chunk of rows at a time. A table with none
+// leaves the buffer's nulls empty.
+func preparePointers(plan *typePlan, rows int, buf *scratch) []nullColumn {
 	columns := buf.columns
 	columns.nulls = columns.nulls[:0]
 	intColumns, stringColumns := plan.pointerColumns()
 	if intColumns+stringColumns == 0 {
-		return
+		return nil
 	}
-	rows := slice.len
 	size := wire.PresenceBytes(rows)
 	columns.reservePointers(rows*intColumns, rows*stringColumns, size*(intColumns+stringColumns))
 	ints, strings := columns.nullInts[:rows*intColumns], columns.nullStrings[:rows*stringColumns]
@@ -75,16 +83,46 @@ func gatherPointers(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scr
 		}
 		column := nullColumn{presence: presence[:size:size]}
 		presence = presence[size:]
-		base := unsafe.Add(slice.data, field.offset)
 		if field.elemOp == opString {
-			column.strings, column.payload = gatherPointerStrings(strings[:rows:rows], column.presence, base, stride)
+			column.strings = strings[:0:rows]
 			strings = strings[rows:]
 		} else {
-			column.ints = gatherPointerInts(ints[:rows:rows], column.presence, base, stride, field.elemOp)
+			column.ints = ints[:0:rows]
 			ints = ints[rows:]
 		}
-		column.present = max(len(column.ints), len(column.strings))
 		columns.nulls = append(columns.nulls, column)
+	}
+	return columns.nulls
+}
+
+// gatherChunkAligned holds gatherChunk to a multiple of eight rows, which is
+// what lets a chunk's presence start on a byte.
+var _ = [1]struct{}{}[gatherChunk%8]
+
+// gatherPointerChunk gathers rows first to first+count of every pointer column
+// onto what the columns hold already. data is the first of those rows.
+//
+// A chunk at a time for gatherTable's reason: a pointer column read whole
+// walks every row of the table, and then every pointee, once per column.
+func gatherPointerChunk(plan *typePlan, nulls []nullColumn, data unsafe.Pointer, stride uintptr, first, count int) {
+	for index := range plan.fields {
+		field := &plan.fields[index]
+		if field.op != opPointer {
+			continue
+		}
+		column := &nulls[0]
+		nulls = nulls[1:]
+		base := unsafe.Add(data, field.offset)
+		// A chunk starts on a whole byte of presence: see gatherChunkAligned.
+		presence := column.presence[first>>3:]
+		if field.elemOp == opString {
+			var payload int
+			column.strings, payload = gatherPointerStrings(column.strings, presence, base, stride, count)
+			column.payload += payload
+		} else {
+			column.ints = gatherPointerInts(column.ints, presence, base, stride, count, field.elemOp)
+		}
+		column.present = max(len(column.ints), len(column.strings))
 	}
 }
 
@@ -105,42 +143,49 @@ func (columns *columnBuffers) reservePointers(ints, strings, presence int) {
 // gatherPointerInts gathers the pointees of one column of len(dst) rows into
 // dst, densely, as gatherInts widens them, setting presence for each row that
 // has one. It returns what it gathered.
-func gatherPointerInts(dst []int64, presence []byte, base unsafe.Pointer, stride uintptr, op fieldOp) []int64 {
+func gatherPointerInts(dst []int64, presence []byte, base unsafe.Pointer, stride uintptr, count int, op fieldOp) []int64 {
 	switch op {
 	case opBool:
-		return gatherPointees(dst, presence, base, stride, func(v bool) int64 {
+		return gatherPointees(dst, presence, base, stride, count, func(v bool) int64 {
 			if v {
 				return 1
 			}
 			return 0
 		})
 	case opInt8:
-		return gatherPointees(dst, presence, base, stride, func(v int8) int64 { return int64(v) })
+		return gatherPointees(dst, presence, base, stride, count, func(v int8) int64 { return int64(v) })
 	case opInt16:
-		return gatherPointees(dst, presence, base, stride, func(v int16) int64 { return int64(v) })
+		return gatherPointees(dst, presence, base, stride, count, func(v int16) int64 { return int64(v) })
 	case opInt32:
-		return gatherPointees(dst, presence, base, stride, func(v int32) int64 { return int64(v) })
+		return gatherPointees(dst, presence, base, stride, count, func(v int32) int64 { return int64(v) })
 	case opInt64:
-		return gatherPointees(dst, presence, base, stride, func(v int64) int64 { return v })
+		return gatherPointees(dst, presence, base, stride, count, func(v int64) int64 { return v })
 	case opUint8:
-		return gatherPointees(dst, presence, base, stride, func(v uint8) int64 { return int64(v) })
+		return gatherPointees(dst, presence, base, stride, count, func(v uint8) int64 { return int64(v) })
 	case opUint16:
-		return gatherPointees(dst, presence, base, stride, func(v uint16) int64 { return int64(v) })
+		return gatherPointees(dst, presence, base, stride, count, func(v uint16) int64 { return int64(v) })
 	case opUint32:
-		return gatherPointees(dst, presence, base, stride, func(v uint32) int64 { return int64(v) })
+		return gatherPointees(dst, presence, base, stride, count, func(v uint32) int64 { return int64(v) })
 	case opUint64:
-		return gatherPointees(dst, presence, base, stride, func(v uint64) int64 { return int64(v) })
+		return gatherPointees(dst, presence, base, stride, count, func(v uint64) int64 { return int64(v) })
 	case opFloat32:
-		return gatherPointees(dst, presence, base, stride, func(v float32) int64 { return int64(math.Float32bits(v)) })
+		return gatherPointees(dst, presence, base, stride, count, func(v float32) int64 { return int64(math.Float32bits(v)) })
 	case opFloat64:
-		return gatherPointees(dst, presence, base, stride, func(v float64) int64 { return int64(math.Float64bits(v)) })
+		return gatherPointees(dst, presence, base, stride, count, func(v float64) int64 { return int64(math.Float64bits(v)) })
 	}
 	return dst[:0]
 }
 
-func gatherPointees[T any](dst []int64, presence []byte, base unsafe.Pointer, stride uintptr, widen func(T) int64) []int64 {
-	n := 0
-	for row := range dst {
+// gatherPointees appends to dst the pointees of count rows from base, and sets
+// presence, which starts at the first of those rows, for each row that has
+// one. dst has room for every row of the table.
+//
+// It has to stay inside the inliner's budget: out of line, widen is a call per
+// value.
+func gatherPointees[T any](dst []int64, presence []byte, base unsafe.Pointer, stride uintptr, count int, widen func(T) int64) []int64 {
+	n := len(dst)
+	dst = dst[:cap(dst)]
+	for row := range count {
 		if pointee := *(**T)(unsafe.Add(base, uintptr(row)*stride)); pointee != nil {
 			presence[row>>3] |= 1 << (row & 7)
 			dst[n] = widen(*pointee)
@@ -150,9 +195,10 @@ func gatherPointees[T any](dst []int64, presence []byte, base unsafe.Pointer, st
 	return dst[:n]
 }
 
-func gatherPointerStrings(dst []string, presence []byte, base unsafe.Pointer, stride uintptr) ([]string, int) {
-	n, payload := 0, 0
-	for row := range dst {
+func gatherPointerStrings(dst []string, presence []byte, base unsafe.Pointer, stride uintptr, count int) ([]string, int) {
+	n, payload := len(dst), 0
+	dst = dst[:cap(dst)]
+	for row := range count {
 		if pointee := *(**string)(unsafe.Add(base, uintptr(row)*stride)); pointee != nil {
 			presence[row>>3] |= 1 << (row & 7)
 			dst[n] = *pointee
@@ -163,22 +209,35 @@ func gatherPointerStrings(dst []string, presence []byte, base unsafe.Pointer, st
 	return dst[:n], payload
 }
 
-// columnWriter is what a pointer column is written through, at either key
-// width.
-type columnWriter interface {
-	ColumnKeep(key uint8, values []int64, float bool)
-	StringColumnKeep(key uint8, values []string, payload int)
-	NullableColumn(key uint8, presence []byte, values []int64, float bool)
-	NullableStrings(key uint8, presence []byte, values []string, payload int)
-	DictColumn(key uint8, dict int, ids []int64)
-	NullableDictColumn(key uint8, dict int, presence []byte, ids []int64)
-}
-
 // writePointerColumn writes a gathered pointer column of a table of rows rows
 // in the form it takes: nothing when no row holds a value, the plain column
 // when every one does, and a nullable column otherwise. A string column that
 // tableIDs took, choice, goes out as ids in the same three forms.
-func writePointerColumn(writer columnWriter, key uint8, column *nullColumn, rows int, elemOp fieldOp, choice *dictColumn) {
+//
+// It is spelled once per key width rather than over columnWriter: a writer
+// handed to an interface escapes, and the table's was then allocated on every
+// encode of a table with a pointer column.
+func writePointerColumn(writer *wire.Writer, key uint8, column *nullColumn, rows int, elemOp fieldOp, choice *dictColumn) {
+	float := elemOp == opFloat64
+	switch {
+	case column.present == 0:
+	case choice != nil && !choice.refused && column.present == rows:
+		writer.DictColumn(key, choice.number, choice.ids)
+	case choice != nil && !choice.refused:
+		writer.NullableDictColumn(key, choice.number, column.presence, choice.ids)
+	case column.present == rows && elemOp == opString:
+		writer.StringColumnKeep(key, column.strings, column.payload)
+	case column.present == rows:
+		writer.ColumnKeep(key, column.ints, float)
+	case elemOp == opString:
+		writer.NullableStrings(key, column.presence, column.strings, column.payload)
+	default:
+		writer.NullableColumn(key, column.presence, column.ints, float)
+	}
+}
+
+// writePointerColumnWide is writePointerColumn at eight key bits.
+func writePointerColumnWide(writer *wire.Writer8, key uint8, column *nullColumn, rows int, elemOp fieldOp, choice *dictColumn) {
 	float := elemOp == opFloat64
 	switch {
 	case column.present == 0:

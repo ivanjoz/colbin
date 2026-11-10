@@ -506,8 +506,15 @@ func learnSizeRatio(sizeRatio *atomic.Uint32, estimate, actual int) {
 	if estimate <= 0 {
 		return
 	}
-	ratio := min(uint64(actual+actual>>4)<<sizeRatioShift/uint64(estimate), math.MaxUint32)
+	// The ratio is spared for the message that moves it: the bounds are held
+	// against the size by two multiplications, where the division was a
+	// small message's dearest instruction.
+	scaled := uint64(actual+actual>>4) << sizeRatioShift
 	old := uint64(sizeRatio.Load())
+	if within := uint64(estimate); scaled <= (old+old>>4)*within+within-1 && scaled >= (old-old>>4)*within {
+		return
+	}
+	ratio := min(scaled/uint64(estimate), math.MaxUint32)
 	if ratio > old+old>>4 || ratio < old-old>>4 {
 		sizeRatio.Store(uint32(max(ratio, 1)))
 	}

@@ -27,6 +27,7 @@ package codec
 import (
 	"encoding/binary"
 	"math/bits"
+	"runtime"
 	"slices"
 	"unsafe"
 
@@ -57,10 +58,22 @@ const (
 	rowStruct
 	rowStructs
 	rowField // anything else, through writeFields
-	// rowPointer is a pointer to a scalar: nothing at all when nil, which is
-	// what a pointer field of a document mostly is, and appendPointer when not.
+	// rowPointer is a pointer to a scalar in a wide program: nothing at all
+	// when nil, which is what a pointer field of a document mostly is, and
+	// appendPointerWide when not.
 	rowPointer
 )
+
+// rowIndirect marks a narrow program's pointer to a scalar: the op is the
+// pointee's with this bit set. A nil one is nothing, and one that is not is
+// written as the field it points at would be — except a zero, which is written
+// out, because an absent key is a nil pointer. The amd64 kernel follows the
+// pointer itself and hands back only that zero; the arm64 one hands the op
+// back, as it does any it does not know.
+const rowIndirect uint8 = 0x20
+
+// kernelIndirect is whether rowKernel spells a rowIndirect op.
+const kernelIndirect = runtime.GOARCH == "amd64"
 
 type rowOp struct {
 	kind   uint8
@@ -126,6 +139,17 @@ func compileRows(plan *typePlan) *rowProgram {
 		op.kind = kind
 		if kind <= rowBool {
 			program.reserve += fixedRoom
+		}
+		if kind == rowPointer && !program.wide {
+			// The pointee is written as the field would be, so it has the
+			// field's room: a number's, or an empty string's two bytes.
+			pointee, _ := rowKind(&planField{op: field.elemOp})
+			op.kind = rowIndirect | pointee
+			if pointee <= rowBool {
+				program.reserve += fixedRoom
+			} else {
+				program.reserve += 2
+			}
 		}
 		program.ops = append(program.ops, op)
 	}
@@ -257,9 +281,11 @@ func (program *rowProgram) write(writer *wire.Writer, record unsafe.Pointer, buf
 	at := len(buffer)
 	out := unsafe.Pointer(unsafe.SliceData(buffer))
 	for index := 0; index < len(program.ops); {
-		if useRowKernel {
+		if useRowKernel && (kernelIndirect || program.ops[index].kind&rowIndirect == 0) {
 			// The kernel takes every op it spells from here, and leaves this
-			// loop the one it stopped at.
+			// loop the one it stopped at. Where it does not follow a pointer,
+			// one is this loop's whether it is nil or not, so that a run of
+			// them is not a kernel entry each.
 			done, end := rowKernel(&program.ops[index], len(program.ops)-index, record,
 				(*byte)(out), at, cap(buffer), program.reserve)
 			index, at = index+done, end
@@ -272,7 +298,18 @@ func (program *rowProgram) write(writer *wire.Writer, record unsafe.Pointer, buf
 		from := unsafe.Add(record, op.offset)
 		var value uint64
 		signed := false
-		switch op.kind {
+		kind := op.kind
+		// A pointer to a number, a bool or a string is its pointee from here
+		// on, except that a zero is written out: an absent key is a nil pointer.
+		pointer := false
+		if kind&rowIndirect != 0 {
+			pointee := *(*unsafe.Pointer)(from)
+			if pointee == nil {
+				continue
+			}
+			from, kind, pointer = pointee, kind&^rowIndirect, true
+		}
+		switch kind {
 		case rowInt8:
 			value, signed = uint64(int64(*(*int8)(from))), true
 		case rowInt16:
@@ -294,6 +331,9 @@ func (program *rowProgram) write(writer *wire.Writer, record unsafe.Pointer, buf
 		case rowFloat64:
 			value = bits.ReverseBytes64(*(*uint64)(from))
 		case rowBool:
+			if pointer && *(*uint8)(from) == 0 {
+				break
+			}
 			// The key, counted only when true: a bool is 0 or 1.
 			*(*byte)(unsafe.Add(out, at)) = op.key
 			at += int(*(*uint8)(from))
@@ -302,6 +342,9 @@ func (program *rowProgram) write(writer *wire.Writer, record unsafe.Pointer, buf
 			value := *(*string)(from)
 			size := len(value)
 			if size == 0 {
+				if pointer {
+					break
+				}
 				continue
 			}
 			if size > 0xFFFF {
@@ -337,15 +380,6 @@ func (program *rowProgram) write(writer *wire.Writer, record unsafe.Pointer, buf
 			copyShort(unsafe.Add(out, at), unsafe.StringData(value), size)
 			at += size
 			continue
-		case rowPointer:
-			if *(*unsafe.Pointer)(from) == nil {
-				continue
-			}
-			writer.Buffer = buffer[:at]
-			appendPointer(writer, &program.plan.fields[op.field], from, false)
-			buffer = slices.Grow(writer.Buffer, program.reserve)
-			at, out = len(buffer), unsafe.Pointer(unsafe.SliceData(buffer))
-			continue
 		default:
 			// A composite, or a field the program does not spell: through the
 			// writer, and the room reserved again after it.
@@ -377,6 +411,13 @@ func (program *rowProgram) write(writer *wire.Writer, record unsafe.Pointer, buf
 		// form; the rest is its fewest bytes behind a nibble that counts them,
 		// stored as a whole word that the next field lands over.
 		head := unsafe.Add(out, at)
+		if pointer && value == 0 {
+			// wire's Zero: the length form with nothing in it. A false bool and
+			// an empty string come here with value still zero.
+			*(*[2]byte)(head) = [2]byte{op.key | wirefmt.NibbleLength, 0}
+			at += 2
+			continue
+		}
 		if signed {
 			if int64(value) < 0 {
 				if int64(value) == -1 {

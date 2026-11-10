@@ -548,3 +548,103 @@ func TestFlatReadDecodesWhatTheWalkDoes(t *testing.T) {
 		check(trial, "another type", must(Marshal(&every)), used)
 	}
 }
+
+// rowsPointers is a row of pointers to every scalar a program follows, with
+// plain fields between them so that the kernel is entered and left around each.
+type rowsPointers struct {
+	B   *bool    `cb:"1"`
+	I8  *int8    `cb:"2"`
+	N   int32    `cb:"3"`
+	I16 *int16   `cb:"4"`
+	I32 *int32   `cb:"5"`
+	I64 *int64   `cb:"6"`
+	S   string   `cb:"7"`
+	U8  *uint8   `cb:"8"`
+	U16 *uint16  `cb:"9"`
+	U32 *uint32  `cb:"10"`
+	U64 *uint64  `cb:"11"`
+	F32 *float32 `cb:"12"`
+	F64 *float64 `cb:"13"`
+	PS  *string  `cb:"14"`
+	T   bool     `cb:"15"`
+}
+
+type rowsPointersRoot struct {
+	Rows []rowsPointers `cb:"1"`
+	One  rowsPointers   `cb:"2"`
+}
+
+// pointerTo is nil a third of the time, a pointer to a zero another third, and
+// otherwise a pointer to pick's value.
+func pointerTo[T any](random *rand.Rand, pick func() T) *T {
+	switch random.IntN(3) {
+	case 0:
+		return nil
+	case 1:
+		return new(T)
+	}
+	value := pick()
+	return &value
+}
+
+func makeRowsPointers(random *rand.Rand) rowsPointers {
+	// Magnitudes of every width, either sign.
+	wide := func() int64 { return int64(random.Uint64()>>random.IntN(64)) * int64(1-2*random.IntN(2)) }
+	text := func() string { return strings.Repeat("s", []int{1, 3, 8, 9, 17, 40, 300, 5000}[random.IntN(8)]) }
+	row := rowsPointers{
+		B:   pointerTo(random, func() bool { return true }),
+		I8:  pointerTo(random, func() int8 { return int8(wide()) }),
+		I16: pointerTo(random, func() int16 { return int16(wide()) }),
+		I32: pointerTo(random, func() int32 { return int32(wide()) }),
+		I64: pointerTo(random, wide),
+		U8:  pointerTo(random, func() uint8 { return uint8(wide()) }),
+		U16: pointerTo(random, func() uint16 { return uint16(wide()) }),
+		U32: pointerTo(random, func() uint32 { return uint32(wide()) }),
+		U64: pointerTo(random, func() uint64 { return uint64(wide()) }),
+		F32: pointerTo(random, func() float32 { return float32(wide()) / 8 }),
+		F64: pointerTo(random, func() float64 { return float64(wide()) / 8 }),
+		PS:  pointerTo(random, text),
+		T:   random.IntN(2) == 0,
+	}
+	if random.IntN(2) == 0 {
+		row.N, row.S = int32(wide()), text()
+	}
+	return row
+}
+
+// A program's pointers are written by the kernel where it follows them and by
+// the Go loop where it does not, and either way as writeFields writes them: a
+// nil one not at all, and a zero one out loud.
+func TestRowProgramWritesPointersAsWriteFieldsDoes(t *testing.T) {
+	program := MustCodec[rowsPointers]().plan.rows
+	if program == nil || program.wide {
+		t.Fatal("the test type compiled to no narrow program")
+	}
+	random := rand.New(rand.NewPCG(31, 32))
+	for trial := range 3000 {
+		// Under the table threshold, so that the rows are a list's elements.
+		value := rowsPointersRoot{One: makeRowsPointers(random)}
+		for range random.IntN(tableThreshold) {
+			value.Rows = append(value.Rows, makeRowsPointers(random))
+		}
+		useRowPrograms = false
+		want, wantErr := Marshal(&value)
+		useRowPrograms = true
+		for _, kernel := range []bool{false, true} {
+			was := setRowKernel(kernel)
+			got, gotErr := Marshal(&value)
+			setRowKernel(was)
+			if (wantErr != nil) != (gotErr != nil) || !bytes.Equal(got, want) {
+				t.Fatalf("trial %d, kernel %v: program %d bytes (%v), writeFields %d bytes (%v)\n%+v",
+					trial, kernel, len(got), gotErr, len(want), wantErr, value)
+			}
+		}
+		var back rowsPointersRoot
+		if err := Unmarshal(want, &back); err != nil {
+			t.Fatalf("trial %d: %v", trial, err)
+		}
+		if !reflect.DeepEqual(back, value) {
+			t.Fatalf("trial %d: read back\n%+v\nwrote\n%+v", trial, back, value)
+		}
+	}
+}

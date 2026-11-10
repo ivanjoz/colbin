@@ -11,10 +11,12 @@ nothing else on hand.
 - **No precompilation step.** The Go struct is the schema. There is no `.proto`
   file, no `protoc` and no generated types; `cb` field tags are optional.
 - **No dependencies.** The Go module's `go.mod` has no `require` block.
-- **Protobuf-level size and speed.** In the [measurements](#measurements) colbin
-  is at least as small as protobuf on every shape. On slices of structs it is
-  several times smaller, because it writes them as compressed columns. It
-  encodes 2–6× faster and decodes 1.8–7× faster.
+- **Protobuf-level size and speed.** In the [measurements](#measurements), on
+  TPC-H, TPC-DS, Public BI and SchemaStore, colbin is smaller than vtprotobuf
+  and msgpack on every dataset. On slices of structs it is several times
+  smaller, because it writes them as compressed columns. On tables it encodes
+  1.1–1.2× faster than vtprotobuf and decodes 1.6–2.0× faster; on small
+  documents generated code still encodes faster.
 - **Self-describing mode (colbin/JSON).** The schema section travels inside the
   message, so `ToJSON` renders it without the Go type. The section adds under
   1% to a table or a document.
@@ -352,104 +354,36 @@ text, _ = colbin.ToJSON(nil, standalone)
 
 ## Measurements
 
-**Setup.** Measured on an i7-1355U with Go 1.27.0, best of three runs, by
-`bench/formats_test.go` in [colbin-benchmarks][bench-repo]:
-- **JSON** is `encoding/json`.
-- **protobuf** runs through its generated code. Tables and documents are
-  written as the `repeated` fields of a wrapper message, which is byte for byte
-  what generated code emits.
-- **colbin** is `Codec[T]` with tagged types, appending to a reused buffer.
-- **colbin/JSON** is `MarshalSelfDescribing`, which allocates its result.
-- Decoding allocates a fresh value per call in JSON and protobuf, and reuses
-  one in colbin.
+### Against msgpack and vtprotobuf
 
-| shape | content |
-|---|---|
-| Reading | one record, six fields, one of them an `[]int32` |
-| Order | one record with three nested lines |
-| Product | one record of mostly strings: SKU, name, three categories |
-| Metrics | 2 000 rows × 3 integers, one message |
-| Sales | 300 rows with 1 514 nested lines, one message |
-| Dataset | six tables, 2 617 rows, one message |
+On four datasets: TPC-H, TPC-DS, Public BI and SchemaStore. colbin is the
+smallest on every one: 1.6–4.2× under msgpack and 1.1–1.6× under vtprotobuf
+(Lambda x86_64 run; the bytes have not changed since).
 
-### Size (bytes)
+Speed is a local run on an i7-1355U, Go 1.27.0, `colbinbench` in
+[colbin-benchmarks][bench-repo], median of 5 samples, cores 0 and 2, against
+msgpack (tinylib/msgp, generated) and vtprotobuf. Each cell is the other
+format's time divided by colbin's, as a geometric mean over the dataset's
+cases: above 1 colbin is faster.
 
-| | JSON | protobuf | colbin | colbin + packed5 | colbin/JSON |
-|---|---:|---:|---:|---:|---:|
-| Reading | 110 | 32 | 26 | 26 | 86 |
-| Order | 198 | 49 | 45 | 44 | 120 |
-| Product | 148 | 81 | 81 | 72 | 137 |
-| Metrics | 88 645 | 26 000 | 3 975 | 3 975 | 4 013 |
-| Sales | 186 938 | 34 168 | 26 992 | 26 992 | 27 175 |
-| Dataset | 317 364 | 80 503 | 49 597 | 48 159 | 50 045 |
+| dataset (cases) | encode msgpack | encode vtprotobuf | decode msgpack | decode vtprotobuf |
+|---|---:|---:|---:|---:|
+| TPC-H (10) | 1.22× | 1.23× | 1.74× | 1.97× |
+| TPC-DS (24) | 1.29× | 1.18× | 1.45× | 1.58× |
+| Public BI (46) | 1.21× | 1.13× | 1.70× | 1.61× |
+| SchemaStore (21) | 0.71× | 0.76× | 0.88× | 1.09× |
 
-| gzip | JSON | colbin | colbin/JSON |
-|---|---:|---:|---:|
-| Metrics | 9 548 | 2 636 | 2 675 |
-| Sales | 20 702 | 17 499 | 17 650 |
-| Dataset | 38 029 | 27 764 | 28 095 |
+Decode allocates a fresh value per call. SchemaStore counts the 21 of its 27
+documents that have a Go struct. The dynamic path (`map[string]any`) is not
+shown: protobuf has no equivalent of it, so it is not comparable.
 
-**Reading the size tables:**
-- **Single flat records.** colbin and protobuf are within a few bytes. Both
-  omit zeros and write one key per present field, and the difference is
-  colbin's one-byte K4 header against protobuf's tag varint.
-- **Lists of records.** The difference is the table layout: the 2 000 metric
-  rows take 26 000 B in protobuf and 3 975 B in colbin.
-- **Sales** gains less than Metrics because only sales with 8 or more lines
-  are written as tables (see the corpus split below).
-- **colbin/JSON** costs the size of its section.
-- **gzip** still finds redundancy in colbin, and the gzipped colbin stays
-  smaller than gzipped JSON.
-
-### Time
-
-| encode | JSON | protobuf | colbin | colbin + packed5 | colbin/JSON |
-|---|---:|---:|---:|---:|---:|
-| Reading | 500 ns | 123 ns | 24 ns | 50 ns | 228 ns |
-| Order | 822 ns | 259 ns | 113 ns | 187 ns | 278 ns |
-| Product | 509 ns | 163 ns | 46 ns | 130 ns | 260 ns |
-| Metrics | 304 µs | 176 µs | 7 µs | 7 µs | 11 µs |
-| Sales | 560 µs | 216 µs | 44 µs | 64 µs | 78 µs |
-| Dataset | 961 µs | 464 µs | 63 µs | 110 µs | 123 µs |
-
-| decode (into the Go type) | JSON | protobuf | colbin | colbin + packed5 | colbin/JSON |
-|---|---:|---:|---:|---:|---:|
-| Reading | 1 159 ns | 194 ns | 70 ns | 70 ns | 78 ns |
-| Order | 1 842 ns | 580 ns | 381 ns | 382 ns | 378 ns |
-| Product | 990 ns | 446 ns | 247 ns | 482 ns | 248 ns |
-| Metrics | 576 µs | 221 µs | 25 µs | 25 µs | 25 µs |
-| Sales | 1 124 µs | 264 µs | 121 µs | 123 µs | 121 µs |
-| Dataset | 2 005 µs | 600 µs | 203 µs | 259 µs | 206 µs |
-
-| to JSON text | colbin, section held | colbin/JSON | `json.Marshal` from the structs |
-|---|---:|---:|---:|
-| Reading | 404 ns | 1 000 ns | 500 ns |
-| Order | 719 ns | 1 592 ns | 822 ns |
-| Product | 603 ns | 1 222 ns | 509 ns |
-| Metrics | 197 µs | 200 µs | 304 µs |
-| Sales | 481 µs | 493 µs | 560 µs |
-| Dataset | 877 µs | 888 µs | 961 µs |
-
-**Reading the time tables:**
-- **colbin/JSON decodes** at plain colbin's speed, because the section is
-  skipped.
-- **colbin/JSON encodes** slower than plain colbin because it serializes the
-  section and allocates a new buffer every call.
-- **Rendering JSON from colbin/JSON** parses the section per call, about
-  0.5 µs. That is visible on single records and negligible on tables.
-- **packed5** costs 3× on encode and 2× on decode for the string-heavy Product,
-  for a saving of 9 bytes (11%). On numeric data it costs nothing and saves
-  nothing.
-
-### The corpus split between lists and tables
-
-The Sales shape generates line counts on both sides of the threshold, so both
-layouts appear in one dataset:
-
-| 300 sales, 1 514 lines | sales | lines | bytes per line |
-|---|---:|---:|---:|
-| list (< 8 lines) | 246 | 820 | 22.0 |
-| table (≥ 8 lines) | 54 | 694 | 12.8 |
+It loses on small documents: SchemaStore encode is 0.71× msgpack and 0.76×
+vtprotobuf, because a generated encoder (about 5 ns for a 7-byte message)
+beats an interpreted plan (about 20 ns). It also loses on tables of 1 to 25 rows
+(`TrainsUK1`, `income_band`, `region`, `nation`) and on the float-heavy
+`Redfin1`–`Redfin4` encode (0.81–0.86× msgpack), where colbin does decimal
+compression that msgpack does not. Every number is in
+[PERFORMANCE.md](PERFORMANCE.md).
 
 ### In the browser
 
@@ -463,28 +397,17 @@ records under Node 24 (`bun run bench` in `js/`):
 | JSON + `JSON.parse` | 106 670 B | 12 124 B | 0.32 ms |
 | colbin + `codec.unmarshal` | 30 413 B | 3 182 B | 0.16 ms |
 
-### Against msgpack and vtprotobuf
-
-On AWS Lambda x86_64, on TPC-H, TPC-DS, Public BI and SchemaStore. colbin is
-the smallest on every dataset: 1.6–4.2× under msgpack and 1.1–1.6× under
-vtprotobuf. On the three table datasets it is the fastest decode, 1.5–1.7×
-msgpack and 1.5–2.0× vtprotobuf, and its encode is level with msgpack
-(1.00–1.15×) and 1.3–1.8× vtprotobuf.
-
-It loses on small documents: on SchemaStore encode is 0.79× msgpack and 0.88×
-vtprotobuf. Every number is in [PERFORMANCE.md](PERFORMANCE.md).
-
 ### Reproducing
 
 ```sh
 git clone https://github.com/ivanjoz/colbin-benchmarks && cd colbin-benchmarks
-go test ./bench -run FormatSizes -v          # sizes, and round-trip checks
-go test ./bench -bench Formats -benchmem     # timings
+datasets/fetch-all.sh                        # download or generate the datasets, checked by SHA-256
+go run ./cmd/colbinbench -cases all -formats colbin,msgpack,vtprotobuf \
+  -ops encode,decode-fresh,decode-reuse -count 5 -cores 0,2
 ```
 
-The corpus is generated deterministically by `corpus.Generate`, and that
-repository pins it with a SHA-256 checksum. Comparative benchmarks live there
-so that colbin's `go.mod` stays free of protobuf.
+Comparative benchmarks live in that repository so that colbin's `go.mod` stays
+free of protobuf and msgpack.
 
 ## Limitations
 
@@ -570,6 +493,6 @@ Two more projects use it:
 | [`rust/README.md`](rust/README.md) | the Rust crate and its derive |
 | [`rust/ENCODER.md`](rust/ENCODER.md) | encoding JSON to colbin: inference, refusals, warnings |
 | [`js/README.md`](js/README.md) | the npm package |
-| [colbin-benchmarks][bench-repo] | the comparative benchmarks and the pinned corpus |
+| [colbin-benchmarks][bench-repo] | the comparative benchmarks and the pinned datasets |
 
 [bench-repo]: https://github.com/ivanjoz/colbin-benchmarks

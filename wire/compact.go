@@ -113,7 +113,9 @@ func (w *Writer8) CompactInt(value int64) {
 func (w *Writer8) CompactFloat64(value float64) {
 	reversed := bits.ReverseBytes64(math.Float64bits(value))
 	width := (bits.Len64(reversed) + 7) >> 3
-	if value == math.Trunc(value) && math.Abs(value) < 1<<63 && !(value == 0 && math.Signbit(value)) {
+	// Whole by the conversion there and back, inside the range it is defined
+	// in, rather than by math.Trunc, which is a call.
+	if math.Abs(value) < 1<<63 && float64(int64(value)) == value && !(value == 0 && math.Signbit(value)) {
 		whole := int64(value)
 		if uint64(whole) <= compactFixMax {
 			w.Buffer = append(w.Buffer, compactSmall+uint8(whole))

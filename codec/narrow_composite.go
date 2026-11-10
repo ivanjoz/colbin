@@ -119,6 +119,23 @@ func appendNarrowStructs(writer *wire.Writer, field *planField, at unsafe.Pointe
 		writer.Close(list)
 		return
 	}
+	if tree := field.sub.tree; tree != nil && useRowPrograms && !Packed5() {
+		// The same for an element with a tree and no row program: a struct of
+		// structs, whose appendNarrowElement, appendNarrowBody and writePlan
+		// were three frames around each element's tree.write.
+		if !buf.enter() {
+			writer.Close(list)
+			return
+		}
+		for index := range slice.len {
+			element := writer.OpenElement()
+			tree.write(writer, unsafe.Add(slice.data, uintptr(index)*field.stride), buf)
+			writer.CloseElement(element)
+		}
+		buf.leave()
+		writer.Close(list)
+		return
+	}
 	for index := range slice.len {
 		appendNarrowElement(writer, field.sub, unsafe.Add(slice.data, uintptr(index)*field.stride), buf)
 	}
