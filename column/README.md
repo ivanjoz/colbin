@@ -132,6 +132,18 @@ colbin's tables reach the codec through `[]int64`: `gatherInts` in
 `codec/table.go` widens every integer, bool and float field of a row to `int64`
 first — unsigned values by value, `uint64` and floats by bit pattern.
 
+## Floats
+
+`AppendFloat64` writes a column of float64 bit patterns as integers when its
+values are decimals (see `float.go`), and `AppendFloat32` / `DecodeFloat32` do
+the same for `[]float32` — losslessly, bit for bit, NaN payloads included. A
+float32 is a decimal when `float32(float64(i) / 10^e)` gives it back, which
+`0.1f` is and its float64 widening is not, so the float32 form reaches values
+the float64 one cannot. It is written as the same decimal column, and a column
+no smaller than its bits is written as them (int32 patterns). Neither is
+exported from the root package except through `EncodeSlice` / `DecodeSlice`
+(`slice.go`), which add a count and are Go only.
+
 ## Tests
 
 - **`TestPackRunRoundtrip`** — every width 0..64 at every partial-block length,

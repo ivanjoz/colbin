@@ -149,6 +149,9 @@ func constantColumn(vals []int64) bool {
 // written, and its exceptions read into when it is decoded.
 type decimalScratch struct {
 	ints, positions, bits []int64
+	// raw is a float32 column's bit patterns, widened to int64, while it is
+	// scored (AppendFloat32) and while it is read (DecodeFloat32).
+	raw []int64
 	// misses has a bit per value the exponent does not reach, as the encode
 	// kernel leaves them: four to a byte, in its low nibble.
 	misses []byte
