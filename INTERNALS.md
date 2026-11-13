@@ -1139,6 +1139,10 @@ Each exports `Codec` (with `open`, `fromModule`, `preload`) and the free
 functions `unmarshal`, `columns`, `toJSONText`, `marshal` and `inspect`, which
 share one lazily opened handle.
 
+`colbin/decode` finds no module: it is the plain-JavaScript reader of §16.4,
+exporting `Decoder` (`setSchema`, `decode`, `columns`), the free functions
+`decode` and `columns`, and `ColbinError`.
+
 ### 16.2 The handle
 
 A `Codec` holds **one** module instance. The compile happens in `Codec.open()`,
@@ -1212,6 +1216,86 @@ those take the JSON path, which is exact except that integers above 2⁵³ round
 bitmap on a nullable column (and `null` in a `bool` or `string` column's values),
 and `field` naming the root field when the root is a struct; for a root of
 several tables it returns `null`.
+
+### 16.4 The plain-JavaScript decoder (`colbin/decode`)
+
+`js/src/decode/` is a second reader of the whole format, written in
+JavaScript, for a client that cannot or will not load WebAssembly. Its entry
+imports nothing outside that directory but `errors.ts`, so `ColbinError` is one
+class across the entries. It uses no `import.meta`, no `node:` module and no
+`Buffer`, and does nothing at import time. A bundle of it carries no module and
+no base64, which `scripts/decode-bundle.mjs` checks along with a gzipped size
+ceiling.
+
+It follows the Rust walk (`walk.rs`, `wire/*`, `column.rs`, `section.rs`)
+structure for structure, and refuses what Go refuses, with the same limits:
+depth 128, 2²² rows a table, the cell budget of §13, list columns four deep.
+What is particular to JavaScript:
+
+- **One cursor.** A `Walker` holds the bytes, a position and an end. A nested
+  body narrows the end instead of allocating a reader. Every refusal is a
+  thrown `ColbinError`, and the fuzz tests fail on any other exception.
+- **One walk for both run forms.** A narrow run (§3) and a wide one (§4) go
+  through the same methods with a `wide` argument; only where the bytes differ
+  (a field's header, an element's code) does the method branch. A bool or
+  number field is the exception: the fields loop calls its reader directly,
+  because behind the general one it was no longer inlined and a struct of forty
+  numbers decoded a tenth slower.
+- **64-bit integers as two uint32 lanes.** A column takes the double path when
+  its header proves every value is a safe integer (the base, the width, and for
+  a delta the running sum, checked per step), and the lane path otherwise. The
+  lanes are then read as a `Float64Array` (float bits), as numbers where safe,
+  or as a `BigInt64Array`/`BigUint64Array` (`int64: 'auto'`, per column).
+- **Objects from generated literals.** Each struct type gets a function
+  `v => ({a: v[0], b: v[1], …})` made with `new Function` and cached on its
+  plan, with its pages' fields merged in. Every object of a type shares one
+  hidden class, and the walk stores fields into an array by slot rather than
+  into the object by name, a store that goes megamorphic once a page decodes
+  several types. Table rows come from a generated loop per column signature, as
+  in §16.3. A dynamic map collects its keys and values, and a key sequence seen
+  before (looked up by the hash of its keys' cache slots, then compared) is
+  built by a literal generated for it on its second sighting. Added one key at
+  a time, an object past a dozen keys becomes a dictionary in V8, slower to
+  build and to read. A key `__proto__` is written as a computed key, so it
+  stays an own property. Without `new Function` (a CSP), plain stores give the
+  same values in the same key order.
+- **Strings in runs.** A column of strings is decoded with one `TextDecoder`
+  call over the whole run, length bytes included, and each string is cut out
+  with `substring`, because a decoder call costs far more than a substring.
+  When the decoded run is as long as its bytes, every byte decoded to one unit,
+  and each string sits at its byte offset. The decoder never produces more
+  units than bytes, and produces as many only when every byte is a group of
+  its own. Otherwise each string is checked well-formed while its units are
+  counted, and sits at the units counted so far. A well-formed string begins
+  with no continuation byte and ends on a complete sequence, so a one-byte
+  length before it decodes to exactly one unit and nothing merges across it. A
+  u32 length's four bytes are decoded alone to count theirs. The first
+  malformed string sends the rest of the run to one decode per string. The
+  cost: in V8 a substring of 13 units or more points into its run's string, so
+  a kept string keeps its column's text alive. A short ASCII
+  string elsewhere is built from a reused plain array per length with
+  `String.fromCharCode.apply`. A short one that is not ASCII, and every string
+  where there is no `TextDecoder`, goes through the decoder's own WHATWG
+  decode, which replaces a malformed sequence as `TextDecoder` does. Map keys
+  go through a 4096-slot cache keyed by their bytes, so a repeated key is the
+  same string object.
+- **Size.** The bundle is held under a gzipped ceiling. Refusals share a
+  handful of short messages (a schema section's are all one) and carry the
+  offset. The walker's members are `#private`, which a minifier renames.
+- **`columns()`** is the shape of §16.3's: typed arrays for numbers, arrays for
+  strings and bools, `valid` on every pointer column. It keeps a nullable
+  column's present values and its presence bitmap until rows are built, which
+  `columns()` never does. A single group with every row present hands over
+  the decoded array as it is.
+
+The tests run it against both corpora (`decode.test.mjs`), against the column
+vectors lane for lane (`decode-column.test.mjs`), against `decode()` row by row
+for `columns()` (`decode-columns.test.mjs`), run-against-alone for strings and
+its own UTF-8 against `TextDecoder` (`decode-strings.test.mjs`), and against
+hostile input
+(`decode-fuzz.test.mjs`, which also requires refusing at least every
+single-byte corruption Go refuses). `tests/bench.mjs --check` holds it to the
+same 1.5× `JSON.parse` ceiling as `materialize`.
 
 ---
 

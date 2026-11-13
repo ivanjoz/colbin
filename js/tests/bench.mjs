@@ -8,6 +8,7 @@
 import { readFile } from 'node:fs/promises'
 import { wasmPath } from './harness.mjs'
 import { readRows } from '../src/materialize.ts'
+import { Decoder } from '../src/decode/index.ts'
 
 const encoder = new TextEncoder()
 
@@ -103,6 +104,20 @@ const materializes = []
 for (let round = 0; round < 12; round++) materializes.push(materializeOnce())
 materializes.sort((a, b) => a - b)
 
+/** The plain-JavaScript decoder (colbin/decode) on the same message, warmed
+ * first: a JIT runs it, and a page decodes many messages, not one. */
+const js = new Decoder()
+js.setSchema(section)
+for (let round = 0; round < 200; round++) js.decode(message)
+const jsDecodes = []
+for (let round = 0; round < 12; round++) {
+  const started = performance.now()
+  const rows = js.decode(message)
+  jsDecodes.push(performance.now() - started)
+  if (rows.length !== 1000) throw new Error(`colbin/decode: expected 1000 rows, got ${rows.length}`)
+}
+jsDecodes.sort((a, b) => a - b)
+
 const encode = best((e) => e.encode(input.length, 0))
 const verified = best((e) => e.encode(input.length, 2))
 
@@ -137,10 +152,12 @@ console.log(`encode            ${pad(encode)} ms   parse + infer + build`)
 console.log(`encode + verify   ${pad(verified)} ms   +${((verified / encode - 1) * 100).toFixed(0)}% for the self-check`)
 console.log(`decode            ${pad(decodes[0])} ms`)
 console.log(`materialize       ${pad(materializes[0])} ms   wasm gather + JS row builder, no JSON text`)
+console.log(`colbin/decode     ${pad(jsDecodes[0])} ms   plain JavaScript, no wasm`)
 console.log('')
 console.log(`JSON.parse        ${pad(parse)} ms   ${against(encode, parse)} for colbin encode`)
 console.log(`JSON.stringify    ${pad(stringify)} ms   ${against(decodes[0], stringify)} for colbin decode`)
 console.log(`JSON.parse        ${pad(parse)} ms   ${against(materializes[0], parse)} for colbin materialize`)
+console.log(`JSON.parse        ${pad(parse)} ms   ${against(jsDecodes[0], parse)} for colbin/decode`)
 
 // INTERNALS.md §19: the regression gate, for CI.
 //
@@ -163,4 +180,12 @@ if (process.argv.includes('--check')) {
     process.exit(1)
   }
   console.log(`gate: materialize at ${ratio.toFixed(2)}x JSON.parse, under the ${ceiling}x ceiling`)
+  // The same gate for the plain-JavaScript decoder, whose whole case is
+  // decoding a table faster than JSON.parse reads its text (about 0.25x here).
+  const jsRatio = jsDecodes[0] / parse
+  if (jsRatio > ceiling) {
+    console.error(`colbin/decode is ${jsRatio.toFixed(2)}x JSON.parse, over the ${ceiling}x ceiling`)
+    process.exit(1)
+  }
+  console.log(`gate: colbin/decode at ${jsRatio.toFixed(2)}x JSON.parse, under the ${ceiling}x ceiling`)
 }

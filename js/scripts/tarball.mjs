@@ -80,6 +80,17 @@ assert.throws(() => codec.inspect(message, { section }), (e) => e.message.includ
 assert.equal(asset.ColbinError, ColbinError)
 assert.throws(() => codec.unmarshal(Uint8Array.from([1, 2, 3])), ColbinError)
 
+// The plain-JavaScript decoder: no module at all, the same values, and the
+// same failure type.
+const pure = await import('colbin/decode')
+const js = new pure.Decoder()
+js.setSchema(section)
+assert.deepEqual(js.decode(message), rows)
+assert.deepEqual(pure.decode(standalone), rows)
+assert.equal(js.columns(message).columns.length, 5)
+assert.equal(pure.ColbinError, ColbinError)
+assert.throws(() => js.decode(Uint8Array.from([1, 2, 3])), ColbinError)
+
 // The subpath that lets a build tool reach the module file itself.
 const require = createRequire(import.meta.url)
 assert.ok(require.resolve('colbin/colbin.wasm').endsWith('colbin.wasm'))
@@ -106,6 +117,9 @@ const REQUIRED = [
   'dist/colbin.wasm',
   'dist/colbin.inspect.wasm',
   'dist/generated/wasm-inline.js',
+  'dist/decode/index.js',
+  'dist/decode/index.d.ts',
+  'dist/decode/walk.js',
   'README.md',
   'LICENSE',
 ]

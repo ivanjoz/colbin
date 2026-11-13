@@ -122,6 +122,46 @@ cannot be compiled. The package detects that once and falls back to a generic
 builder, which costs about ten times as much as the generated one and is still
 two orders of magnitude below the decode.
 
+## Decoding without WebAssembly: `colbin/decode`
+
+A page that only reads colbin can skip the module altogether:
+
+```js
+import { Decoder } from 'colbin/decode'
+
+const decoder = new Decoder()
+decoder.setSchema(section)                  // once per connection
+const rows = decoder.decode(message)        // every message after it
+const table = decoder.columns(message)      // or the columns, as codec.columns gives them
+```
+
+It is a decoder written in plain JavaScript: nothing to compile, nothing to
+`await`, no `import.meta`, no Node built-in. It needs a `Uint8Array` and, if
+there is one, a `TextDecoder` (it has its own UTF-8 decoder for when there is
+not). A bundle that imports it carries no module and no base64: 14 KB gzipped
+in all. It only reads: `marshal` and `inspect` stay with the module.
+
+It reads every message the module reads, not only tables. Nested documents,
+lists inside records, maps and documents without a schema all decode
+straight to objects, with no JSON text in the middle. The values match the
+module's:
+
+- an integer past 2^53 comes back as a `bigint`, per column in a table and per
+  value elsewhere. `new Decoder({ int64: 'number' })` rounds instead, as
+  `JSON.parse` would;
+- a float32 comes back as the shortest decimal that reads back as it, the
+  digits Go prints;
+- a failure is a `ColbinError`, the same class the other entries throw. Its
+  message is short (what failed is at `offset`); the module says more about
+  the same bytes.
+
+It is also faster than the module on the data measured so far: in Node it
+decodes a table in 0.4 to 0.6 times the module's time, and in 0.25 to 0.45
+times what `JSON.parse` takes for the same rows as JSON. Objects are built by
+literals generated with `new Function` and cached per shape. Under a
+Content-Security-Policy without `unsafe-eval` it falls back to plain property
+stores and gives the same values.
+
 ## Numbers
 
 1000 product records, seven fields. Node 24 / V8, best of twelve runs, no
@@ -138,6 +178,7 @@ once per message.
 | | |
 |---|---:|
 | `codec.unmarshal` — objects in hand, no JSON text | **0.14 ms** |
+| `Decoder.decode` from `colbin/decode` — the same, no WebAssembly | **0.11 ms** |
 | `JSON.parse` of the same document, as a reference point | 0.26 ms |
 | `codec.toJSONText` | 0.20 ms |
 | `JSON.stringify` of the same document | 0.15 ms |
@@ -157,6 +198,7 @@ transfer size; client CPU is budget to spend in service of those.
 | `colbin/asset` | `new URL('./colbin.wasm', import.meta.url)` — Vite, webpack 5, Rollup and Parcel all emit it as an asset, and it works unbundled in a browser too |
 | `colbin/inspect` | the same, over the **other module**: the one built with `inspect`. See below |
 | `colbin/colbin.wasm` | the module file itself, for a build step that wants to place it |
+| `colbin/decode` | the plain-JavaScript decoder: no module, see above |
 
 Measured, on the modules this version ships:
 
@@ -166,6 +208,7 @@ Measured, on the modules this version ships:
 | the same module as inline base64 | 279 124 B | **114 271 B** |
 | `colbin.inspect.wasm` — what `colbin/inspect` serves | 224 199 B | 90 127 B |
 | the wrapper's own JavaScript, all entries | 36 085 B | 10 651 B |
+| `colbin/decode` bundled and minified, the whole decoder | 35 244 B | 14 121 B |
 
 Inline costs **36% more over the wire** than the asset, gzipped. Base64 breaks
 the byte alignment gzip's matcher works on, so gzip recovers much less of the
@@ -217,7 +260,8 @@ No streaming — the ABI is bytes in, bytes out, and allocates the whole input.
 No worker wrapper: decoding off the main thread is your choice, and shipping one
 would mean owning a message protocol. No types generated from the schema. The
 column fast path covers tables; deeply nested or heterogeneous documents go
-through the JSON-text path, which is correct but slower.
+through the JSON-text path, which is correct but slower. `colbin/decode` has
+no such second path: it builds every shape directly.
 
 MIT. Source, format notes and the Go and Rust implementations:
 <https://github.com/ivanjoz/colbin>.
