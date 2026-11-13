@@ -24,10 +24,11 @@ use alloc::vec::Vec;
 use crate::Error;
 use crate::json::{JsonSink, render_key_run};
 use crate::plan::{
-    self, MAP_ANY, MAP_BOOL, MAP_FLOAT32, MAP_FLOAT64, MAP_INT, MAP_LIST, MAP_STRING, MAP_STRUCT,
-    MAP_STRUCTS, MAP_UINT, OP_ANY, OP_ANYS, OP_BOOL, OP_BYTES, OP_FLOAT32, OP_FLOAT64, OP_INT8,
-    OP_INT16, OP_INT32, OP_INT64, OP_MAP, OP_POINTER, OP_POINTER_STRUCT, OP_STRING, OP_STRINGS,
-    OP_STRUCT, OP_STRUCTS, OP_UINT8, OP_UINT16, OP_UINT32, OP_UINT64, Plan, PlanField,
+    self, MAP_ANY, MAP_BOOL, MAP_BYTES, MAP_FLOAT32, MAP_FLOAT64, MAP_INT, MAP_LIST, MAP_STRING,
+    MAP_STRUCT, MAP_STRUCTS, MAP_UINT, OP_ANY, OP_ANYS, OP_BOOL, OP_BOOLS, OP_BYTES, OP_BYTES_LIST,
+    OP_FLOAT32, OP_FLOAT32S, OP_FLOAT64, OP_FLOAT64S, OP_INT8, OP_INT16, OP_INT32, OP_INT64,
+    OP_MAP, OP_POINTER, OP_POINTER_STRUCT, OP_STRING, OP_STRINGS, OP_STRUCT, OP_STRUCTS, OP_UINT8,
+    OP_UINT16, OP_UINT32, OP_UINT64, Plan, PlanField,
 };
 use crate::section::{self, Schema};
 use crate::wire::{self, Kind, Reader, Reader8, Runs};
@@ -39,7 +40,7 @@ use crate::wire::{self, Kind, Reader, Reader8, Runs};
 /// every entry after it, so this is checked once before the loop rather than
 /// defaulted inside it.
 const fn map_key_is_renderable(kind: u8) -> bool {
-    matches!(kind, MAP_STRING | MAP_INT | MAP_UINT)
+    matches!(kind, MAP_STRING | MAP_INT | MAP_UINT | MAP_BOOL)
 }
 
 const MAX_DEPTH: u32 = 128;
@@ -555,6 +556,46 @@ impl<'s> Walker<'s> {
                 let values = reader.strings_bytes();
                 self.text_array(&values);
             }
+            OP_FLOAT64S => {
+                let bits = reader.float64s_bits();
+                reader.err()?;
+                self.to.begin_array();
+                for value in bits {
+                    if !self.to.float(f64::from_bits(value), 64) {
+                        return Err(Error::NotJson);
+                    }
+                }
+                self.to.end_array();
+            }
+            OP_FLOAT32S => {
+                let bits = reader.float32s_bits();
+                reader.err()?;
+                self.to.begin_array();
+                for value in bits {
+                    if !self.to.float(f64::from(f32::from_bits(value)), 32) {
+                        return Err(Error::NotJson);
+                    }
+                }
+                self.to.end_array();
+            }
+            OP_BOOLS => {
+                let values = reader.bools();
+                reader.err()?;
+                self.to.begin_array();
+                for value in values {
+                    self.to.boolean(value);
+                }
+                self.to.end_array();
+            }
+            OP_BYTES_LIST => {
+                let values = reader.strings_bytes();
+                reader.err()?;
+                self.to.begin_array();
+                for value in values {
+                    self.to.blob(value);
+                }
+                self.to.end_array();
+            }
             o if plan::array_element_op(o) != plan::OP_COUNT => {
                 // A narrow array's form is its element type's, and the op is the
                 // only element type a walk has: it says whether the elements are
@@ -640,6 +681,46 @@ impl<'s> Walker<'s> {
                 let values = reader.strings_bytes();
                 self.text_array(&values);
             }
+            OP_FLOAT64S => {
+                let bits = reader.float64s_bits();
+                reader.err()?;
+                self.to.begin_array();
+                for value in bits {
+                    if !self.to.float(f64::from_bits(value), 64) {
+                        return Err(Error::NotJson);
+                    }
+                }
+                self.to.end_array();
+            }
+            OP_FLOAT32S => {
+                let bits = reader.float32s_bits();
+                reader.err()?;
+                self.to.begin_array();
+                for value in bits {
+                    if !self.to.float(f64::from(f32::from_bits(value)), 32) {
+                        return Err(Error::NotJson);
+                    }
+                }
+                self.to.end_array();
+            }
+            OP_BOOLS => {
+                let values = reader.bools();
+                reader.err()?;
+                self.to.begin_array();
+                for value in values {
+                    self.to.boolean(value);
+                }
+                self.to.end_array();
+            }
+            OP_BYTES_LIST => {
+                let values = reader.strings_bytes();
+                reader.err()?;
+                self.to.begin_array();
+                for value in values {
+                    self.to.blob(value);
+                }
+                self.to.end_array();
+            }
             o if plan::array_element_op(o) != plan::OP_COUNT => {
                 let mut values: Vec<i64> = Vec::new();
                 reader.ints_into(&mut values);
@@ -675,6 +756,7 @@ impl<'s> Walker<'s> {
                     self.to.key_bytes(name.as_bytes());
                 }
                 MAP_INT => self.number_key(entries.element_int(), true),
+                MAP_BOOL => self.bool_key(entries.element_uint() == 1),
                 _ => self.number_key(entries.element_uint() as i64, false),
             }
             self.narrow_map_value(&mut entries, field.value_kind, field.sub)?;
@@ -715,6 +797,11 @@ impl<'s> Walker<'s> {
                 }
             }
             MAP_BOOL => self.to.boolean(entries.element_uint() == 1),
+            MAP_BYTES => {
+                let bytes = entries.element_blob();
+                entries.err()?;
+                self.to.blob(bytes);
+            }
             MAP_STRUCT => {
                 let at = sub.ok_or(Error::BadSection)?;
                 let wide = self.plan_at(at)?.is_wide;
@@ -751,6 +838,7 @@ impl<'s> Walker<'s> {
                     self.to.key_bytes(name);
                 }
                 MAP_INT => self.number_key(entries.element_int(), true),
+                MAP_BOOL => self.bool_key(entries.element_uint() == 1),
                 _ => self.number_key(entries.element_uint() as i64, false),
             }
             match field.value_kind {
@@ -796,6 +884,11 @@ impl<'s> Walker<'s> {
                 }
             }
             MAP_BOOL => self.to.boolean(entries.element_uint() == 1),
+            MAP_BYTES => {
+                let bytes = entries.element_blob();
+                entries.err()?;
+                self.to.blob(bytes);
+            }
             // A struct value is a list's element: a descriptor that says its key
             // width, a length and a key run.
             MAP_STRUCT => {
@@ -843,6 +936,11 @@ impl<'s> Walker<'s> {
         self.to.end_array();
         self.leave();
         Ok(())
+    }
+
+    /// Renders a bool key as Go's `strconv.FormatBool` does.
+    fn bool_key(&mut self, value: bool) {
+        self.to.key_bytes(if value { b"true" } else { b"false" });
     }
 
     /// Renders an integer key as the name JSON needs it to be.

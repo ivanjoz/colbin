@@ -60,9 +60,18 @@ pub const OP_ANYS: u8 = 26;
 /// of zeros. The section names the struct as for [`OP_STRUCT`].
 pub const OP_POINTER_STRUCT: u8 = 27;
 
+/// Arrays of floats, of bools and of blobs (`wire/arrays.go`). A float array is
+/// its elements' IEEE bits at their own width, or, when it is long, a column
+/// behind its count; a bool array is a byte of 0 or 1 an element; a blob array
+/// is the bytes of [`OP_STRINGS`], rendered as blobs.
+pub const OP_FLOAT64S: u8 = 28;
+pub const OP_FLOAT32S: u8 = 29;
+pub const OP_BOOLS: u8 = 30;
+pub const OP_BYTES_LIST: u8 = 31;
+
 /// Bounds the block, so a section naming an op this version does not assign is
 /// refused rather than indexed on.
-pub const OP_COUNT: u8 = 28;
+pub const OP_COUNT: u8 = 32;
 
 pub const MAP_STRING: u8 = 0;
 pub const MAP_INT: u8 = 1;
@@ -84,7 +93,10 @@ pub const MAP_STRUCTS: u8 = 8;
 /// the kind in [`PlanField::list_kind`] would be. The section says that kind in
 /// a byte after the two kinds.
 pub const MAP_LIST: u8 = 9;
-pub const MAP_KIND_COUNT: u8 = 10;
+/// A blob map value: a string element's bytes, which the kind says are not
+/// text. A value only.
+pub const MAP_BYTES: u8 = 10;
+pub const MAP_KIND_COUNT: u8 = 11;
 
 /// Whether a map value kind is a key-less list, which has no four-bit form: a
 /// plan holding one is always wide.

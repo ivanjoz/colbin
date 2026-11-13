@@ -29,11 +29,14 @@
 //!
 //! # What the format does not carry
 //!
-//! An array of floats, an array of bools and an array of arrays have no op. That
-//! is the format's limit rather than this module's: `sliceOp` in
-//! `codec/codec.go` resolves integers, strings and structs and refuses the rest.
-//! They are refused here with a message that says so, because the alternative is
-//! a message that does not decode.
+//! An array of arrays has no op. That is the format's limit rather than this
+//! module's: `sliceOp` in `codec/codec.go` resolves numbers, bools, strings,
+//! blobs and structs and refuses the rest. It is refused here with a message
+//! that says so, because the alternative is a message that does not decode.
+//!
+//! An array of floats and an array of bools have had ops since 0.13
+//! (`OP_FLOAT64S`, `OP_BOOLS`). One fractional element makes the array float64,
+//! as one fractional value makes a column.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -44,8 +47,8 @@ use crate::json::parse::{
     Doc, K_ARRAY, K_BOOL, K_FLOAT, K_INT, K_NULL, K_OBJECT, K_STRING, K_UINT,
 };
 use crate::plan::{
-    OP_BOOL, OP_FLOAT64, OP_INT64, OP_INT64S, OP_POINTER, OP_STRING, OP_STRINGS, OP_STRUCT,
-    OP_STRUCTS, OP_UINT64, OP_UINT64S, Plan, PlanField, columnable_op,
+    OP_BOOL, OP_BOOLS, OP_FLOAT64, OP_FLOAT64S, OP_INT64, OP_INT64S, OP_POINTER, OP_STRING,
+    OP_STRINGS, OP_STRUCT, OP_STRUCTS, OP_UINT64, OP_UINT64S, Plan, PlanField, columnable_op,
 };
 use crate::section::Schema;
 
@@ -544,19 +547,19 @@ impl<'a, 'd> Inferrer<'a, 'd> {
             C_NUM => {
                 let numeric = self.resolve_number(elem)?;
                 match numeric {
-                    OP_FLOAT64 => self.unsupported("an array of floats"),
+                    OP_FLOAT64 => Some(OP_FLOAT64S),
                     OP_UINT64 => Some(OP_UINT64S),
                     _ => Some(OP_INT64S),
                 }
             }
-            C_BOOL => self.unsupported("an array of booleans"),
+            C_BOOL => Some(OP_BOOLS),
             _ => self.unsupported("an array of arrays"),
         }
     }
 
-    /// Every op the format carries as an array element is an integer, a string
-    /// or a struct. The rest are refused here rather than encoded into something
-    /// that does not decode.
+    /// Every op the format carries as an array element is a number, a bool, a
+    /// string or a struct. The rest are refused here rather than encoded into
+    /// something that does not decode.
     fn unsupported(&mut self, what: &str) -> Option<u8> {
         let path = self.path_string();
         self.diag.fail(

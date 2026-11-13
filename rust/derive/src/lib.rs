@@ -744,6 +744,12 @@ enum Shape {
     Ints,
     /// A slice of strings, through the homogeneous LIST class.
     Strings,
+    /// A slice of floats: their bits, or a column when it is long.
+    Floats(u8),
+    /// A slice of bools, a byte each.
+    Bools,
+    /// A slice of blobs, `Vec<Vec<u8>>`: a string array's bytes.
+    Blobs,
     /// An optional scalar or string. An absent key means `None`, so a `Some`
     /// holding a zero has to say so out loud — which is the one place this
     /// format writes a zero rather than omitting it.
@@ -764,17 +770,14 @@ impl Shape {
                 Self::Int(_) | Self::Uint(_) => Self::Ints,
                 Self::Str => Self::Strings,
                 Self::Struct => Self::Structs,
-                Self::Bool | Self::Float(_) => {
-                    return Err(syn::Error::new(
-                        ty.span(),
-                        "colbin: the format carries slices of integers, of strings and of \
-                         structs; a slice of bools or floats has no column form",
-                    ));
-                }
+                Self::Float(width) => Self::Floats(width),
+                Self::Bool => Self::Bools,
+                Self::Bytes => Self::Blobs,
                 _ => {
                     return Err(syn::Error::new(
                         ty.span(),
-                        "colbin: a slice of slices, of options or of maps is not carried",
+                        "colbin: a slice of slices (other than of blobs), of options or of \
+                         maps is not carried",
                     ));
                 }
             });
@@ -863,6 +866,11 @@ impl Shape {
             Self::Bytes => quote!(w.bytes(#key, &self.#ident);),
             Self::Ints => quote!(w.ints(#key, &self.#ident);),
             Self::Strings => quote!(w.strings(#key, &self.#ident);),
+            Self::Floats(32) => quote!(w.f32s(#key, &self.#ident);),
+            Self::Floats(_) => quote!(w.f64s(#key, &self.#ident);),
+            Self::Bools => quote!(w.bools(#key, &self.#ident);),
+            // The bytes of a string array, element for element.
+            Self::Blobs => quote!(w.strings(#key, &self.#ident);),
             Self::Struct => {
                 let call = helper("write_struct", wide);
                 quote!(#call(&mut w, #key, &self.#ident);)
@@ -980,6 +988,10 @@ impl Shape {
             Self::Bytes => quote!(r.bytes().to_vec()),
             Self::Ints => quote!(r.ints()),
             Self::Strings => quote!(r.strings()),
+            Self::Floats(32) => quote!(r.f32s()),
+            Self::Floats(_) => quote!(r.f64s()),
+            Self::Bools => quote!(r.bools()),
+            Self::Blobs => quote!(r.blobs()),
             Self::Struct => {
                 let call = helper("read_struct", wide);
                 quote!(#call(&mut r))
@@ -1070,7 +1082,8 @@ fn helper(name: &str, wide: bool) -> proc_macro2::TokenStream {
 
 fn unsupported() -> &'static str {
     "colbin: the derive carries bool, the fixed-width integers and floats, String, Vec<u8>, \
-     slices of integers, strings and structs, Option of a scalar, a nested struct and a map"
+     slices of integers, floats, bools, strings, blobs and structs, Option of a scalar, a \
+     nested struct and a map"
 }
 
 /// The element type of a `Vec<T>` or an `Option<T>`, or `None` for anything

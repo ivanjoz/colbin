@@ -23,7 +23,11 @@ var opSamples = map[fieldOp]any{
 	opInt8s: []int8{-1, 2}, opInt16s: []int16{-300, 2}, opInt32s: []int32{-70000, 1},
 	opInt64s: []int64{-1 << 40, 1}, opUint16s: []uint16{1, 60000},
 	opUint32s: []uint32{1, 1 << 31}, opUint64s: []uint64{1, 1 << 63},
-	opStrings: []string{"PACKED", "", "text"},
+	opStrings:   []string{"PACKED", "", "text"},
+	opFloat64s:  []float64{-2.25, 0, 1e300},
+	opFloat32s:  []float32{1.5, 0, -3},
+	opBools:     []bool{true, false, true},
+	opBytesList: [][]byte{{0, 1, 2}, {}, {255}},
 }
 
 func TestEveryValueOpAgreesOnEveryPath(t *testing.T) {

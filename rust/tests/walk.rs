@@ -66,7 +66,17 @@ fn every_document_renders_the_json_go_renders() {
             Ok(got) => {
                 let got = String::from_utf8(got).expect("the walk writes UTF-8");
                 if got != want {
-                    failures.push(format!("{name}: the walk disagrees with Go"));
+                    let at = got
+                        .bytes()
+                        .zip(want.bytes())
+                        .position(|(a, b)| a != b)
+                        .unwrap_or(0);
+                    let from = at.saturating_sub(30);
+                    failures.push(format!(
+                        "{name}: the walk disagrees with Go at byte {at}: {:?} against {:?}",
+                        &got[from..(at + 40).min(got.len())],
+                        &want[from..(at + 40).min(want.len())]
+                    ));
                 }
             }
             Err(colbin::Error::Unsupported) => unsupported.push(name),

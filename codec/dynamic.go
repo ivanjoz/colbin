@@ -443,6 +443,8 @@ func sortMapKeys(keys []reflect.Value) {
 			return keys[a].String() < keys[b].String()
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 			return keys[a].Int() < keys[b].Int()
+		case reflect.Bool:
+			return !keys[a].Bool() && keys[b].Bool()
 		default:
 			return keys[a].Uint() < keys[b].Uint()
 		}

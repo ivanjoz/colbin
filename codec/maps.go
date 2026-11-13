@@ -105,6 +105,9 @@ const (
 	// elements a map value of the slice's element kind would be. The schema
 	// says that kind in a byte after the value kind.
 	mapList
+	// mapBytes is a blob value: a string element's bytes, which the kind says
+	// are not text. It is a value kind only.
+	mapBytes
 
 	// mapKindCount bounds the block, so a section naming a kind this version
 	// does not assign is refused.
@@ -131,9 +134,7 @@ func mapKindOf(t reflect.Type, what string) (mapKind, error) {
 		}
 		return mapFloat64, nil
 	case reflect.Bool:
-		if what == "key" {
-			return 0, fmt.Errorf("a bool is not a map key this format carries")
-		}
+		// A key as well as a value: 0 or 1, the way an unsigned key is written.
 		return mapBool, nil
 	case reflect.Interface:
 		// A key has to be renderable as a name, and a dynamic one could be a list
@@ -190,10 +191,21 @@ func mapOpFor(fieldType reflect.Type) (shape mapShape, err error) {
 		}
 	}
 	if value.Kind() == reflect.Slice {
+		if value.Elem().Kind() == reflect.Uint8 && !shape.indirect {
+			// A blob is a scalar here, as a []byte field is, and not a list of
+			// bytes.
+			shape.valueKind = mapBytes
+			return shape, nil
+		}
 		return listShape(shape, fieldType, value)
 	}
 	if shape.valueKind, err = mapKindOf(value, "value"); err != nil {
 		return shape, err
+	}
+	if shape.valueKind == mapAny && shape.keyKind == mapBool {
+		// A map of dynamic values is a dynamic container, whose keys are names
+		// (compact.go), and a bool is not one.
+		return shape, fmt.Errorf("a map of %s is not carried: a dynamic map's key is a string or an integer", fieldType)
 	}
 	if shape.valueKind == mapStruct {
 		shape.record = value
@@ -396,7 +408,15 @@ func writeMapValue(writer *wire.Writer8, kind mapKind, value reflect.Value) {
 		} else {
 			writer.ElementUint(0)
 		}
+	case mapBytes:
+		writer.ElementString(bytesAsString(value.Bytes()))
 	}
+}
+
+// bytesAsString is a blob as the string an element writer takes, without the
+// copy a conversion makes. The writer appends it and keeps nothing.
+func bytesAsString(value []byte) string {
+	return unsafe.String(unsafe.SliceData(value), len(value))
 }
 
 // readMapField reads a map, allocating it at the entry count the message
@@ -568,6 +588,9 @@ func readMapValue(reader *wire.Reader8, kind mapKind, into reflect.Value) {
 		setFloatFromReversed(into, reader.ElementUint())
 	case mapBool:
 		into.SetBool(reader.ElementUint() == 1)
+	case mapBytes:
+		// Copied out, and never nil: the key is present, so the value is a blob.
+		into.SetBytes(append([]byte{}, reader.ElementBlob()...))
 	default:
 		reader.Fail(errBadMapValue(kind))
 	}

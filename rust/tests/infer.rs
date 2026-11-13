@@ -221,12 +221,10 @@ fn array_element_types_resolve_to_the_ops_the_format_has() {
 /// caller acts on what it says.
 #[test]
 fn the_shapes_the_format_has_no_room_for_are_refused() {
-    let cases: [(&str, &str, i32); 7] = [
+    let cases: [(&str, &str, i32); 5] = [
         ("type-conflict", r#"[{"qty":1},{"qty":"two"}]"#, D_CONFLICT),
         ("empty-array", "[]", D_CONFLICT),
         ("null-root", "null", D_CONFLICT),
-        ("float-array", r#"{"v":[1.5,2.5]}"#, D_UNSUPPORTED),
-        ("bool-array", r#"{"v":[true,false]}"#, D_UNSUPPORTED),
         ("nested-array", r#"{"v":[[1,2]]}"#, D_UNSUPPORTED),
         (
             "int-spanning-both-ends",
@@ -234,12 +232,10 @@ fn the_shapes_the_format_has_no_room_for_are_refused() {
             D_CONFLICT,
         ),
     ];
-    let wanted: [&str; 7] = [
+    let wanted: [&str; 5] = [
         "type conflict",
         "no shape to infer",
         "no shape to infer",
-        "array of floats",
-        "array of booleans",
         "array of arrays",
         "below zero and above the int64 maximum",
     ];

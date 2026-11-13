@@ -293,28 +293,37 @@ func readWideFields(reader *wire.Reader8, plan *typePlan, record unsafe.Pointer,
 // in the message that was fine.
 var errNotComposite = errors.New("not a composite")
 
-// compositeOpFor resolves a struct, a slice of structs or a pointer to a struct
-// to its op and its child plan. It returns errNotComposite for anything that is
+// compositeOpFor resolves a struct, a slice of structs, a slice of pointers to
+// structs or a pointer to a struct to its op and its child plan. It returns errNotComposite for anything that is
 // not one, so the scalar table stays the first thing tried.
-func compositeOpFor(fieldType reflect.Type, building map[reflect.Type]*typePlan) (fieldOp, *typePlan, reflect.Type, uintptr, error) {
+func compositeOpFor(fieldType reflect.Type, build *planBuild) (fieldOp, *typePlan, reflect.Type, uintptr, error) {
 	switch fieldType.Kind() {
 	case reflect.Struct:
-		sub, err := planForBuilding(fieldType, building)
+		sub, err := planForBuilding(fieldType, build)
 		if err != nil {
 			return 0, nil, nil, 0, err
 		}
 		return opStruct, sub, nil, 0, nil
 	case reflect.Slice:
 		if element := fieldType.Elem(); element.Kind() == reflect.Struct {
-			sub, err := planForBuilding(element, building)
+			sub, err := planForBuilding(element, build)
 			if err != nil {
 				return 0, nil, nil, 0, err
 			}
 			return opStructs, sub, fieldType, element.Size(), nil
 		}
+		if record, ok := structPointersOf(fieldType); ok {
+			sub, err := planForBuilding(record, build)
+			if err != nil {
+				return 0, nil, nil, 0, err
+			}
+			// sliceType is the slice of structs the field is on the wire, which
+			// is what a reader allocates; the pointers are made from it.
+			return opStructPtrs, sub, reflect.SliceOf(record), record.Size(), nil
+		}
 	case reflect.Pointer:
 		if element := fieldType.Elem(); element.Kind() == reflect.Struct {
-			sub, err := planForBuilding(element, building)
+			sub, err := planForBuilding(element, build)
 			if err != nil {
 				return 0, nil, nil, 0, err
 			}

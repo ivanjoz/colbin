@@ -41,6 +41,8 @@ const (
 	classString
 	classSignedArray
 	classUnsignedArray
+	classFloat32Array
+	classFloat64Array
 )
 
 // classOfOp is the class a section op is read as, and false for an op that no
@@ -63,6 +65,10 @@ func classOfOp(op fieldOp) (convClass, bool) {
 		return classSignedArray, true
 	case opUint16s, opUint32s, opUint64s:
 		return classUnsignedArray, true
+	case opFloat32s:
+		return classFloat32Array, true
+	case opFloat64s:
+		return classFloat64Array, true
 	}
 	return 0, false
 }
@@ -75,8 +81,12 @@ func isFloatClass(class convClass) bool {
 	return class == classFloat32 || class == classFloat64
 }
 
-func isArrayClass(class convClass) bool {
+func isIntArrayClass(class convClass) bool {
 	return class == classSignedArray || class == classUnsignedArray
+}
+
+func isFloatArrayClass(class convClass) bool {
+	return class == classFloat32Array || class == classFloat64Array
 }
 
 // convertible is the conversion table of the plan, one row per pair of ops: whether
@@ -100,8 +110,12 @@ func convertible(src, dst fieldOp) bool {
 		return isIntegerClass(to) || isFloatClass(to)
 	case isFloatClass(from):
 		return isFloatClass(to)
-	case isArrayClass(from):
-		return isArrayClass(to)
+	case isIntArrayClass(from):
+		// An integer array goes into a float array as an integer goes into a
+		// float, and the browser types every number array as int64.
+		return isIntArrayClass(to) || isFloatArrayClass(to)
+	case isFloatArrayClass(from):
+		return isFloatArrayClass(to)
 	}
 	return from == to
 }
@@ -328,6 +342,10 @@ func (conv *fieldConv) storeSignedArray(at unsafe.Pointer, values []int64) error
 		*(*[]uint32)(at), failed = convertSigned(*(*[]uint32)(at), values)
 	case opUint64s:
 		*(*[]uint64)(at), failed = convertSigned(*(*[]uint64)(at), values)
+	case opFloat64s:
+		*(*[]float64)(at), failed = widenToFloats(*(*[]float64)(at), values), -1
+	case opFloat32s:
+		*(*[]float32)(at), failed = widenToFloats(*(*[]float32)(at), values), -1
 	default:
 		return nil
 	}
@@ -354,12 +372,49 @@ func (conv *fieldConv) storeUnsignedArray(at unsafe.Pointer, values []uint64) er
 		*(*[]uint32)(at), failed = convertUnsigned(*(*[]uint32)(at), values)
 	case opUint64s:
 		*(*[]uint64)(at), failed = convertUnsigned(*(*[]uint64)(at), values)
+	case opFloat64s:
+		*(*[]float64)(at), failed = widenToFloats(*(*[]float64)(at), values), -1
+	case opFloat32s:
+		*(*[]float32)(at), failed = widenToFloats(*(*[]float32)(at), values), -1
 	default:
 		return nil
 	}
 	if failed >= 0 {
 		return conv.overflowAt(values[failed], failed)
 	}
+	return nil
+}
+
+// widenToFloats is an integer array stored as floats, which rounds past 2^53
+// as the scalar conversion does.
+func widenToFloats[F float32 | float64, I int64 | uint64 | float32](dst []F, values []I) []F {
+	out := dst[:0]
+	if cap(out) < len(values) {
+		out = make([]F, 0, len(values))
+	}
+	for _, value := range values {
+		out = append(out, F(value))
+	}
+	return out
+}
+
+// storeFloat64Array stores an array the section wrote as float64 into a
+// []float32, refusing a finite element too large for one as storeFloat does.
+func (conv *fieldConv) storeFloat64Array(at unsafe.Pointer, values []float64) error {
+	if conv.dst != opFloat32s {
+		return nil
+	}
+	out := (*(*[]float32)(at))[:0]
+	if cap(out) < len(values) {
+		out = make([]float32, 0, len(values))
+	}
+	for index, value := range values {
+		if math.Abs(value) > math.MaxFloat32 && !math.IsInf(value, 0) {
+			return conv.overflowAt(value, index)
+		}
+		out = append(out, float32(value))
+	}
+	*(*[]float32)(at) = out
 	return nil
 }
 
@@ -414,6 +469,15 @@ func readConverted(reader *wire.Reader, field *planField, at unsafe.Pointer, buf
 	case classUnsignedArray:
 		var small [32]uint64
 		err = conv.storeUnsignedArray(target, reader.Uint64s(small[:0]))
+	case classFloat64Array:
+		var small [32]float64
+		err = conv.storeFloat64Array(target, reader.Float64s(small[:0]))
+	case classFloat32Array:
+		// Into a []float64, the one other array a float32 one converts to.
+		var small [32]float32
+		if values := reader.Float32s(small[:0]); conv.dst == opFloat64s {
+			*(*[]float64)(target) = widenToFloats(*(*[]float64)(target), values)
+		}
 	}
 	if err != nil {
 		reader.Fail(err)
@@ -453,6 +517,15 @@ func readConvertedWide(reader *wire.Reader8, field *planField, at unsafe.Pointer
 	case classUnsignedArray:
 		var small [32]uint64
 		err = conv.storeUnsignedArray(target, reader.Uint64s(small[:0]))
+	case classFloat64Array:
+		var small [32]float64
+		err = conv.storeFloat64Array(target, reader.Float64s(small[:0]))
+	case classFloat32Array:
+		// Into a []float64, the one other array a float32 one converts to.
+		var small [32]float32
+		if values := reader.Float32s(small[:0]); conv.dst == opFloat64s {
+			*(*[]float64)(target) = widenToFloats(*(*[]float64)(target), values)
+		}
 	}
 	if err != nil {
 		reader.Fail(err)
@@ -602,6 +675,14 @@ func opLabel(op fieldOp) string {
 		return "[]uint64"
 	case opStrings:
 		return "[]string"
+	case opFloat64s:
+		return "[]float64"
+	case opFloat32s:
+		return "[]float32"
+	case opBools:
+		return "[]bool"
+	case opBytesList:
+		return "[][]byte"
 	case opStruct:
 		return "struct"
 	case opStructs:

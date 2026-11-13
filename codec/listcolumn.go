@@ -29,9 +29,11 @@ import (
 const maxListDepth = 4
 
 // listsColumn says a field is a slice of structs a table writes as a list
-// column: one held directly, of a type that is a table itself.
+// column: one held directly, of a type that is a table itself. A slice of
+// pointers to them is one too, its elements copied out through the pointers
+// and read back into one array the pointers point into (pointed.go).
 func (field *planField) listsColumn() bool {
-	return field.op == opStructs && !field.indirect && field.sub != nil
+	return (field.op == opStructs || field.op == opStructPtrs) && !field.indirect && field.sub != nil
 }
 
 // listBuffers is one level of list column's scratch: the rows' element counts,
@@ -95,7 +97,17 @@ func appendListColumn(
 	}
 	elements := unsafe.Pointer(unsafe.SliceData(level.rows))
 	at := uintptr(0)
-	for row := range rows {
+	if field.op == opStructPtrs {
+		for row := range rows {
+			held := *(*[]unsafe.Pointer)(unsafe.Add(base, uintptr(row)*stride))
+			if len(held) == 0 {
+				continue
+			}
+			copyPointed(unsafe.Add(elements, at), held, field.stride)
+			at += uintptr(len(held)) * field.stride
+		}
+	}
+	for row := 0; row < rows && field.op == opStructs; row++ {
 		held := (*sliceHeader)(unsafe.Add(base, uintptr(row)*stride))
 		bytes := uintptr(held.len) * field.stride
 		if bytes == 0 {
@@ -172,6 +184,10 @@ func readListColumn(columns listColumnReader, field *planField, stride uintptr, 
 		return
 	}
 	base := unsafe.Add(data, field.offset)
+	if field.op == opStructPtrs {
+		windowPointers(base, stride, lengths, elements, field.stride)
+		return
+	}
 	at := uintptr(0)
 	for row, n := range lengths {
 		held := (*sliceHeader)(unsafe.Add(base, uintptr(row)*stride))

@@ -179,9 +179,12 @@ Pointers distinguish "absent" from "zero":
 - A pointer to a zero value writes an explicit zero, 2 bytes. This is the only
   value the format writes just to mark presence.
 - A pointer to a slice or a map is encoded as the slice or the map.
+- A slice of pointers to structs, `[]*T`, is encoded as the `[]T` it points at:
+  the same bytes, a table past 8 rows. A nil element is written as an empty
+  struct.
 
-Map values may be scalars, strings, structs, `any`, or slices of structs or of
-scalars: `map[K][]Struct` writes each value as a list, or as a table past 8
+Map keys are strings, integers or bools. Map values may be scalars, strings,
+blobs, structs, `any`, or slices of structs or of scalars: `map[K][]Struct` writes each value as a list, or as a table past 8
 rows. `map[K]*Struct` and `map[K]*[]T` are encoded as their pointees, a nil
 value as an empty one. A type holding a map of slices uses K8.
 
@@ -416,8 +419,10 @@ free of protobuf and msgpack.
   type. Give a changed field a new id.
 - **Untagged ids depend on field names and declaration order**, as described
   under [Field ids](#field-ids-tags-are-optional).
-- **Not supported yet:** fixed-size arrays, `map[any]T`, `map[K]*scalar` and
-  map values nested deeper than a slice (`map[K][][]T`, `map[K][]*T`).
+- **Not supported yet:** fixed-size arrays, slices of slices other than
+  `[][]byte`, interfaces with methods (a protobuf `oneof`), `map[any]T`,
+  `map[bool]any`, `map[K]*scalar` and map values nested deeper than a slice
+  (`map[K][][]T`, `map[K][]*T`).
   `int` and `uint` are encoded as 64-bit.
 - **An empty slice and a nil slice are the same on the wire.** Both decode as
   nil, and a pointer to an empty slice decodes as a nil pointer.
@@ -427,6 +432,8 @@ free of protobuf and msgpack.
 - **Known implementation gaps** are listed in
   [INTERNALS §20](INTERNALS.md#20-known-gaps). For example, the Rust
   derive does not write maps of structs or of slices.
+- **Field ids stop at 4080.** A protobuf field number above that has to be
+  renumbered.
 
 ## Implementations
 

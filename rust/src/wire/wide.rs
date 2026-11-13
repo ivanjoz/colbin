@@ -455,6 +455,73 @@ impl<'a> Writer8<'a> {
         append_elements(self.buf, values, width);
     }
 
+    /// Writes an array of float64s: a VEC of each element's IEEE bits at width
+    /// 8 — or, for a long array a column is smaller on, a COL holding the count
+    /// and a float column (`wire/arrays.go`).
+    pub fn f64s(&mut self, key: u8, values: &[f64]) {
+        if values.is_empty() {
+            return;
+        }
+        if values.len() >= super::FLOAT_COLUMN_FROM {
+            let start = self.buf.len();
+            let mark = self.open_composite(key, CLASS_COL, 0);
+            super::append_count(self.buf, values.len());
+            let body = self.buf.len();
+            column::append_float64(self.buf, &super::float64_bits(values));
+            if super::keeps_column(self.buf.len() - body, values.len(), values.len() * 8) {
+                self.close(mark);
+                return;
+            }
+            self.buf.truncate(start);
+        }
+        self.fixed_vec(key, super::WIDTH_CODE_8BYTES, values.len() * 8);
+        for value in values {
+            self.buf.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+    }
+
+    /// [`Writer8::f64s`] for float32s, at width 4.
+    pub fn f32s(&mut self, key: u8, values: &[f32]) {
+        if values.is_empty() {
+            return;
+        }
+        if values.len() >= super::FLOAT_COLUMN_FROM {
+            let start = self.buf.len();
+            let mark = self.open_composite(key, CLASS_COL, 0);
+            super::append_count(self.buf, values.len());
+            let body = self.buf.len();
+            column::append_float32(self.buf, values);
+            if super::keeps_column(self.buf.len() - body, values.len(), values.len() * 4) {
+                self.close(mark);
+                return;
+            }
+            self.buf.truncate(start);
+        }
+        self.fixed_vec(key, super::WIDTH_CODE_4BYTES, values.len() * 4);
+        for value in values {
+            self.buf.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+    }
+
+    /// Writes an array of bools: a VEC of a byte an element, 0 or 1.
+    pub fn bools(&mut self, key: u8, values: &[bool]) {
+        if values.is_empty() {
+            return;
+        }
+        self.fixed_vec(key, super::WIDTH_CODE_1BYTE, values.len());
+        self.buf.extend(values.iter().map(|&value| u8::from(value)));
+    }
+
+    /// Opens a VEC of `byte_length` bytes at a fixed element width, the sign
+    /// flag set as it is for an array of magnitudes.
+    fn fixed_vec(&mut self, key: u8, width_code: u8, byte_length: usize) {
+        let (length_code, length_bytes) = if byte_length > 0xFF { (1, 4) } else { (0, 1) };
+        self.buf.push(key);
+        self.buf
+            .push(descriptor(CLASS_VEC, width_code << 2 | 0b10 | length_code));
+        append_magnitude(self.buf, byte_length as u64, length_bytes);
+    }
+
     /// Writes a count and then each element behind its own length, inside a byte
     /// length that lets the whole field be skipped.
     #[allow(clippy::cast_possible_truncation)]
@@ -612,8 +679,13 @@ impl<'a> Writer8<'a> {
 
     /// Writes a string element.
     pub fn element_string(&mut self, value: &str) {
+        self.element_blob(value.as_bytes());
+    }
+
+    /// Writes a blob map value: a string element's bytes.
+    pub fn element_blob(&mut self, value: &[u8]) {
         append_blob_header(self.buf, value.len());
-        self.buf.extend_from_slice(value.as_bytes());
+        self.buf.extend_from_slice(value);
     }
 
     /// Writes an integer column under `key`, and nothing at all when every value
@@ -740,8 +812,12 @@ impl<'a> Reader8<'a> {
     }
 
     /// Reports whether another field follows.
+    ///
+    /// A lone trailing byte is a field, not padding: the read that follows
+    /// fails on it as truncated rather than the run decoding as if it were not
+    /// there, which is what Go's reader does.
     pub fn more(&self) -> bool {
-        self.at + 1 < self.buf.len()
+        self.at < self.buf.len()
     }
 
     /// Where the cursor sits in the buffer this reader was given.
@@ -1031,6 +1107,119 @@ impl<'a> Reader8<'a> {
         let elements = &self.buf[start..start + byte_length];
         self.at = start + byte_length;
         append_array(dst, elements, width, desc & 0b10 != 0);
+    }
+
+    /// Reads an array of float64s.
+    pub fn f64s(&mut self) -> Vec<f64> {
+        self.float64s_bits()
+            .into_iter()
+            .map(f64::from_bits)
+            .collect()
+    }
+
+    /// Reads an array of float32s.
+    pub fn f32s(&mut self) -> Vec<f32> {
+        self.float32s_bits()
+            .into_iter()
+            .map(f32::from_bits)
+            .collect()
+    }
+
+    /// Reads an array of blobs, each element copied out of the message.
+    pub fn blobs(&mut self) -> Vec<Vec<u8>> {
+        self.strings_bytes()
+            .into_iter()
+            .map(<[u8]>::to_vec)
+            .collect()
+    }
+
+    /// Reads an array of float64s as their bit patterns: a VEC at eight bytes
+    /// an element, or the COL a long array may be, holding a count and a float
+    /// column (`wire/arrays.go`).
+    pub fn float64s_bits(&mut self) -> Vec<u64> {
+        if self.is_float_column() {
+            let Some(body) = self.composite_body(CLASS_COL) else {
+                return Vec::new();
+            };
+            return self.take(super::float64_column(body));
+        }
+        match self.vec_elements() {
+            Some((elements, 8)) => super::float_bits(elements, 8),
+            Some(_) => {
+                self.fail(Error::BadDescriptor);
+                Vec::new()
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// [`Reader8::float64s_bits`] for float32s, at four bytes an element.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn float32s_bits(&mut self) -> Vec<u32> {
+        if self.is_float_column() {
+            let Some(body) = self.composite_body(CLASS_COL) else {
+                return Vec::new();
+            };
+            return self.take(super::float32_column(body));
+        }
+        match self.vec_elements() {
+            Some((elements, 4)) => super::float_bits(elements, 4)
+                .into_iter()
+                .map(|bits| bits as u32)
+                .collect(),
+            Some(_) => {
+                self.fail(Error::BadDescriptor);
+                Vec::new()
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Reads an array of bools: a VEC of a byte an element, each 0 or 1.
+    pub fn bools(&mut self) -> Vec<bool> {
+        let Some((elements, width)) = self.vec_elements() else {
+            return Vec::new();
+        };
+        match super::bool_elements(elements) {
+            Some(values) if width == 1 => values,
+            _ => {
+                self.fail(Error::BadDescriptor);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Whether the field at the cursor is a COL with no detail, which under an
+    /// array of floats' key is its column.
+    fn is_float_column(&self) -> bool {
+        self.buf.get(self.at + 1).is_some_and(|&desc| {
+            desc >> 4 == 0b1000 | CLASS_COL
+                && desc & (super::nullable::NULLABLE_DETAIL | super::listcolumn::LIST_COLUMN_DETAIL)
+                    == 0
+        })
+    }
+
+    /// A VEC's elements and its element width, advancing past it.
+    fn vec_elements(&mut self) -> Option<(&'a [u8], usize)> {
+        let (byte_length, start) = self.length_of(CLASS_VEC)?;
+        let desc = self.buf[self.at + 1];
+        let width = 1_usize << ((desc >> 2) & 0b11);
+        if byte_length % width != 0 || byte_length > self.buf.len() - start {
+            self.fail(Error::Truncated);
+            return None;
+        }
+        self.at = start + byte_length;
+        Some((&self.buf[start..start + byte_length], width))
+    }
+
+    fn take<T>(&mut self, read: Result<Vec<T>, Error>) -> Vec<T> {
+        match read {
+            Ok(values) => values,
+            Err(err) => {
+                self.fail(err);
+                Vec::new()
+            }
+        }
     }
 
     /// Copies each element of a string list into a `String`.

@@ -21,14 +21,14 @@ import {
   OP_BOOL, OP_INT8, OP_INT32, OP_INT64, OP_UINT64,
   OP_FLOAT32, OP_FLOAT64, OP_STRING, OP_BYTES, OP_INT8S, OP_INT64S,
   OP_UINT64S, OP_STRINGS, OP_STRUCT, OP_STRUCTS, OP_MAP, OP_POINTER,
-  OP_ANY, OP_ANYS, OP_POINTER_STRUCT,
+  OP_ANY, OP_ANYS, OP_POINTER_STRUCT, OP_FLOAT64S, OP_FLOAT32S, OP_BOOLS, OP_BYTES_LIST,
   MAP_STRING, MAP_INT, MAP_UINT, MAP_FLOAT64, MAP_BOOL, MAP_FLOAT32, MAP_ANY, MAP_STRUCT,
-  MAP_STRUCTS, MAP_LIST, MAX_DEPTH,
+  MAP_STRUCTS, MAP_LIST, MAP_BYTES, MAX_DEPTH,
 } from './schema.ts'
 import { key, lastKey, lengthUnits, utf8, wellFormedUnits, wholeRun } from './strings.ts'
 import { object } from './shapes.ts'
 import { packed5 } from './packed5.ts'
-import { decodeInts, type Ints, pairsToFloat64, pairsToBig, pairsSafe, pairsToNum } from './column.ts'
+import { decodeInts, type Ints, pairsToFloat64, pairsToBig, pairsSafe, pairsToNum, HEADER_DECIMAL, OUT_OF_RANGE } from './column.ts'
 import { arrayFactory, rowBuilder, put, K_CONST, K_VAL, K_BOOL, K_DICT, type RowColumn } from './build.ts'
 
 /** The most rows one table may claim (`maxTableRows`). */
@@ -449,6 +449,8 @@ export class Walker {
       return packed < 0 ? utf8(b, start, start + size) : packed5(b, start, start + size, packed === 1)
     }
     if (op === OP_STRINGS) return wide ? this.#wideStrings(at + 1) : this.#narrowStrings(true)
+    if (op === OP_BYTES_LIST) return this.#blobs(wide)
+    if (op >= OP_FLOAT64S && op <= OP_BOOLS) return this.#fixedArray(op, wide)
     if (op < OP_INT8S || op > OP_UINT64S) fail(UNWALKABLE, at)
     // An integer array: its elements are signed for []int8..[]int64.
     const signed = op <= OP_INT64S
@@ -481,6 +483,134 @@ export class Walker {
       }
       out[i] = this.#laneValue(lo, hi, signed)
     }
+    return out
+  }
+
+  /** A keyed array of floats or of bools (wire/arrays.go): the elements at
+   * their own width — eight bytes, four, or a byte of 0 or 1 — or, for floats,
+   * the column a long array may be: a count and a float column, under COL at
+   * eight key bits and under the length form's width 1 at four. */
+  #fixedArray(op: number, wide: boolean): unknown[] {
+    const at = this.#p
+    const b = this.#b
+    const float = op !== OP_BOOLS
+    let length: number
+    let width: number
+    let column = false
+    if (wide) {
+      if (at + 1 >= this.#e) fail(TRUNCATED, at)
+      const desc = b[at + 1]
+      column = float && desc >> 4 === (8 | CLASS_COL) && (desc & 0x0c) === 0
+      length = this.#wideBody(column ? CLASS_COL : CLASS_VEC)
+      width = 1 << ((desc >> 2) & 3)
+    } else {
+      length = this.#nhead()
+      if (this.#nib < NIB_LENGTH) fail(BAD_DESCRIPTOR, at)
+      width = 1 << (this.#nib & 3)
+      column = float && width === 1
+    }
+    const start = wide ? this.#ls : this.#fs
+    const end = start + length
+    if (column) return this.#floatColumn(op, start, end)
+    const want = op === OP_FLOAT64S ? 8 : op === OP_FLOAT32S ? 4 : 1
+    if (width !== want) fail(BAD_DESCRIPTOR, at)
+    if (length % width !== 0) fail(TRUNCATED, at)
+    const count = length / width
+    const out: unknown[] = new Array(count)
+    if (op === OP_BOOLS) {
+      for (let i = 0; i < count; i++) {
+        const raw = b[start + i]
+        if (raw > 1) fail(BAD_DESCRIPTOR, start + i)
+        out[i] = raw === 1
+      }
+      return out
+    }
+    const view = new DataView(b.buffer, b.byteOffset + start, length)
+    if (op === OP_FLOAT64S) for (let i = 0; i < count; i++) out[i] = view.getFloat64(i * 8, true)
+    else for (let i = 0; i < count; i++) out[i] = shortest32(view.getFloat32(i * 4, true))
+    return out
+  }
+
+  /** A float array's column in `[start, end)`: its count, refused past 64
+   * values for each byte of the column (nothing else bounds it), and then the
+   * column a table's float column is. A float32's is either decimal, whose
+   * float64s must each be a float32's, or its bit patterns as an int32 column. */
+  #floatColumn(op: number, start: number, end: number): unknown[] {
+    const b = this.#b
+    const cursor = this.#p
+    const count = this.#count(start, end)
+    const from = this.#p
+    this.#p = cursor
+    if (count > (end - from) * 64) fail(TRUNCATED, start)
+    if (count === 0) return []
+    const decimal = b[from] === HEADER_DECIMAL
+    const out: unknown[] = new Array(count)
+    if (op === OP_FLOAT64S || decimal) {
+      const ints = decodeInts(b, from, end, count, true)
+      const pairs = ints.pairs as Uint32Array
+      const floats = pairsToFloat64(pairs)
+      if (op === OP_FLOAT64S) {
+        for (let i = 0; i < count; i++) out[i] = floats[i]
+        return out
+      }
+      for (let i = 0; i < count; i++) {
+        const value = floats[i]
+        const narrow = Math.fround(value)
+        if (value - value !== 0) {
+          // A NaN or an infinity must be a widened float32's: nothing in the
+          // 29 mantissa bits a float32 does not have.
+          if ((pairs[2 * i] & 0x1fffffff) !== 0) fail(OUT_OF_RANGE, from)
+        } else if (narrow - narrow !== 0) fail(OUT_OF_RANGE, from)
+        out[i] = shortest32(narrow)
+      }
+      return out
+    }
+    const ints = decodeInts(b, from, end, count, false)
+    const bits = ints.num
+    if (bits === null) fail(OUT_OF_RANGE, from)
+    for (let i = 0; i < count; i++) {
+      const pattern = bits[i]
+      if (pattern < -2147483648 || pattern > 2147483647) fail(OUT_OF_RANGE, from)
+      scratch.setInt32(0, pattern, true)
+      out[i] = shortest32(scratch.getFloat32(0, true))
+    }
+    return out
+  }
+
+  /** A keyed array of blobs: a string array's bytes, each element a copy. */
+  #blobs(wide: boolean): Uint8Array[] {
+    const at = this.#p
+    const b = this.#b
+    const out: Uint8Array[] = []
+    let p: number
+    let end: number
+    let count = -1
+    if (wide) {
+      end = this.#span(at + 1, CLASS_LIST)
+      count = this.#count(this.#ls, end)
+      p = this.#p
+      if (count > end - p) fail(TRUNCATED, at)
+    } else {
+      const size = this.#nhead()
+      const nib = this.#nib
+      p = this.#fs
+      end = p + size
+      if (nib === NIB_LENGTH + 2) return [b.slice(p, end)]
+      if (nib !== NIB_LENGTH) fail(BAD_DESCRIPTOR, at)
+    }
+    while (count < 0 ? p < end : out.length < count) {
+      if (p >= end) fail(TRUNCATED, p)
+      let size = b[p++]
+      if (size === 0xff) {
+        if (p + 4 > end) fail(TRUNCATED, p)
+        size = (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0
+        p += 4
+      }
+      if (size > end - p) fail(TRUNCATED, p)
+      out.push(b.slice(p, p + size))
+      p += size
+    }
+    this.#p = end
     return out
   }
 
@@ -725,7 +855,7 @@ export class Walker {
     else if (this.#composite(0b0101) === 2) count = 1 // 00 counted, 10 one entry
     const start = wide ? this.#ls : this.#fs
     const end = this.#p
-    if (keyKind > MAP_UINT) fail(UNWALKABLE, start)
+    if (keyKind > MAP_UINT && keyKind !== MAP_BOOL) fail(UNWALKABLE, start)
     if (valueKind === MAP_ANY) return this.#entries(start, end)
     const saved = this.#e
     this.#e = end
@@ -744,7 +874,12 @@ export class Walker {
         h = Math.imul(h ^ lastKey.slot, 0x9e3779b1)
       } else {
         this.#element(keyKind === MAP_INT, wide)
-        keys[i] = String(this.#laneValue(this.#lo, this.#hi, keyKind === MAP_INT))
+        keys[i] =
+          keyKind === MAP_BOOL
+            ? this.#hi === 0 && this.#lo === 1
+              ? 'true'
+              : 'false'
+            : String(this.#laneValue(this.#lo, this.#hi, keyKind === MAP_INT))
       }
       values[i] = this.#mapValue(valueKind, field.sub, field.listKind, wide)
     }
@@ -769,6 +904,8 @@ export class Walker {
         this.#element(false, wide)
         if (kind === MAP_BOOL) return this.#hi === 0 && this.#lo === 1
         return kind === MAP_FLOAT32 ? this.#reversed32() : this.#reversed64()
+      case MAP_BYTES:
+        return this.#elementBlob(wide)
       case MAP_STRUCT: {
         if (sub < 0) fail(BAD_SECTION, this.#p)
         if (wide) return this.#elementStruct(sub)
@@ -820,6 +957,20 @@ export class Walker {
   /** A key-less string element at the cursor; with `asKey`, through the key
    * cache. */
   #elementString(wide: boolean, asKey: boolean): string {
+    const start = this.#elementSpan(wide)
+    const end = this.#p
+    return asKey ? key(this.#b, start, end) : utf8(this.#b, start, end)
+  }
+
+  /** A blob map value: a string element's bytes, copied. */
+  #elementBlob(wide: boolean): Uint8Array {
+    const start = this.#elementSpan(wide)
+    return this.#b.slice(start, this.#p)
+  }
+
+  /** Steps over a string element and returns where its bytes start; they end
+   * at the cursor. */
+  #elementSpan(wide: boolean): number {
     const p = this.#p
     let start: number
     let end: number
@@ -836,7 +987,7 @@ export class Walker {
       end = start + this.#lo
     }
     this.#p = end
-    return asKey ? key(this.#b, start, end) : utf8(this.#b, start, end)
+    return start
   }
 
   // ---- wide forms -----------------------------------------------------------

@@ -177,6 +177,9 @@ type columnBuffers struct {
 	usedNullStrings                   int
 	// lists is the list columns' scratch, a level per depth. See listcolumn.go.
 	lists []listBuffers
+	// pointed is the rows of the slices of pointers being written, a stack of
+	// them. See pointed.go.
+	pointed []uint64
 }
 
 var columnPool sync.Pool // *columnBuffers
@@ -244,6 +247,10 @@ func (buf *scratch) release() {
 			level.lengths = nil
 		}
 	}
+	if !keepPooled(cap(columns.pointed), 0) {
+		columns.pointed = nil
+	}
+	columns.pointed = columns.pointed[:0]
 	columns.usedInts, columns.usedStrings, columns.usedInts32, columns.usedNullStrings = 0, 0, 0, 0
 	columnPool.Put(columns)
 }
@@ -397,7 +404,7 @@ func appendColumns(
 	}
 	for index := range plan.fields {
 		column := &plan.fields[index]
-		if column.op == opStruct || column.op == opStructs {
+		if column.op == opStruct || column.op == opStructs || column.op == opStructPtrs {
 			continue // a page link or a list column, written after the rest
 		}
 		if column.op == opPointer {
@@ -504,7 +511,7 @@ func gatherTable(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scratc
 		for index := range plan.fields {
 			column := &plan.fields[index]
 			switch {
-			case column.op == opPointer, column.op == opStruct, column.op == opStructs:
+			case column.op == opPointer, column.op == opStruct, column.op == opStructs, column.op == opStructPtrs:
 				// Gathered by gatherPointerChunk below, into buffers of their
 				// own and with the rest of the chunk still in cache, a page
 				// link by its page's gatherTable (appendPageTable) and a list
@@ -582,7 +589,7 @@ func gatherScanned(plan *typePlan, slice *sliceHeader, stride uintptr, buf *scra
 	for index := range plan.fields {
 		field := &plan.fields[index]
 		switch {
-		case field.op == opPointer, field.op == opStruct, field.op == opStructs:
+		case field.op == opPointer, field.op == opStruct, field.op == opStructs, field.op == opStructPtrs:
 		case field.op == opString:
 			payloads[stringColumn] = gatherStrings(strings[stringAt:stringAt+rows], slice, stride, field.offset)
 			stringAt += rows
@@ -609,7 +616,7 @@ const prefetchDist = 8
 func (plan *typePlan) intWidths() (narrow, wide int) {
 	for index := range plan.fields {
 		switch op := plan.fields[index].op; {
-		case op == opString, op == opPointer, op == opStruct, op == opStructs:
+		case op == opString, op == opPointer, op == opStruct, op == opStructs, op == opStructPtrs:
 		case op.fitsInt32():
 			narrow++
 		default:
@@ -656,7 +663,7 @@ func gather32[T any](dst []int32, base unsafe.Pointer, stride uintptr, widen fun
 func (plan *typePlan) columnCounts() (ints, strings int) {
 	for index := range plan.fields {
 		switch plan.fields[index].op {
-		case opPointer, opStruct, opStructs:
+		case opPointer, opStruct, opStructs, opStructPtrs:
 		case opString:
 			strings++
 		default:

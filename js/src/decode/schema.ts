@@ -34,7 +34,12 @@ export const OP_POINTER = 24
 export const OP_ANY = 25
 export const OP_ANYS = 26
 export const OP_POINTER_STRUCT = 27
-const OP_COUNT = 28
+// Arrays of floats, of bools and of blobs (wire/arrays.go).
+export const OP_FLOAT64S = 28
+export const OP_FLOAT32S = 29
+export const OP_BOOLS = 30
+export const OP_BYTES_LIST = 31
+const OP_COUNT = 32
 
 // Map kinds (§6.4).
 export const MAP_STRING = 0
@@ -47,7 +52,9 @@ export const MAP_ANY = 6
 export const MAP_STRUCT = 7
 export const MAP_STRUCTS = 8
 export const MAP_LIST = 9
-const MAP_KIND_COUNT = 10
+/** A blob value: a string element's bytes that are not text. */
+export const MAP_BYTES = 10
+const MAP_KIND_COUNT = 11
 
 const FLAG_WIDE = 0x01
 const FLAG_ENVELOPE = 0x02

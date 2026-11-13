@@ -126,6 +126,72 @@ struct Order {
     note: String,
 }
 
+/// The arrays that are not integers or strings. A long array of floats is a
+/// column when that is smaller (`wire/arrays.go`).
+#[derive(Colbin, Debug, PartialEq, Clone)]
+struct FixedArrays {
+    #[cb(1)]
+    doubles: Vec<f64>,
+    #[cb(2)]
+    singles: Vec<f32>,
+    #[cb(3)]
+    flags: Vec<bool>,
+    #[cb(4)]
+    blobs: Vec<Vec<u8>>,
+    #[cb(5)]
+    tail: i32,
+}
+
+#[derive(Colbin, Debug, PartialEq)]
+struct FixedArraysWide {
+    #[cb(20)]
+    doubles: Vec<f64>,
+    #[cb(21)]
+    singles: Vec<f32>,
+    #[cb(22)]
+    flags: Vec<bool>,
+    #[cb(23)]
+    blobs: Vec<Vec<u8>>,
+    #[cb(24)]
+    tail: i32,
+}
+
+impl From<FixedArrays> for FixedArraysWide {
+    fn from(value: FixedArrays) -> Self {
+        Self {
+            doubles: value.doubles,
+            singles: value.singles,
+            flags: value.flags,
+            blobs: value.blobs,
+            tail: value.tail,
+        }
+    }
+}
+
+#[derive(Colbin, Debug, PartialEq)]
+struct BlobMaps {
+    #[cb(1)]
+    by_flag: BTreeMap<bool, String>,
+    #[cb(2)]
+    chunks: BTreeMap<String, Vec<u8>>,
+    #[cb(3)]
+    sizes: BTreeMap<bool, u32>,
+    #[cb(4)]
+    blobs: BTreeMap<i32, Vec<u8>>,
+}
+
+#[derive(Colbin, Debug, PartialEq)]
+struct BlobMapsWide {
+    #[cb(20)]
+    by_flag: BTreeMap<bool, String>,
+    #[cb(21)]
+    chunks: BTreeMap<String, Vec<u8>>,
+    #[cb(22)]
+    sizes: BTreeMap<bool, u32>,
+    #[cb(23)]
+    blobs: BTreeMap<i32, Vec<u8>>,
+}
+
 #[derive(Colbin, Debug, PartialEq)]
 struct Maps {
     #[cb(1)]
@@ -381,6 +447,113 @@ fn array_cases() {
         &Arrays {
             texts: vec!["a".repeat(300), "short".into()],
             ..Arrays::colbin_zero()
+        },
+    );
+}
+
+fn fixed_arrays() -> FixedArrays {
+    FixedArrays {
+        doubles: vec![1.5, -2.0, 0.0, 1e300, 0.1],
+        singles: vec![0.25, -3.0, 16_777_216.0],
+        flags: vec![true, false, false, true],
+        blobs: vec![vec![0x00, 0x7F, 0x80, 0xFF], vec![], b"plain".to_vec()],
+        tail: 5,
+    }
+}
+
+/// Go's `floatColumns`: decimals, with values no exponent reaches.
+fn float_columns(count: usize) -> FixedArrays {
+    let mut value = FixedArrays {
+        tail: 9,
+        ..FixedArrays::colbin_zero()
+    };
+    for index in 0..count {
+        value.doubles.push((1000 + index * 37 % 911) as f64 / 100.0);
+        value.singles.push((200 + index * 13 % 450) as f32 / 10.0);
+    }
+    value.doubles[3] = 1e300;
+    value.doubles[count - 1] = 1.0 / 3.0;
+    value.singles[5] = 1.0_f32 / 3.0;
+    value.singles[count - 2] = -16_777_216.0;
+    value
+}
+
+/// Go's `noiseFloats`.
+fn noise_floats(count: usize) -> FixedArrays {
+    let mut value = FixedArrays::colbin_zero();
+    let mut state = 28_u64;
+    for _ in 0..count {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        value
+            .doubles
+            .push((state >> 11) as f64 / (1_u64 << 53) as f64);
+        value
+            .singles
+            .push((state >> 40) as f32 / (1_u32 << 24) as f32);
+    }
+    value
+}
+
+fn constant_floats(count: usize) -> FixedArrays {
+    FixedArrays {
+        doubles: vec![2.5; count],
+        singles: vec![2.5; count],
+        ..FixedArrays::colbin_zero()
+    }
+}
+
+#[test]
+fn fixed_array_cases() {
+    check("fixed.empty", &FixedArrays::colbin_zero());
+    check("fixed.mixed", &fixed_arrays());
+    check("fixed.mixed wide", &FixedArraysWide::from(fixed_arrays()));
+    check(
+        "fixed.one blob",
+        &FixedArrays {
+            blobs: vec![vec![7, 8]],
+            ..FixedArrays::colbin_zero()
+        },
+    );
+    check("fixed.under the threshold", &float_columns(127));
+    check("fixed.columns", &float_columns(128));
+    check("fixed.columns long", &float_columns(300));
+    check(
+        "fixed.columns wide",
+        &FixedArraysWide::from(float_columns(300)),
+    );
+    check("fixed.noise", &noise_floats(200));
+    check(
+        "fixed.noise wide",
+        &FixedArraysWide::from(noise_floats(200)),
+    );
+    check("fixed.constant", &constant_floats(500));
+    check(
+        "fixed.constant wide",
+        &FixedArraysWide::from(constant_floats(500)),
+    );
+}
+
+#[test]
+fn blob_map_cases() {
+    check("blobmaps.empty", &BlobMaps::colbin_zero());
+    check(
+        "blobmaps.one entry each",
+        &BlobMaps {
+            by_flag: BTreeMap::from([(true, "yes".to_owned())]),
+            chunks: BTreeMap::from([("a".to_owned(), vec![1, 2, 3])]),
+            sizes: BTreeMap::from([(false, 1 << 31)]),
+            blobs: BTreeMap::from([(-1, "blob".repeat(80).into_bytes())]),
+        },
+    );
+    check(
+        "blobmaps.one entry each wide",
+        &BlobMapsWide {
+            by_flag: BTreeMap::from([(true, "yes".to_owned())]),
+            chunks: BTreeMap::from([("a".to_owned(), vec![1, 2, 3])]),
+            sizes: BTreeMap::from([(false, 1 << 31)]),
+            blobs: BTreeMap::from([(-1, "blob".repeat(80).into_bytes())]),
         },
     );
 }

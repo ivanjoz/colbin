@@ -182,6 +182,62 @@ type MapLists struct {
 	Flags  map[string]*[]bool   `cb:"7"`
 }
 
+// FixedArrays is the arrays that are not integers or strings: floats and bools
+// at their own width, and blobs as a string array's bytes. A long array of
+// floats is a column instead (wire/arrays.go).
+type FixedArrays struct {
+	Doubles []float64 `cb:"1"`
+	Singles []float32 `cb:"2"`
+	Flags   []bool    `cb:"3"`
+	Blobs   [][]byte  `cb:"4"`
+	Tail    int32     `cb:"5"`
+}
+
+// FixedArraysWide is FixedArrays in a run of eight-bit keys.
+type FixedArraysWide struct {
+	Doubles []float64 `cb:"20"`
+	Singles []float32 `cb:"21"`
+	Flags   []bool    `cb:"22"`
+	Blobs   [][]byte  `cb:"23"`
+	Tail    int32     `cb:"24"`
+}
+
+// BoolMaps is a map keyed by a bool and maps of blobs.
+type BoolMaps struct {
+	ByFlag map[bool]string   `cb:"1"`
+	Chunks map[string][]byte `cb:"2"`
+	Sizes  map[bool]uint32   `cb:"3"`
+}
+
+// BoolMapsWide is BoolMaps in a run of eight-bit keys.
+type BoolMapsWide struct {
+	ByFlag map[bool]string   `cb:"20"`
+	Chunks map[string][]byte `cb:"21"`
+	Sizes  map[bool]uint32   `cb:"22"`
+}
+
+func fixedArrays() FixedArrays {
+	return FixedArrays{
+		Doubles: []float64{1.5, -2, 0, 1e300, 0.1},
+		Singles: []float32{0.25, -3, 21.3},
+		Flags:   []bool{true, false, false, true},
+		Blobs:   [][]byte{{0x00, 0x7F, 0x80, 0xFF}, {}, []byte("plain")},
+		Tail:    5,
+	}
+}
+
+// floatColumns is arrays of floats long enough to be columns: decimals, and a
+// value in each that no exponent reaches, which the column carries as bits.
+func floatColumns(count int) FixedArrays {
+	value := FixedArrays{Tail: 9}
+	for index := range count {
+		value.Doubles = append(value.Doubles, float64(1000+index*37%911)/100)
+		value.Singles = append(value.Singles, float32(200+index*13%450)/10)
+	}
+	value.Doubles[3], value.Singles[5] = 1.0/3, float32(1)/3
+	return value
+}
+
 // Wide has an id past sixteen, whose key four bits cannot carry, so the type
 // takes eight-bit keys. It is one of three things that do: the others are a
 // field with no id in its tag, whose key is a hash of its name and lands
@@ -390,6 +446,20 @@ func types() []typeCase {
 		describe("wide", "an id past sixteen, which four key bits cannot carry; an untagged field and an `any` field are the other two things that widen a key", &Wide{
 			First: 1, Text: "far", Far: -5,
 		}),
+		fixedCase("fixed-arrays", "arrays of floats, bools and blobs in a four-bit run", fixedArrays(), false),
+		fixedCase("fixed-arrays-wide", "arrays of floats, bools and blobs in an eight-bit run", fixedArrays(), true),
+		fixedCase("float-columns", "arrays of floats long enough to be columns", floatColumns(160), false),
+		fixedCase("float-columns-wide", "the same columns in an eight-bit run", floatColumns(160), true),
+		describe("bool-maps", "a map keyed by a bool and maps of blobs in a four-bit run", &BoolMaps{
+			ByFlag: map[bool]string{true: "yes", false: "no"},
+			Chunks: map[string][]byte{"a": {1, 2, 3}, "empty": {}},
+			Sizes:  map[bool]uint32{true: 1 << 31},
+		}),
+		describe("bool-maps-wide", "the same maps in an eight-bit run", &BoolMapsWide{
+			ByFlag: map[bool]string{true: "yes", false: "no"},
+			Chunks: map[string][]byte{"a": {1, 2, 3}, "empty": {}},
+			Sizes:  map[bool]uint32{true: 1 << 31},
+		}),
 		describe("corpus-user", "the ordinary flat record", &generated.Users[0]),
 		describe("corpus-product", "strings, an array of them, and a price in cents", &generated.Products[0]),
 		describe("corpus-store", "the only corpus table with floats in it", &generated.Stores[0]),
@@ -407,6 +477,15 @@ func types() []typeCase {
 				&Ledger{ID: 10, Cells: makeWideCells(10)})
 		}),
 	}
+}
+
+// fixedCase describes arrays at either key width.
+func fixedCase(name, about string, value FixedArrays, wide bool) typeCase {
+	if wide {
+		asWide := FixedArraysWide(value)
+		return describe(name, about, &asWide)
+	}
+	return describe(name, about, &value)
 }
 
 // grouped describes a case with tables grouped past four rows, so that a

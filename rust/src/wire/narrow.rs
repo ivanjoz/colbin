@@ -373,6 +373,69 @@ impl<'a> Writer<'a> {
         append_elements(self.buf, values, width);
     }
 
+    /// Writes an array of float64s: each element's IEEE bits, little-endian, at
+    /// width 8 — or, for a long array a column is smaller on, the length form
+    /// at width 1 holding the count and a float column (`wire/arrays.go`).
+    pub fn f64s(&mut self, key: u8, values: &[f64]) {
+        if values.is_empty() {
+            return;
+        }
+        if values.len() >= super::FLOAT_COLUMN_FROM {
+            let start = self.buf.len();
+            let mark = self.open_composite(key, super::WIDTH_CODE_1BYTE);
+            super::append_count(self.buf, values.len());
+            let body = self.buf.len();
+            column::append_float64(self.buf, &super::float64_bits(values));
+            if super::keeps_column(self.buf.len() - body, values.len(), values.len() * 8) {
+                self.close(mark);
+                return;
+            }
+            self.buf.truncate(start);
+        }
+        self.buf
+            .push(key << 4 | NIBBLE_LENGTH | super::WIDTH_CODE_8BYTES);
+        append_length(self.buf, values.len() * 8);
+        for value in values {
+            self.buf.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+    }
+
+    /// [`Writer::f64s`] for float32s, at width 4.
+    pub fn f32s(&mut self, key: u8, values: &[f32]) {
+        if values.is_empty() {
+            return;
+        }
+        if values.len() >= super::FLOAT_COLUMN_FROM {
+            let start = self.buf.len();
+            let mark = self.open_composite(key, super::WIDTH_CODE_1BYTE);
+            super::append_count(self.buf, values.len());
+            let body = self.buf.len();
+            column::append_float32(self.buf, values);
+            if super::keeps_column(self.buf.len() - body, values.len(), values.len() * 4) {
+                self.close(mark);
+                return;
+            }
+            self.buf.truncate(start);
+        }
+        self.buf
+            .push(key << 4 | NIBBLE_LENGTH | super::WIDTH_CODE_4BYTES);
+        append_length(self.buf, values.len() * 4);
+        for value in values {
+            self.buf.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+    }
+
+    /// Writes an array of bools at a byte an element, 0 or 1.
+    pub fn bools(&mut self, key: u8, values: &[bool]) {
+        if values.is_empty() {
+            return;
+        }
+        self.buf
+            .push(key << 4 | NIBBLE_LENGTH | super::WIDTH_CODE_1BYTE);
+        append_length(self.buf, values.len());
+        self.buf.extend(values.iter().map(|&value| u8::from(value)));
+    }
+
     /// Writes each element behind its own size, and nothing when the array is
     /// empty.
     ///
@@ -624,10 +687,15 @@ impl<'a> Writer<'a> {
 
     /// Writes a string map key or value.
     pub fn element_string(&mut self, value: &str) {
+        self.element_blob(value.as_bytes());
+    }
+
+    /// Writes a blob map value: a string element's bytes.
+    pub fn element_blob(&mut self, value: &[u8]) {
         let (code, width) = length_code_for(value.len() as u64);
         self.buf.push(code);
         append_magnitude(self.buf, value.len() as u64, width);
-        self.buf.extend_from_slice(value.as_bytes());
+        self.buf.extend_from_slice(value);
     }
 
     /// Writes an integer column under `key` for a narrow-keyed table, and
@@ -1128,6 +1196,106 @@ impl<'a> Reader<'a> {
         dst
     }
 
+    /// Reads an array of float64s.
+    pub fn f64s(&mut self) -> Vec<f64> {
+        self.float64s_bits()
+            .into_iter()
+            .map(f64::from_bits)
+            .collect()
+    }
+
+    /// Reads an array of float32s.
+    pub fn f32s(&mut self) -> Vec<f32> {
+        self.float32s_bits()
+            .into_iter()
+            .map(f32::from_bits)
+            .collect()
+    }
+
+    /// Reads an array of blobs, each element copied out of the message.
+    pub fn blobs(&mut self) -> Vec<Vec<u8>> {
+        self.strings_bytes()
+            .into_iter()
+            .map(<[u8]>::to_vec)
+            .collect()
+    }
+
+    /// Reads an array of float64s as their bit patterns: eight bytes an element,
+    /// or the column a long array may be, which is the length form at width 1
+    /// holding a count and a float column (`wire/arrays.go`).
+    pub fn float64s_bits(&mut self) -> Vec<u64> {
+        let Some((elements, width)) = self.fixed_elements() else {
+            return Vec::new();
+        };
+        match width {
+            1 => self.take(super::float64_column(elements)),
+            8 => super::float_bits(elements, 8),
+            _ => {
+                self.fail(Error::BadEscape);
+                Vec::new()
+            }
+        }
+    }
+
+    /// [`Reader::float64s_bits`] for float32s, at four bytes an element.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn float32s_bits(&mut self) -> Vec<u32> {
+        let Some((elements, width)) = self.fixed_elements() else {
+            return Vec::new();
+        };
+        match width {
+            1 => self.take(super::float32_column(elements)),
+            4 => super::float_bits(elements, 4)
+                .into_iter()
+                .map(|bits| bits as u32)
+                .collect(),
+            _ => {
+                self.fail(Error::BadEscape);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Reads an array of bools: a byte of 0 or 1 an element.
+    pub fn bools(&mut self) -> Vec<bool> {
+        let Some((elements, width)) = self.fixed_elements() else {
+            return Vec::new();
+        };
+        match super::bool_elements(elements) {
+            Some(values) if width == 1 => values,
+            _ => {
+                self.fail(Error::BadEscape);
+                Vec::new()
+            }
+        }
+    }
+
+    /// The elements of an array in the length form and the width its flags
+    /// name, which is checked to divide them.
+    fn fixed_elements(&mut self) -> Option<(&'a [u8], usize)> {
+        let (nibble, elements) = self.field()?;
+        if nibble < NIBBLE_LENGTH {
+            self.fail(Error::BadEscape);
+            return None;
+        }
+        let width = 1_usize << (nibble & FLAG_MASK);
+        if elements.len() % width != 0 {
+            self.fail(Error::Truncated);
+            return None;
+        }
+        Some((elements, width))
+    }
+
+    fn take<T>(&mut self, read: Result<Vec<T>, Error>) -> Vec<T> {
+        match read {
+            Ok(values) => values,
+            Err(err) => {
+                self.fail(err);
+                Vec::new()
+            }
+        }
+    }
+
     /// Returns each element of a string array as a sub-slice of the message,
     /// without copying.
     ///
@@ -1395,6 +1563,32 @@ impl<'a> Reader<'a> {
             return magnitude as i64;
         }
         (magnitude as i64).wrapping_neg()
+    }
+
+    /// Reads a blob map value: a string element's bytes, as a sub-slice of the
+    /// message and with no claim that they are text.
+    pub fn element_blob(&mut self) -> &'a [u8] {
+        let Some(code) = self.element_code() else {
+            return &[];
+        };
+        let width = LENGTH_WIDTH[usize::from(code & 0b11)];
+        let rest = &self.buf[self.at + 1..];
+        if rest.len() < width {
+            self.fail(Error::Truncated);
+            return &[];
+        }
+        let size = le_uint(rest, width);
+        let start = self.at + 1 + width;
+        let Ok(size) = usize::try_from(size) else {
+            self.fail(Error::SizeTooLarge);
+            return &[];
+        };
+        if size > self.buf.len() - start {
+            self.fail(Error::Truncated);
+            return &[];
+        }
+        self.at = start + size;
+        &self.buf[start..start + size]
     }
 
     /// Reads a string map key or value.

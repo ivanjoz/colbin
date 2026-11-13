@@ -1000,6 +1000,145 @@ type NarrowMaps struct {
 	Empty  map[string]Inner   `cb:"12"`
 }
 
+// FixedArrays is the arrays that are not integers or strings: floats and bools
+// at their own width, and blobs as a string array's bytes (wire/arrays.go).
+type FixedArrays struct {
+	Doubles []float64 `cb:"1"`
+	Singles []float32 `cb:"2"`
+	Flags   []bool    `cb:"3"`
+	Blobs   [][]byte  `cb:"4"`
+	Tail    int32     `cb:"5"`
+}
+
+// FixedArraysWide is FixedArrays in a run of eight-bit keys.
+type FixedArraysWide struct {
+	Doubles []float64 `cb:"20"`
+	Singles []float32 `cb:"21"`
+	Flags   []bool    `cb:"22"`
+	Blobs   [][]byte  `cb:"23"`
+	Tail    int32     `cb:"24"`
+}
+
+func fixedArrays() FixedArrays {
+	return FixedArrays{
+		Doubles: []float64{1.5, -2, 0, 1e300, 0.1},
+		Singles: []float32{0.25, -3, 16777216},
+		Flags:   []bool{true, false, false, true},
+		Blobs:   [][]byte{{0x00, 0x7F, 0x80, 0xFF}, {}, []byte("plain")},
+		Tail:    5,
+	}
+}
+
+// floatColumns is arrays of floats long enough to be columns: decimals, with a
+// value or two no exponent reaches, which a column carries as their bits.
+func floatColumns(count int) FixedArrays {
+	value := FixedArrays{Tail: 9}
+	for index := range count {
+		value.Doubles = append(value.Doubles, float64(1000+index*37%911)/100)
+		value.Singles = append(value.Singles, float32(200+index*13%450)/10)
+	}
+	value.Doubles[3], value.Doubles[count-1] = 1e300, 1.0/3
+	value.Singles[5], value.Singles[count-2] = float32(1)/3, -16777216
+	return value
+}
+
+// floatBits is arrays of floats past the threshold that no column is smaller
+// on, so they stay their bits.
+func floatBits(count int) FixedArrays {
+	random := rand.New(rand.NewSource(28))
+	value := FixedArrays{}
+	for range count {
+		value.Doubles = append(value.Doubles, random.NormFloat64())
+		value.Singles = append(value.Singles, float32(random.NormFloat64()))
+	}
+	return value
+}
+
+// noiseFloats is arrays of floats no column is smaller on, from a generator the
+// Rust tests repeat: every value is an integer over a power of two, so both
+// sides compute the same bits.
+func noiseFloats(count int) FixedArrays {
+	value := FixedArrays{}
+	state := uint64(28)
+	for range count {
+		state = state*6364136223846793005 + 1442695040888963407
+		value.Doubles = append(value.Doubles, float64(state>>11)/(1<<53))
+		value.Singles = append(value.Singles, float32(state>>40)/(1<<24))
+	}
+	return value
+}
+
+// constantFloats is arrays a column would be far smaller on, which stay their
+// bits: a column holds at most 64 values for each of its bytes.
+func constantFloats(count int) FixedArrays {
+	value := FixedArrays{}
+	for range count {
+		value.Doubles = append(value.Doubles, 2.5)
+		value.Singles = append(value.Singles, 2.5)
+	}
+	return value
+}
+
+// BlobMaps is the maps 0.13 added, in the shapes the Rust derive carries: a
+// bool key, and a blob value.
+type BlobMaps struct {
+	ByFlag map[bool]string   `cb:"1"`
+	Chunks map[string][]byte `cb:"2"`
+	Sizes  map[bool]uint32   `cb:"3"`
+	Blobs  map[int32][]byte  `cb:"4"`
+}
+
+// BlobMapsWide is BlobMaps in a run of eight-bit keys.
+type BlobMapsWide struct {
+	ByFlag map[bool]string   `cb:"20"`
+	Chunks map[string][]byte `cb:"21"`
+	Sizes  map[bool]uint32   `cb:"22"`
+	Blobs  map[int32][]byte  `cb:"23"`
+}
+
+func blobMaps() BlobMaps {
+	return BlobMaps{
+		ByFlag: map[bool]string{true: "yes"},
+		Chunks: map[string][]byte{"a": {1, 2, 3}},
+		Sizes:  map[bool]uint32{false: 1 << 31},
+		Blobs:  map[int32][]byte{-1: []byte(repeat("blob", 80))},
+	}
+}
+
+// BoolMaps is the maps 0.13 added: a bool key, and a blob value.
+type BoolMaps struct {
+	ByFlag map[bool]string   `cb:"1"`
+	Chunks map[string][]byte `cb:"2"`
+	Leaves map[bool]Inner    `cb:"3"`
+	Sizes  map[bool]uint32   `cb:"4"`
+	Blobs  map[int32][]byte  `cb:"5"`
+	One    map[bool][]byte   `cb:"6"`
+}
+
+// BoolMapsWide is BoolMaps in a run of eight-bit keys, where a map's entries
+// are key-less values.
+type BoolMapsWide struct {
+	ByFlag map[bool]string   `cb:"20"`
+	Chunks map[string][]byte `cb:"21"`
+	Leaves map[bool]Inner    `cb:"22"`
+	Sizes  map[bool]uint32   `cb:"23"`
+	Blobs  map[int32][]byte  `cb:"24"`
+	One    map[bool][]byte   `cb:"25"`
+	Lists  map[bool][]string `cb:"26"`
+	Rows   map[bool][]Inner  `cb:"27"`
+}
+
+func boolMaps() BoolMaps {
+	return BoolMaps{
+		ByFlag: map[bool]string{true: "yes", false: "no"},
+		Chunks: map[string][]byte{"a": {1, 2, 3}, "empty": {}, "long": []byte(repeat("blob", 80))},
+		Leaves: map[bool]Inner{true: {SKU: "T", Qty: 1}, false: {}},
+		Sizes:  map[bool]uint32{false: 0, true: 1 << 31},
+		Blobs:  map[int32][]byte{-1: {0xFF}, 7: {0x00}},
+		One:    map[bool][]byte{true: {9}},
+	}
+}
+
 func walks() []walkCase {
 	var out []walkCase
 	add := func(name, about string, value any) {
@@ -1102,6 +1241,31 @@ func walks() []walkCase {
 			Wide:   map[int32]WideLine{-1: {SKU: "W", Cents: 1 << 40}, 7: {Quantity: 7}},
 			One:    map[string]string{"only": "one"},
 			Ptrs:   map[string]*Inner{"set": {SKU: "P"}, "nil": nil},
+		})
+	fixed := fixedArrays()
+	add("doc.fixed-arrays", "arrays of floats, bools and blobs in a four-bit run", &fixed)
+	fixedWide := FixedArraysWide(fixed)
+	add("doc.fixed-arrays-wide", "arrays of floats, bools and blobs in an eight-bit run", &fixedWide)
+	add("doc.fixed-arrays-absent", "the same arrays empty, so absent", &FixedArrays{Tail: 1})
+	for _, count := range []int{128, 300} {
+		columns := floatColumns(count)
+		add(fmt.Sprintf("doc.float-columns-%d", count),
+			"arrays of floats long enough to be columns, with values the exponent does not reach", &columns)
+		columnsWide := FixedArraysWide(columns)
+		add(fmt.Sprintf("doc.float-columns-%d-wide", count), "the same columns in an eight-bit run", &columnsWide)
+	}
+	bits := floatBits(130)
+	add("doc.float-arrays-incompressible", "long arrays of floats a column is not smaller on, kept as bits", &bits)
+	bitsWide := FixedArraysWide(bits)
+	add("doc.float-arrays-incompressible-wide", "the same in an eight-bit run", &bitsWide)
+	keyed := boolMaps()
+	add("doc.bool-maps", "maps keyed by a bool and maps of blobs in a four-bit run", &keyed)
+	add("doc.bool-maps-wide", "maps keyed by a bool and maps of blobs in an eight-bit run, lists among the values",
+		&BoolMapsWide{
+			ByFlag: keyed.ByFlag, Chunks: keyed.Chunks, Leaves: keyed.Leaves, Sizes: keyed.Sizes,
+			Blobs: keyed.Blobs, One: keyed.One,
+			Lists: map[bool][]string{true: {"a", ""}, false: {"b"}},
+			Rows:  map[bool][]Inner{false: {{SKU: "r"}, {Qty: 2}}},
 		})
 	add("doc.pointer-structs", "pointers to structs: present, nil, at a zero struct, and recursive",
 		&Pointed{
@@ -1441,6 +1605,21 @@ func cases() []caseOut {
 			Ledger{ID: 8, Lines: wideLines(10)})
 	})
 
+	add("fixed.empty", "empty arrays of floats, bools and blobs are absent keys", FixedArrays{})
+	add("fixed.mixed", "arrays of floats, bools and blobs in a four-bit run", fixedArrays())
+	add("fixed.mixed wide", "the same arrays in an eight-bit run", FixedArraysWide(fixedArrays()))
+	add("fixed.one blob", "an array of one blob, which is its bytes alone", FixedArrays{Blobs: [][]byte{{7, 8}}})
+	add("fixed.under the threshold", "127 floats, one short of a column", floatColumns(127))
+	add("fixed.columns", "128 floats, the shortest array that is a column", floatColumns(128))
+	add("fixed.columns long", "300 floats as columns, with exceptions", floatColumns(300))
+	add("fixed.columns wide", "the same columns in an eight-bit run", FixedArraysWide(floatColumns(300)))
+	add("fixed.noise", "long arrays no column is smaller on, kept as bits", noiseFloats(200))
+	add("fixed.noise wide", "the same in an eight-bit run", FixedArraysWide(noiseFloats(200)))
+	add("fixed.constant", "long arrays too dense to be trusted as a column, kept as bits", constantFloats(500))
+	add("fixed.constant wide", "the same in an eight-bit run", FixedArraysWide(constantFloats(500)))
+	add("blobmaps.empty", "empty maps are absent keys", BlobMaps{})
+	add("blobmaps.one entry each", "a bool key and a blob value in a four-bit run", blobMaps())
+	add("blobmaps.one entry each wide", "the same maps in an eight-bit run", BlobMapsWide(blobMaps()))
 	add("maps.empty", "an empty map is an absent key", Maps{})
 	add("maps.one entry each", "a map's keys are values, not field ids", Maps{
 		Labels: map[string]string{"a": "one"},

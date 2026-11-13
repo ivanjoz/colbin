@@ -77,6 +77,8 @@
 
 use alloc::vec::Vec;
 
+use crate::error::Error;
+
 mod bitmap;
 mod compact;
 mod dictionary;
@@ -261,6 +263,87 @@ pub(crate) fn read_count(body: &[u8]) -> Option<(usize, usize)> {
     }
     let bytes: [u8; 4] = body.get(1..5)?.try_into().expect("four bytes");
     Some((u32::from_le_bytes(bytes) as usize, 5))
+}
+
+/// The most values a float array's column may hold for each of its bytes. A
+/// column of identical values is a few bytes whatever its length, so its count
+/// is not bounded by them, and a reader allocates for it: Go's writer keeps a
+/// denser array as its bits (`wire/arrays.go`), and a reader refuses one.
+pub(crate) const FLOAT_COLUMN_VALUES_PER_BYTE: usize = 64;
+
+/// The length from which an array of floats is tried as a column.
+pub(crate) const FLOAT_COLUMN_FROM: usize = 128;
+
+/// Whether a float column of `size` bytes is kept for `count` values that are
+/// `plain` bytes as their bits: it is smaller, and not so much smaller that a
+/// reader would refuse its count.
+pub(crate) const fn keeps_column(size: usize, count: usize, plain: usize) -> bool {
+    size < plain && count <= size * FLOAT_COLUMN_VALUES_PER_BYTE
+}
+
+/// A float64 slice as the bit patterns a float column is held as.
+#[allow(clippy::cast_possible_wrap)]
+pub(crate) fn float64_bits(values: &[f64]) -> Vec<i64> {
+    values.iter().map(|value| value.to_bits() as i64).collect()
+}
+
+/// Splits a float array's column into its count and the column, refusing a
+/// count the column is too short to be trusted with.
+pub(crate) fn float_column_body(body: &[u8]) -> Result<(usize, &[u8]), Error> {
+    let (count, at) = read_count(body).ok_or(Error::Truncated)?;
+    let encoded = &body[at..];
+    if count > encoded.len().saturating_mul(FLOAT_COLUMN_VALUES_PER_BYTE) {
+        return Err(Error::Truncated);
+    }
+    Ok((count, encoded))
+}
+
+/// A float64 array's column, as bit patterns.
+#[allow(clippy::cast_sign_loss)]
+pub(crate) fn float64_column(body: &[u8]) -> Result<Vec<u64>, Error> {
+    let (count, encoded) = float_column_body(body)?;
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let mut bits = alloc::vec![0_i64; count];
+    if crate::column::decode_array(encoded, count, &mut bits)? > encoded.len() {
+        return Err(Error::Truncated);
+    }
+    Ok(bits.into_iter().map(|value| value as u64).collect())
+}
+
+/// A float32 array's column, as bit patterns.
+pub(crate) fn float32_column(body: &[u8]) -> Result<Vec<u32>, Error> {
+    let (count, encoded) = float_column_body(body)?;
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let mut bits = alloc::vec![0_u32; count];
+    if crate::column::decode_float32(encoded, count, &mut bits)? > encoded.len() {
+        return Err(Error::Truncated);
+    }
+    Ok(bits)
+}
+
+/// A float array's elements as bit patterns, from `width` little-endian bytes
+/// each. The caller has checked `elements` is a whole number of them.
+pub(crate) fn float_bits(elements: &[u8], width: usize) -> Vec<u64> {
+    elements
+        .chunks_exact(width)
+        .map(|chunk| {
+            let mut raw = [0_u8; 8];
+            raw[..width].copy_from_slice(chunk);
+            u64::from_le_bytes(raw)
+        })
+        .collect()
+}
+
+/// A bool array's elements, or `None` when a byte is not 0 or 1.
+pub(crate) fn bool_elements(elements: &[u8]) -> Option<Vec<bool>> {
+    if elements.iter().any(|&raw| raw > 1) {
+        return None;
+    }
+    Some(elements.iter().map(|&raw| raw == 1).collect())
 }
 
 /// Every integer type an array field can hold.

@@ -29,8 +29,9 @@ use crate::codec::{ROOT_STRUCT_NARROW, ROOT_STRUCT_WIDE, TABLE_THRESHOLD};
 use crate::diag::{D_LIMIT, D_UNSUPPORTED, Diag};
 use crate::json::parse::{Doc, K_BOOL, K_FLOAT, K_INT, K_NULL, K_OBJECT, K_STRING, K_UINT};
 use crate::plan::{
-    OP_BOOL, OP_FLOAT32, OP_FLOAT64, OP_INT64, OP_INT64S, OP_POINTER, OP_STRING, OP_STRINGS,
-    OP_STRUCT, OP_STRUCTS, OP_UINT64, OP_UINT64S, Plan, PlanField, width_of_op,
+    OP_BOOL, OP_BOOLS, OP_FLOAT32, OP_FLOAT64, OP_FLOAT64S, OP_INT64, OP_INT64S, OP_POINTER,
+    OP_STRING, OP_STRINGS, OP_STRUCT, OP_STRUCTS, OP_UINT64, OP_UINT64S, Plan, PlanField,
+    width_of_op,
 };
 use crate::section::Schema;
 use crate::wire;
@@ -186,6 +187,14 @@ impl<'a, 'd> Builder<'a, 'd> {
             OP_INT64S => {
                 let values = self.gather_ints(node);
                 w.ints(field.key, &values);
+            }
+            OP_FLOAT64S => {
+                let values = self.gather_floats(node);
+                w.f64s(field.key, &values);
+            }
+            OP_BOOLS => {
+                let values = self.gather_bools(node);
+                w.bools(field.key, &values);
             }
             OP_UINT64S => {
                 // A narrow array's form is its element type's, so a `[]uint64`
@@ -368,6 +377,14 @@ impl<'a, 'd> Builder<'a, 'd> {
                 let values = self.gather_ints(node);
                 w.ints(field.key, &values);
             }
+            OP_FLOAT64S => {
+                let values = self.gather_floats(node);
+                w.f64s(field.key, &values);
+            }
+            OP_BOOLS => {
+                let values = self.gather_bools(node);
+                w.bools(field.key, &values);
+            }
             op => self.wide_scalar(w, field.key, op, node, false),
         }
     }
@@ -522,6 +539,18 @@ impl<'a, 'd> Builder<'a, 'd> {
     fn gather_ints(&self, node: u32) -> Vec<i64> {
         (0..self.doc.count(node))
             .map(|index| self.as_int(self.doc.child_at(node, index)))
+            .collect()
+    }
+
+    fn gather_floats(&self, node: u32) -> Vec<f64> {
+        (0..self.doc.count(node))
+            .map(|index| self.as_float(self.doc.child_at(node, index)))
+            .collect()
+    }
+
+    fn gather_bools(&self, node: u32) -> Vec<bool> {
+        (0..self.doc.count(node))
+            .map(|index| self.doc.uint_of(self.doc.child_at(node, index)) != 0)
             .collect()
     }
 

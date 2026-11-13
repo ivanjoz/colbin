@@ -224,8 +224,9 @@ func TestUnsupportedMapsAreRefused(t *testing.T) {
 	type mapOfPointerLists struct {
 		M map[string][]*inner `cb:"1"`
 	}
+	// A blob is a value; a pointer to one is a pointer to a list of bytes.
 	type mapOfBytes struct {
-		M map[string][]byte `cb:"1"`
+		M map[string]*[]byte `cb:"1"`
 	}
 	type mapOfAnyLists struct {
 		M map[string][]any `cb:"1"`

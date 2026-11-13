@@ -138,7 +138,7 @@ const table = decoder.columns(message)      // or the columns, as codec.columns 
 It is a decoder written in plain JavaScript: nothing to compile, nothing to
 `await`, no `import.meta`, no Node built-in. It needs a `Uint8Array` and, if
 there is one, a `TextDecoder` (it has its own UTF-8 decoder for when there is
-not). A bundle that imports it carries no module and no base64: 14 KB gzipped
+not). A bundle that imports it carries no module and no base64: 15 KB gzipped
 in all. It only reads: `marshal` and `inspect` stay with the module.
 
 It reads every message the module reads, not only tables. Nested documents,

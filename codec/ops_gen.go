@@ -82,6 +82,22 @@ func appendScalars(writer *wire.Writer, plan *typePlan, record unsafe.Pointer) {
 			writer.Buffer = buffer
 			writer.Strings(field.key, *(*[]string)(at))
 			buffer = writer.Buffer
+		case opFloat64s:
+			writer.Buffer = buffer
+			writer.Float64s(field.key, *(*[]float64)(at))
+			buffer = writer.Buffer
+		case opFloat32s:
+			writer.Buffer = buffer
+			writer.Float32s(field.key, *(*[]float32)(at))
+			buffer = writer.Buffer
+		case opBools:
+			writer.Buffer = buffer
+			writer.Bools(field.key, *(*[]bool)(at))
+			buffer = writer.Buffer
+		case opBytesList:
+			writer.Buffer = buffer
+			writer.BytesList(field.key, *(*[][]byte)(at))
+			buffer = writer.Buffer
 		}
 	}
 	writer.Buffer = buffer
@@ -137,6 +153,14 @@ func writeValue(writer *wire.Writer, key uint8, op fieldOp, at unsafe.Pointer, p
 		writer.Uint64s(key, *(*[]uint64)(at))
 	case opStrings:
 		writer.Strings(key, *(*[]string)(at))
+	case opFloat64s:
+		writer.Float64s(key, *(*[]float64)(at))
+	case opFloat32s:
+		writer.Float32s(key, *(*[]float32)(at))
+	case opBools:
+		writer.Bools(key, *(*[]bool)(at))
+	case opBytesList:
+		writer.BytesList(key, *(*[][]byte)(at))
 	default:
 		return false
 	}
@@ -221,6 +245,22 @@ func writeFields(writer *wire.Writer, plan *typePlan, record unsafe.Pointer, buf
 			writer.Buffer = buffer
 			writer.Strings(field.key, *(*[]string)(at))
 			buffer = writer.Buffer
+		case opFloat64s:
+			writer.Buffer = buffer
+			writer.Float64s(field.key, *(*[]float64)(at))
+			buffer = writer.Buffer
+		case opFloat32s:
+			writer.Buffer = buffer
+			writer.Float32s(field.key, *(*[]float32)(at))
+			buffer = writer.Buffer
+		case opBools:
+			writer.Buffer = buffer
+			writer.Bools(field.key, *(*[]bool)(at))
+			buffer = writer.Buffer
+		case opBytesList:
+			writer.Buffer = buffer
+			writer.BytesList(field.key, *(*[][]byte)(at))
+			buffer = writer.Buffer
 		case opStruct:
 			writer.Buffer = buffer
 			appendNarrowStruct(writer, field, at, buf)
@@ -240,6 +280,10 @@ func writeFields(writer *wire.Writer, plan *typePlan, record unsafe.Pointer, buf
 		case opPointerStruct:
 			writer.Buffer = buffer
 			appendNarrowPointerStruct(writer, field, at, buf)
+			buffer = writer.Buffer
+		case opStructPtrs:
+			writer.Buffer = buffer
+			appendNarrowStructPtrs(writer, field, at, buf)
 			buffer = writer.Buffer
 		default:
 			buf.fail(errNotValueOp(field.op))
@@ -302,6 +346,14 @@ func readScalars(reader *wire.Reader, plan *typePlan, record unsafe.Pointer) {
 			*(*[]uint64)(at) = reader.Uint64s((*(*[]uint64)(at))[:0])
 		case opStrings:
 			*(*[]string)(at) = reader.Strings((*(*[]string)(at))[:0])
+		case opFloat64s:
+			*(*[]float64)(at) = reader.Float64s((*(*[]float64)(at))[:0])
+		case opFloat32s:
+			*(*[]float32)(at) = reader.Float32s((*(*[]float32)(at))[:0])
+		case opBools:
+			*(*[]bool)(at) = reader.Bools((*(*[]bool)(at))[:0])
+		case opBytesList:
+			*(*[][]byte)(at) = reader.BytesList((*(*[][]byte)(at))[:0])
 		default:
 			reader.Fail(errNotValueOp(field.op))
 		}
@@ -354,6 +406,14 @@ func readValue(reader *wire.Reader, op fieldOp, at unsafe.Pointer) bool {
 		*(*[]uint64)(at) = reader.Uint64s((*(*[]uint64)(at))[:0])
 	case opStrings:
 		*(*[]string)(at) = reader.Strings((*(*[]string)(at))[:0])
+	case opFloat64s:
+		*(*[]float64)(at) = reader.Float64s((*(*[]float64)(at))[:0])
+	case opFloat32s:
+		*(*[]float32)(at) = reader.Float32s((*(*[]float32)(at))[:0])
+	case opBools:
+		*(*[]bool)(at) = reader.Bools((*(*[]bool)(at))[:0])
+	case opBytesList:
+		*(*[][]byte)(at) = reader.BytesList((*(*[][]byte)(at))[:0])
 	default:
 		return false
 	}
@@ -410,6 +470,14 @@ func readField(reader *wire.Reader, field *planField, record unsafe.Pointer, buf
 		*(*[]uint64)(at) = reader.Uint64s((*(*[]uint64)(at))[:0])
 	case opStrings:
 		*(*[]string)(at) = reader.Strings((*(*[]string)(at))[:0])
+	case opFloat64s:
+		*(*[]float64)(at) = reader.Float64s((*(*[]float64)(at))[:0])
+	case opFloat32s:
+		*(*[]float32)(at) = reader.Float32s((*(*[]float32)(at))[:0])
+	case opBools:
+		*(*[]bool)(at) = reader.Bools((*(*[]bool)(at))[:0])
+	case opBytesList:
+		*(*[][]byte)(at) = reader.BytesList((*(*[][]byte)(at))[:0])
 	case opStruct:
 		readNarrowStruct(reader, field, at, buf)
 	case opStructs:
@@ -420,6 +488,8 @@ func readField(reader *wire.Reader, field *planField, record unsafe.Pointer, buf
 		readPointer(reader, field, at)
 	case opPointerStruct:
 		readNarrowPointerStruct(reader, field, at, buf)
+	case opStructPtrs:
+		readNarrowStructPtrs(reader, field, at, buf)
 	default:
 		readConverted(reader, field, at, buf)
 	}
@@ -470,6 +540,14 @@ func (w *walker) narrowScalar(reader *wire.Reader, op fieldOp) {
 		unsignedArray(w, reader.Uint64s(nil))
 	case opStrings:
 		w.textArray(reader.StringsBytes(nil))
+	case opFloat64s:
+		floatArray(w, reader.Float64s(nil), 64)
+	case opFloat32s:
+		floatArray(w, reader.Float32s(nil), 32)
+	case opBools:
+		w.boolArray(reader.Bools(nil))
+	case opBytesList:
+		w.blobArray(reader.StringsBytes(nil))
 	default:
 		w.fail(errUnwalkableOp(op))
 	}
@@ -528,6 +606,14 @@ func appendScalarsWide(writer *wire.Writer8, plan *typePlan, record unsafe.Point
 			writer.Uint64s(field.key, *(*[]uint64)(at))
 		case opStrings:
 			writer.Strings(field.key, *(*[]string)(at))
+		case opFloat64s:
+			writer.Float64s(field.key, *(*[]float64)(at))
+		case opFloat32s:
+			writer.Float32s(field.key, *(*[]float32)(at))
+		case opBools:
+			writer.Bools(field.key, *(*[]bool)(at))
+		case opBytesList:
+			writer.BytesList(field.key, *(*[][]byte)(at))
 		}
 	}
 }
@@ -582,6 +668,14 @@ func writeValueWide(writer *wire.Writer8, key uint8, op fieldOp, at unsafe.Point
 		writer.Uint64s(key, *(*[]uint64)(at))
 	case opStrings:
 		writer.Strings(key, *(*[]string)(at))
+	case opFloat64s:
+		writer.Float64s(key, *(*[]float64)(at))
+	case opFloat32s:
+		writer.Float32s(key, *(*[]float32)(at))
+	case opBools:
+		writer.Bools(key, *(*[]bool)(at))
+	case opBytesList:
+		writer.BytesList(key, *(*[][]byte)(at))
 	default:
 		return false
 	}
@@ -647,6 +741,14 @@ func writeFieldsWide(writer *wire.Writer8, plan *typePlan, record unsafe.Pointer
 			writer.Uint64s(field.key, *(*[]uint64)(at))
 		case opStrings:
 			writer.Strings(field.key, *(*[]string)(at))
+		case opFloat64s:
+			writer.Float64s(field.key, *(*[]float64)(at))
+		case opFloat32s:
+			writer.Float32s(field.key, *(*[]float32)(at))
+		case opBools:
+			writer.Bools(field.key, *(*[]bool)(at))
+		case opBytesList:
+			writer.BytesList(field.key, *(*[][]byte)(at))
 		case opStruct:
 			appendStructField(writer, field, at, buf)
 		case opStructs:
@@ -661,6 +763,8 @@ func writeFieldsWide(writer *wire.Writer8, plan *typePlan, record unsafe.Pointer
 			appendAnyField(writer, field, at, buf)
 		case opAnys:
 			appendAnysField(writer, field, at, buf)
+		case opStructPtrs:
+			appendStructPtrsField(writer, field, at, buf)
 		default:
 			buf.fail(errNotValueOp(field.op))
 		}
@@ -721,6 +825,14 @@ func readScalarsWide(reader *wire.Reader8, plan *typePlan, record unsafe.Pointer
 			*(*[]uint64)(at) = reader.Uint64s((*(*[]uint64)(at))[:0])
 		case opStrings:
 			*(*[]string)(at) = reader.Strings((*(*[]string)(at))[:0])
+		case opFloat64s:
+			*(*[]float64)(at) = reader.Float64s((*(*[]float64)(at))[:0])
+		case opFloat32s:
+			*(*[]float32)(at) = reader.Float32s((*(*[]float32)(at))[:0])
+		case opBools:
+			*(*[]bool)(at) = reader.Bools((*(*[]bool)(at))[:0])
+		case opBytesList:
+			*(*[][]byte)(at) = reader.BytesList((*(*[][]byte)(at))[:0])
 		default:
 			reader.Fail(errNotValueOp(field.op))
 		}
@@ -773,6 +885,14 @@ func readValueWide(reader *wire.Reader8, op fieldOp, at unsafe.Pointer) bool {
 		*(*[]uint64)(at) = reader.Uint64s((*(*[]uint64)(at))[:0])
 	case opStrings:
 		*(*[]string)(at) = reader.Strings((*(*[]string)(at))[:0])
+	case opFloat64s:
+		*(*[]float64)(at) = reader.Float64s((*(*[]float64)(at))[:0])
+	case opFloat32s:
+		*(*[]float32)(at) = reader.Float32s((*(*[]float32)(at))[:0])
+	case opBools:
+		*(*[]bool)(at) = reader.Bools((*(*[]bool)(at))[:0])
+	case opBytesList:
+		*(*[][]byte)(at) = reader.BytesList((*(*[][]byte)(at))[:0])
 	default:
 		return false
 	}
@@ -829,6 +949,14 @@ func readWideField(reader *wire.Reader8, field *planField, record unsafe.Pointer
 		*(*[]uint64)(at) = reader.Uint64s((*(*[]uint64)(at))[:0])
 	case opStrings:
 		*(*[]string)(at) = reader.Strings((*(*[]string)(at))[:0])
+	case opFloat64s:
+		*(*[]float64)(at) = reader.Float64s((*(*[]float64)(at))[:0])
+	case opFloat32s:
+		*(*[]float32)(at) = reader.Float32s((*(*[]float32)(at))[:0])
+	case opBools:
+		*(*[]bool)(at) = reader.Bools((*(*[]bool)(at))[:0])
+	case opBytesList:
+		*(*[][]byte)(at) = reader.BytesList((*(*[][]byte)(at))[:0])
 	case opStruct:
 		readStructField(reader, field, at, buf)
 	case opStructs:
@@ -847,6 +975,8 @@ func readWideField(reader *wire.Reader8, field *planField, record unsafe.Pointer
 		if reader.Payload() {
 			*(*[]any)(at) = readAnyList(reader, buf)
 		}
+	case opStructPtrs:
+		readStructPtrsField(reader, field, at, buf)
 	default:
 		readConvertedWide(reader, field, at, buf)
 	}
@@ -897,6 +1027,14 @@ func (w *walker) wideScalar(reader *wire.Reader8, op fieldOp) {
 		unsignedArray(w, reader.Uint64s(nil))
 	case opStrings:
 		w.textArray(reader.StringsBytes(nil))
+	case opFloat64s:
+		floatArray(w, reader.Float64s(nil), 64)
+	case opFloat32s:
+		floatArray(w, reader.Float32s(nil), 32)
+	case opBools:
+		w.boolArray(reader.Bools(nil))
+	case opBytesList:
+		w.blobArray(reader.StringsBytes(nil))
 	default:
 		w.fail(errUnwalkableOp(op))
 	}

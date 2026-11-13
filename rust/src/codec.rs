@@ -907,6 +907,23 @@ impl MapValue for f64 {
     }
 }
 
+// A blob value is a string element's bytes, which the map's type says are not
+// text (`mapBytes` in `codec/maps.go`). A value only: Go has no blob keys.
+impl MapValue for Vec<u8> {
+    fn write_element(&self, w: &mut Writer<'_>) {
+        w.element_blob(self);
+    }
+    fn write_element8(&self, w: &mut Writer8<'_>) {
+        w.element_blob(self);
+    }
+    fn read_element(r: &mut Reader<'_>) -> Self {
+        r.element_blob().to_vec()
+    }
+    fn read_element8(r: &mut Reader8<'_>) -> Self {
+        r.element_blob().to_vec()
+    }
+}
+
 impl MapValue for bool {
     fn write_element(&self, w: &mut Writer<'_>) {
         w.element_uint(u64::from(*self));

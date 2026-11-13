@@ -63,6 +63,8 @@ of them.
 | object | a nested struct, recursively |
 | array of objects | a slice of structs — list or table, decided per field on the row count |
 | array of integers / of strings | the matching array op |
+| array of numbers, one of them fractional | `[]float64`: the elements' bits, or a column from 128 elements when that is smaller |
+| array of `true` / `false` | `[]bool`, a byte an element |
 | `null`, or the key absent from some record | a **pointer** to the inferred type |
 
 `int` + `float` in one field unify to float64. That is the only widening;
@@ -120,7 +122,7 @@ The rest, all of them errors:
 | more than 256 fields in one object | a key is one byte |
 | a number fitting neither int64, uint64 nor float64 exactly | silent precision loss is the failure mode colbin exists to avoid |
 | nesting deeper than 64 | the encoder recurses, and unbounded input must not reach the stack. At or below the decoder's bound, so what this writes it can always read back |
-| an array of floats, of booleans, or of arrays | the format has no op for one. `sliceOp` in `codec/codec.go` resolves integers, strings and structs and refuses the rest |
+| an array of arrays | the format has no op for one. `sliceOp` in `codec/codec.go` resolves numbers, bools, strings, blobs and structs and refuses the rest |
 | malformed JSON | reported with a byte offset and a line |
 
 Three cases **warn** rather than refuse, because the rest of the document is
@@ -236,10 +238,12 @@ treats exactly these three as expected; anything else is a bug in the encoder.
 | nested structs | yes | |
 | slices of structs | yes | list or table, decided per field on the row count |
 | integer and string arrays | yes | |
+| float and bool arrays | yes | `[]float64` and `[]bool`, since 0.13 |
 | pointers | yes | a null or an absent key |
 | `[]byte` | **no** | JSON has no bytes type; a `"base64:"` convention would be inventing format semantics the library does not have |
 | maps | **no** | a JSON object is a struct here; a map needs a declared key type |
-| float / bool / nested arrays | **no** | §4 — the format has no op |
+| arrays of blobs, bool-keyed maps | **no** | JSON has neither a bytes type nor a map |
+| nested arrays | **no** | §4 — the format has no op |
 
 The **decoder** handles all of them regardless, asymmetrically and on purpose: a
 Go service that had a real struct will send `[]byte`, maps and eight-bit-keyed

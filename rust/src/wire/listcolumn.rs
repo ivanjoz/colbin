@@ -19,7 +19,7 @@ use crate::{Error, column};
 use alloc::vec::Vec;
 
 /// The wide COL detail bit of a list column.
-const LIST_COLUMN_DETAIL: u8 = 0b1000;
+pub(crate) const LIST_COLUMN_DETAIL: u8 = 0b1000;
 
 /// A list column's body, split.
 pub struct ListColumn<'a> {

@@ -388,13 +388,12 @@ pub fn write_i64(out: &mut Vec<u8>, value: i64) {
 fn write_json_float(out: &mut Vec<u8>, value: f64, width: u32) {
     use core::fmt::Write as _;
 
-    // A float32 must be formatted at 32 bits, or `1.1` prints as
-    // 1.100000023841858. Widening back to f64 afterwards is exact.
-    let value = if width == 32 {
-        f64::from(value as f32)
-    } else {
-        value
-    };
+    // A float32 is formatted at 32 bits, or `1.1` prints as 1.100000023841858:
+    // the shortest digits that read back as the same float32 are fewer than
+    // those that read back as the float64 it widens to.
+    let single = width == 32;
+    #[allow(clippy::cast_possible_truncation)]
+    let narrow = value as f32;
 
     // The sign of a zero survives the comparison, so `-0` is not `0`. Go writes
     // both, and losing the sign would lose the difference.
@@ -407,12 +406,20 @@ fn write_json_float(out: &mut Vec<u8>, value: f64, width: u32) {
         return;
     }
 
-    let magnitude = value.abs();
     let mut text = alloc::string::String::new();
-    // The thresholds `encoding/json` switches notation at. Spelled as a range so
-    // the two bounds cannot drift apart.
-    if !(1e-6..1e21).contains(&magnitude) {
-        let _ = write!(text, "{value:e}");
+    // The thresholds `encoding/json` switches notation at, each compared at the
+    // value's own width. Spelled as ranges so the two bounds cannot drift apart.
+    let in_range = if single {
+        (1e-6_f32..1e21_f32).contains(&narrow.abs())
+    } else {
+        (1e-6..1e21).contains(&value.abs())
+    };
+    if !in_range {
+        let _ = if single {
+            write!(text, "{narrow:e}")
+        } else {
+            write!(text, "{value:e}")
+        };
         // Rust spells the exponent `1e21` and `1e-7`; Go spells them `1e+21`
         // and `1e-07`. The mantissa is identical, so only the exponent moves.
         let at = text.find('e').expect("{:e} always writes an exponent");
@@ -430,6 +437,10 @@ fn write_json_float(out: &mut Vec<u8>, value: f64, width: u32) {
         out.extend_from_slice(digits.as_bytes());
         return;
     }
-    let _ = write!(text, "{value}");
+    let _ = if single {
+        write!(text, "{narrow}")
+    } else {
+        write!(text, "{value}")
+    };
     out.extend_from_slice(text.as_bytes());
 }

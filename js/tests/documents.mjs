@@ -94,6 +94,17 @@ export const documents = [
     name: 'sixteen-fields',
     json: Object.fromEntries(Array.from({ length: 16 }, (_, i) => [`f${i}`, i + 1])),
   },
+  {
+    // One fractional element makes the array float64, as it does a column.
+    name: 'float-arrays',
+    json: { v: [1.5, 2.5, -0.25], promoted: [1, 2.5, 3], point: { xy: [10.5, -3.25] } },
+  },
+  { name: 'bool-arrays', json: { flags: [true, false, true], rows: [{ on: [true] }, { on: [false, false] }] } },
+  {
+    // Long enough to be a column rather than its bits (wire/arrays.go).
+    name: 'float-column',
+    json: { prices: Array.from({ length: 200 }, (_, i) => (1000 + ((i * 37) % 911)) / 100), tail: 1 },
+  },
   { name: 'bare-scalar', json: 42 },
   { name: 'bare-string', json: 'hello' },
   { name: 'scalar-array', json: [1, 2, 3, 4, 5] },
@@ -115,8 +126,6 @@ export const refusals = [
   { name: 'type-conflict', text: '[{"qty":1},{"qty":"two"}]', match: /type conflict/ },
   { name: 'empty-array', text: '[]', match: /no shape to infer/ },
   { name: 'null-root', text: 'null', match: /no shape to infer/ },
-  { name: 'float-array', text: '{"v":[1.5,2.5]}', match: /array of floats/ },
-  { name: 'bool-array', text: '{"v":[true,false]}', match: /array of booleans/ },
   { name: 'nested-array', text: '{"v":[[1,2]]}', match: /array of arrays/ },
   {
     name: 'int-spanning-both-ends',

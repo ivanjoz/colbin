@@ -201,6 +201,7 @@ var (
 		{"opMap", "appendNarrowMap(writer, field, at, buf)"},
 		{"opPointer", "appendPointer(writer, field, at, packed)"},
 		{"opPointerStruct", "appendNarrowPointerStruct(writer, field, at, buf)"},
+		{"opStructPtrs", "appendNarrowStructPtrs(writer, field, at, buf)"},
 	}
 	wideComposites = [][2]string{
 		{"opStruct", "appendStructField(writer, field, at, buf)"},
@@ -210,6 +211,7 @@ var (
 		{"opPointerStruct", "appendPointerStructField(writer, field, at, buf)"},
 		{"opAny", "appendAnyField(writer, field, at, buf)"},
 		{"opAnys", "appendAnysField(writer, field, at, buf)"},
+		{"opStructPtrs", "appendStructPtrsField(writer, field, at, buf)"},
 	}
 	// A narrow read has no dynamic arms: a dynamic value names its own class,
 	// which four descriptor bits cannot, so a plan holding one is wide and a
@@ -220,6 +222,7 @@ var (
 		{"opMap", "readNarrowMap(reader, field, at, buf)"},
 		{"opPointer", "readPointer(reader, field, at)"},
 		{"opPointerStruct", "readNarrowPointerStruct(reader, field, at, buf)"},
+		{"opStructPtrs", "readNarrowStructPtrs(reader, field, at, buf)"},
 	}
 	wideReadComposites = [][2]string{
 		{"opStruct", "readStructField(reader, field, at, buf)"},
@@ -231,6 +234,7 @@ var (
 		// so the cursor steps onto the value first.
 		{"opAny", "if reader.Payload() {\n*(*any)(at) = readAnyValue(reader, buf)\n}"},
 		{"opAnys", "if reader.Payload() {\n*(*[]any)(at) = readAnyList(reader, buf)\n}"},
+		{"opStructPtrs", "readStructPtrsField(reader, field, at, buf)"},
 	}
 )
 
@@ -325,6 +329,15 @@ func jsonArm(out *bytes.Buffer, row valueOp) {
 		// Sub-slices of the message rather than strings: the sink only appends
 		// them.
 		call = "w.textArray(reader.StringsBytes(nil))"
+	case jsonFloat64Array:
+		call = fmt.Sprintf("floatArray(w, %s, 64)", read)
+	case jsonFloat32Array:
+		call = fmt.Sprintf("floatArray(w, %s, 32)", read)
+	case jsonBoolArray:
+		call = fmt.Sprintf("w.boolArray(%s)", read)
+	case jsonBlobArray:
+		// Sub-slices again: the sink encodes them where they are.
+		call = "w.blobArray(reader.StringsBytes(nil))"
 	}
 	fmt.Fprintf(out, "case %s:\n%s\n", opName(row.op), call)
 }
@@ -338,6 +351,8 @@ func opName(op fieldOp) string {
 		opString: "opString", opBytes: "opBytes", opInt8s: "opInt8s", opInt16s: "opInt16s",
 		opInt32s: "opInt32s", opInt64s: "opInt64s", opUint16s: "opUint16s",
 		opUint32s: "opUint32s", opUint64s: "opUint64s", opStrings: "opStrings",
+		opFloat64s: "opFloat64s", opFloat32s: "opFloat32s", opBools: "opBools",
+		opBytesList: "opBytesList",
 	}
 	name, ok := names[op]
 	if !ok {

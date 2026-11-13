@@ -789,6 +789,154 @@ fn decode_decimal<T: Signed>(buf: &[u8], n: usize, out: &mut [T]) -> Result<usiz
     Ok(position)
 }
 
+/// The largest exponent [`append_float32`] tries. A float32 carries under eight
+/// significant digits, so an integer past 10^12 already needs more than the
+/// float's 24 bits.
+const MAX_FLOAT32_EXPONENT: usize = 12;
+
+/// The bit pattern of a float32 as a float64, exact for every one: a NaN keeps
+/// its payload, shifted into the float64's mantissa.
+fn widen_bits(bits: u32) -> u64 {
+    if (bits >> 23) & 0xFF == 0xFF {
+        return u64::from(bits >> 31) << 63 | 0x7FF << 52 | u64::from(bits & 0x7F_FFFF) << 29;
+    }
+    f64::from(f32::from_bits(bits)).to_bits()
+}
+
+/// The integer of `v` at exponent `e`, and whether it is one: whether
+/// `float32(float64(i) / 10^e)` gives back `v` bit for bit.
+#[allow(
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation
+)]
+fn decimal_of32(v: f32, e: usize) -> (i64, bool) {
+    let power = POWERS_OF_10[e];
+    let sum = f64::from(v) * power + DECIMAL_MAGIC;
+    let i = (sum.to_bits() as i64).wrapping_sub(DECIMAL_MAGIC.to_bits() as i64);
+    let in_span = (i.wrapping_add(DECIMAL_SPAN) as u64) < 2 * DECIMAL_SPAN as u64;
+    let back = ((sum - DECIMAL_MAGIC) / power) as f32;
+    (i, in_span && back.to_bits() == v.to_bits())
+}
+
+/// [`choose_exponent`] for float32s.
+fn choose_exponent32(vals: &[f32]) -> (usize, usize, usize) {
+    let step = (vals.len() / DECIMAL_SAMPLE).max(1);
+    let (mut exponent, mut reached, mut sampled) = (0, 0, 0);
+    for e in 0..=MAX_FLOAT32_EXPONENT {
+        let (mut count, mut seen) = (0, 0);
+        let mut index = 0;
+        while index < vals.len() && seen < DECIMAL_SAMPLE {
+            if decimal_of32(vals[index], e).1 {
+                count += 1;
+            }
+            seen += 1;
+            index += step;
+        }
+        sampled = seen;
+        if count > reached {
+            exponent = e;
+            reached = count;
+        }
+        if reached == seen {
+            break;
+        }
+    }
+    (exponent, reached, sampled)
+}
+
+/// Encodes a column of float32s onto `out`, as `column.AppendFloat32` does: a
+/// decimal column when that is smaller than the values' bits, and their bit
+/// patterns as an ordinary column otherwise. [`decode_float32`] reads either.
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+pub fn append_float32(out: &mut Vec<u8>, vals: &[f32]) {
+    let raw: Vec<i64> = vals.iter().map(|v| i64::from(v.to_bits() as i32)).collect();
+    if vals.is_empty() {
+        return append_array(out, &raw);
+    }
+    let (exponent, reached, sampled) = choose_exponent32(vals);
+    if reached * 2 < sampled {
+        return append_array(out, &raw);
+    }
+    let mut ints = alloc::vec![0_i64; vals.len()];
+    let mut positions: Vec<i64> = Vec::new();
+    let mut bits: Vec<i64> = Vec::new();
+    let mut previous = 0_i64;
+    for (index, &value) in vals.iter().enumerate() {
+        let (i, ok) = decimal_of32(value, exponent);
+        if ok {
+            ints[index] = i;
+            previous = i;
+        } else {
+            // An exception's own integer is the one before it, which costs the
+            // integers nothing.
+            ints[index] = previous;
+            positions.push(index as i64);
+            bits.push(widen_bits(value.to_bits()) as i64);
+        }
+    }
+    let mut decimal = 6 + array_cost(&ints);
+    if !positions.is_empty() {
+        decimal += array_cost(&positions) + array_cost(&bits);
+    }
+    if decimal >= array_cost(&raw) {
+        return append_array(out, &raw);
+    }
+    out.push(HEADER_DECIMAL);
+    out.push(exponent as u8);
+    out.extend_from_slice(&(positions.len() as u32).to_le_bytes());
+    append_array(out, &ints);
+    if !positions.is_empty() {
+        append_array(out, &positions);
+        append_array(out, &bits);
+    }
+}
+
+/// Reads a column of `n` float32s, as `column.AppendFloat32` writes one, into
+/// `out` as their bit patterns, and returns the bytes it used.
+///
+/// The column is either decimal, which decodes to float64s that must each be a
+/// float32's, or the bit patterns themselves as an `i32` column.
+pub fn decode_float32(buf: &[u8], n: usize, out: &mut [u32]) -> Result<usize, Error> {
+    if buf.is_empty() {
+        return Err(Error::Truncated);
+    }
+    let mut wide = alloc::vec![0_i64; n];
+    let used = decode_array(buf, n, &mut wide)?;
+    let decimal = n > 0 && buf[0] == HEADER_DECIMAL;
+    for (slot, &bits) in out.iter_mut().zip(&wide) {
+        *slot = if decimal {
+            narrow_bits(bits as u64).ok_or(Error::ColumnOutOfRange)?
+        } else {
+            if i64::from(bits as i32) != bits {
+                return Err(Error::ColumnOutOfRange);
+            }
+            bits as u32
+        };
+    }
+    Ok(used)
+}
+
+/// A float64's bits as the float32 a decimal float32 column held, or `None`
+/// when it is not one: a finite value rounds to the float32 the encoder checked
+/// it against, one past float32's range is refused, and a NaN or an infinity
+/// must be a widened float32's.
+#[allow(clippy::cast_possible_truncation)]
+fn narrow_bits(bits: u64) -> Option<u32> {
+    if (bits >> 52) & 0x7FF == 0x7FF {
+        let mantissa = bits & ((1 << 52) - 1);
+        if mantissa & ((1 << 29) - 1) != 0 {
+            return None;
+        }
+        return Some(((bits >> 63) as u32) << 31 | 0xFF << 23 | (mantissa >> 29) as u32);
+    }
+    let narrow = f64::from_bits(bits) as f32;
+    if narrow.is_infinite() {
+        return None;
+    }
+    Some(narrow.to_bits())
+}
+
 /// [`decode_array`] for a column inside a decimal one, which is never decimal
 /// itself: one could nest another as deep as the message is long.
 fn decode_inner(buf: &[u8], n: usize, out: &mut [i64]) -> Result<usize, Error> {

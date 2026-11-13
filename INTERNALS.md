@@ -186,6 +186,33 @@ two's complement at the narrowest width that holds every element, sign-extended 
 read. A reader working from a schema section takes the signedness from the op, so
 a `[]uint64` is magnitudes like every other unsigned array.
 
+**Arrays of floats and of bools** (`wire/arrays.go`) are the integer array's
+framing at the element's own width, never a narrower one: a `[]float64` at
+`f1 f0 = 3` holding each element's IEEE bits little-endian and in full, a
+`[]float32` at 2, a `[]bool` at 0 holding a byte of 0 or 1 an element. An element
+is not byte-reversed and trimmed as a scalar float is (§5.1): an array has no size
+per element to trim into, and at a fixed width the array is one copy each way. A
+reader refuses another width, and a bool byte above 1.
+
+**A long array of floats is a column** when that is smaller. From 128 elements
+the writer encodes the array as a table's float column is encoded (§7:
+`column.AppendFloat64`, `AppendFloat32`, decimal scaling included) behind its
+element count, written as every count is, and keeps that when it is smaller than
+the bits and holds at most 64 values for each of its bytes; otherwise it writes
+the bits as above. At four key bits the column is the length form at `f1 f0 = 0`
+— width 1, which no array of floats is at — and at eight it is a COL (§4.1) with
+no detail bits: `[count][column]` either way. A reader takes whichever it finds,
+and refuses a count above 64 times the column's bytes before allocating for it.
+That bound is why a constant array stays its bits: a column of identical values
+is a few bytes whatever its length, and its count would be the one number the
+bytes do not vouch for (the row budget's reason, §13). On the Public BI float
+columns a column is 37% smaller than the bits at 128 values and 54% at 16 384;
+writing it is 2.4–8.4 ns a value where the copy was under 0.2, and reading it
+2.6–4.0 where the copy was 1.5.
+
+**An array of blobs** (`[][]byte`) is the bytes of a string array, element for
+element. The op is what tells a reader to render base64 instead of text.
+
 **Explicit zeros.** A non-nil pointer to a zero value has to be told apart from
 nil (§6.6), so it is the one place a zero is written, and every type writes it the
 same way: `[key | 1100] 00`, the length form with nothing in it (`Zero`).
@@ -294,7 +321,11 @@ value ever grows. A reader refuses one carrying more than 64 bits.
 
 A typed bool `true` is `[key] 01`, the inline 1; `false` is omitted. `Zero` is
 `[key] 00` and `EmptyString` is `[key] 90 00`. A string array is a homogeneous
-LIST: `[key][0xC8 | lw][length][count]` then `[elementLength][bytes]` per element.
+LIST: `[key][0xC8 | lw][length][count]` then `[elementLength][bytes]` per element,
+and an array of blobs is the same bytes. An array of floats or of bools is a VEC at
+the element's width — `w` 3 for a float64, 2 for a float32, 0 for a bool — with
+`pos` set, holding what the narrow form holds (§3.2); a long array of floats may
+instead be a COL holding its count and its column (§3.2).
 
 ### 4.2 Composites, and why a key run can change width
 
@@ -379,6 +410,22 @@ The decision is made per value on the row count, and a list and a table are
 different descriptor classes, so a reader dispatches on what it finds. A wide
 list's elements each carry a full STRUCT descriptor (`homog = 0`); a narrow
 list's carry a length only.
+
+**A slice of pointers to structs, `[]*Struct`, is not on the wire**
+(`codec/pointed.go`). It is the bytes and the section of the `[]Struct` its
+elements point at — list or table by the same rule — so a type may declare the
+field either way and read the other's message, and a reader in another language
+sees a slice of structs. A list is written element by element from where each
+one lies. A table's rows are copied side by side into scratch first (a word at a
+time when the row is a multiple of eight bytes) and written through the
+`[]Struct` path, gather kernels included: the gather reads each row once per
+column, and the copy reads each scattered row once. The decoder reads one array
+of the struct and points the elements into it, two allocations whatever the
+count. A nil element is written as an empty struct (through the copy, list or
+not) and reads back as a pointer to a zero one. As a table's column it is a list
+column (§6.3) like `[]Struct`: each row's elements are copied out through the
+pointers, and read back into one array of the struct with one array of pointers
+into it, each row's slice a capped window of the second.
 
 ### 6.3 Tables
 
@@ -484,9 +531,11 @@ narrow:  [key | 1100]      [length] [count] ( key element, value element )*
 
 Entries are pairs of key-less elements (§5.2). A typed map's are sorted by key; a
 map of `any` (`mapAny`) is a dynamic container, its keys and values compact (§9.1)
-and in whatever order the writer's map handed them over. Keys are strings or
-integers. Values are a string, an integer, a float, a bool (an unsigned 0 or 1),
-`any`, a struct, or a slice of structs or of one of the scalars.
+and in whatever order the writer's map handed them over. Keys are strings,
+integers or bools — a bool key an unsigned 0 or 1, `false` first, and never the
+key of a map of `any`. Values are a string, an integer, a float, a bool (an
+unsigned 0 or 1), a blob, `any`, a struct, or a slice of structs or of one of the
+scalars.
 
 | map kind | value | number |
 |---|---|---|
@@ -500,6 +549,7 @@ integers. Values are a string, an integer, a float, a bool (an unsigned 0 or 1),
 | `mapStruct` | a struct element | 7 |
 | `mapStructs` | a key-less list or table of structs; wide only | 8 |
 | `mapList` | a key-less list of scalar elements; wide only | 9 |
+| `mapBytes` | a blob: a string element's bytes, rendered as base64. A value only | 10 |
 
 The numbers are format: a schema section names them. The two float widths are
 separate kinds because a reader working from a section has no Go field to read
@@ -517,8 +567,9 @@ elements, or past the table threshold a TABLE of columns at eight-bit keys, neve
 grouped — with no TYPED tag in front, because the section names the struct by
 index as it does for `mapStruct`. `map[K][]T` of a scalar (`mapList`) writes each
 value as a LIST of the elements a map value of T's kind is, and the section says
-that kind in a byte after the two kinds. `[]byte`, a slice of slices, of pointers
-or of `any` is refused. A key-less list has no four-bit form, so a type holding
+that kind in a byte after the two kinds. A slice of slices, of pointers or of
+`any` is refused; a `[]byte` is not a list but a blob (`mapBytes`), a scalar
+kind that keeps the four-bit form. A key-less list has no four-bit form, so a type holding
 one of these maps is wide, as one holding a dynamic value is.
 
 **A pointer value** is not on the wire. `map[K]*Struct` and `map[K]*[]T` are the
@@ -579,7 +630,8 @@ the field's memory step through the pointer: encode skips a nil one, decode
 allocates the pointee when the key is present. An empty slice writes nothing, so
 `&[]T{}` reads back nil — the one distinction this does not keep.
 
-Still refused: `**T`, a pointer to an array, `*any`.
+Still refused: `**T`, a pointer to an array, `*any`, and a pointer to a slice of
+pointers (`*[]*T`).
 
 ---
 
@@ -791,9 +843,13 @@ The field ops (`codec/codec.go`) are format and pinned by a test:
 | 11 | string | 25 | `any` |
 | 12 | `[]byte` | 26 | `[]any` |
 | 13 | `[]int8` | 27 | pointer to a struct |
+| 28 | `[]float64` | 30 | `[]bool` |
+| 29 | `[]float32` | 31 | `[][]byte` |
 
 A Go `int`, `uint` or `uintptr` is named by its 64-bit op, so a section does not
-depend on the platform that wrote it.
+depend on the platform that wrote it. A `[]*Struct` is named `[]struct` (§6.2).
+Ops 28–31 and map kind 10 are 0.13's: an older reader refuses a section that
+names one.
 
 **Structs are an indexed table, not inlined**, root at index 0, so a recursive type
 (`type Node struct{ Kids []Node }`) describes itself in finite space. The builder
@@ -935,6 +991,10 @@ So when a message carries a section that is **not byte-equal to the type's own**
 | `float32`, `float64` | `float32`, `float64` | allowed; a finite value too large for a `float32` is refused |
 | `float32`, `float64` | any integer | **refused** when the plan is built |
 | integer arrays | other integer arrays | per element, range-checked |
+| integer arrays | `[]float64`, `[]float32` | allowed, as for a scalar |
+| `[]float32`, `[]float64` | `[]float64`, `[]float32` | allowed; a finite element too large for a `float32` is refused |
+| float arrays | any integer array | **refused** when the plan is built |
+| any op | the same op | read by the ordinary arm (`[]string`, `[]byte`, `[]bool`, `[][]byte` included) |
 | pointer to T | `T` or `*T` | null is zero, or nil |
 | T | `*T` | present, so non-nil |
 | struct, `*struct`, `[]struct` | the same | recurse; a table or list reads the same |
@@ -1029,6 +1089,8 @@ pay for.
 | a map's count | ≤ its body's bytes / 2 | |
 | a grouped table's groups | `groupRows` ≥ 1, exactly ⌈rows / groupRows⌉, none past the table and nothing after them | `wire.ErrBadGroup`; Rust `Error::BadGroup` |
 | an integer array's count | ≤ bytes / width | |
+| a float or bool array | a whole number of elements at the type's own width; a bool byte is 0 or 1 | `wire/arrays.go` |
+| a float array's column | its count ≤ 64 × the column's bytes | checked before the allocation; a writer keeps a denser array as its bits |
 | an integer that does not fit its field | refused (`ErrFieldTooWide`) | a scalar is never truncated |
 | fields per run | 16 narrow, 256 wide | |
 | pages | 16, ids 1..4080 | |
@@ -1415,4 +1477,20 @@ What the code does not do yet, or does inconsistently:
   JSON encoder writes no maps, blobs or pointers to structs (`rust/ENCODER.md`).
 - **The module's decode diagnostics use code 2**, which the encoder's diagnostics
   use for a number error.
+- **`materialize` takes the JSON path for a record holding one of ops 28–31**
+  (`[]float64`, `[]float32`, `[]bool`, `[][]byte`): its fast path covers a
+  table's plain columns. Every port otherwise reads and writes them, with map
+  kind 10 and bool map keys: the Rust walk and derive, the wasm module, the JS
+  decoder, and the JSON encoder for the two JSON can spell (an array of
+  fractional numbers and an array of booleans).
+- **A `[]*Struct` does not keep its arrays across `Codec.Unmarshal`.** Reusing
+  them would mean decoding into scattered pointees, which the table readers,
+  writing at a stride, cannot do.
+- **A type in a cycle can still have two plans.** `planFor` caches every plan a
+  build finishes, so a type has one plan whichever root reached it first — a
+  dictionary and a size estimate are kept per plan, and two plans of one row
+  type split both. The exception is a type in a cycle that is not the first of
+  the cycle to be planned: its plan was finished while the plan it points back
+  at was half built, so it is not cached, and the type gets a second plan when
+  it is encoded as a root. The bytes are the same either way.
 - **`bun.lock` still records the `js` workspace at 0.1.0.**

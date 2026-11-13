@@ -52,12 +52,17 @@ func TestFieldOpsArePinned(t *testing.T) {
 		"opAnys":    {opAnys, 26},
 
 		"opPointerStruct": {opPointerStruct, 27},
+
+		"opFloat64s":  {opFloat64s, 28},
+		"opFloat32s":  {opFloat32s, 29},
+		"opBools":     {opBools, 30},
+		"opBytesList": {opBytesList, 31},
 	} {
 		if uint8(pinned.op) != pinned.want {
 			t.Errorf("%s is %d, and the wire says %d", name, pinned.op, pinned.want)
 		}
 	}
-	if opCount != 28 {
+	if opCount != 32 {
 		t.Errorf("there are %d ops; a new one goes on the end and this number follows it",
 			opCount)
 	}
@@ -78,6 +83,9 @@ func TestMapKindsArePinned(t *testing.T) {
 		"mapFloat32": {mapFloat32, 5},
 		"mapAny":     {mapAny, 6},
 		"mapStruct":  {mapStruct, 7},
+		"mapStructs": {mapStructs, 8},
+		"mapList":    {mapList, 9},
+		"mapBytes":   {mapBytes, 10},
 	} {
 		if uint8(pinned.kind) != pinned.want {
 			t.Errorf("%s is %d, and the wire says %d", name, pinned.kind, pinned.want)

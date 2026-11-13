@@ -51,7 +51,7 @@ package codec
 // Structs are an indexed table rather than inlined, so that a self-referential
 // type (`type Node struct{ Kids []Node }`) describes itself in finite space. The
 // index is reserved before the fields are walked, so a back-edge resolves to an
-// index already assigned — the same trick planForBuilding plays with `building`.
+// index already assigned — the same trick planForBuilding plays with its build.
 //
 // # Why a structDef carries its key width
 //
@@ -256,7 +256,7 @@ func (builder *sectionBuilder) structIndex(plan *typePlan) int {
 func (builder *sectionBuilder) appendDesc(dst []byte, field *planField) []byte {
 	dst = append(dst, uint8(schemaOp(field.op, field.native)))
 	switch field.op {
-	case opStruct, opStructs, opPointerStruct:
+	case opStruct, opStructs, opPointerStruct, opStructPtrs:
 		return wire.AppendLength(dst, builder.structIndex(field.sub))
 	case opMap:
 		dst = append(dst, uint8(field.keyKind), uint8(field.valueKind))

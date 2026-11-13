@@ -384,7 +384,7 @@ func (builder *foreignBuilder) translateField(
 		}
 		field.sub = sub
 		return field, nil
-	case section.op == opStructs && native.op == opStructs:
+	case section.op == opStructs && (native.op == opStructs || native.op == opStructPtrs):
 		sub, err := builder.translateSub(section, native, goField.Type, fieldPath)
 		if err != nil {
 			return planField{}, err
@@ -415,17 +415,20 @@ func (builder *foreignBuilder) translateField(
 	if native.op == opPointer {
 		dstOp, dstPointer = native.elemOp, true
 	}
+	if srcOp == dstOp && srcPointer == dstPointer {
+		// The same on both sides: the ordinary arm reads it. Asked before the
+		// conversion table, which has rows only for what converts — a []string
+		// or a []byte is not in it, and was refused against itself.
+		return field, nil
+	}
 	if !convertible(srcOp, dstOp) {
 		why := ""
-		if from, _ := classOfOp(srcOp); isFloatClass(from) {
-			if to, _ := classOfOp(dstOp); isIntegerClass(to) {
-				why = ": a float is never stored in an integer"
-			}
+		from, _ := classOfOp(srcOp)
+		to, _ := classOfOp(dstOp)
+		if isFloatClass(from) && isIntegerClass(to) || isFloatArrayClass(from) && isIntArrayClass(to) {
+			why = ": a float is never stored in an integer"
 		}
 		return planField{}, mismatch(why)
-	}
-	if srcOp == dstOp && srcPointer == dstPointer {
-		return field, nil // the same on both sides: the ordinary arm reads it
 	}
 	class, _ := classOfOp(srcOp)
 	conv := fieldConv{path: fieldPath, src: srcOp, dst: dstOp, class: class, dstPointer: dstPointer}

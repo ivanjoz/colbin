@@ -605,7 +605,7 @@ func (w *walker) narrowValue(reader *wire.Reader, field *planField) {
 			return
 		}
 		w.body(field.sub, body, wideKeys)
-	case opStructs:
+	case opStructs, opStructPtrs:
 		if reader.IsTable() {
 			w.narrowTable(reader, field)
 			return
@@ -636,7 +636,7 @@ func (w *walker) wideValue(reader *wire.Reader8, field *planField) {
 			return
 		}
 		w.body(field.sub, body, wideKeys)
-	case opStructs:
+	case opStructs, opStructPtrs:
 		if reader.IsTable() {
 			w.wideTable(reader, field)
 			return
@@ -678,6 +678,32 @@ func unsignedArray[T wire.Integer](w *walker, values []T) {
 	w.to.beginArray(0)
 	for _, value := range values {
 		w.to.unsigned(uint64(value))
+	}
+	w.to.endArray()
+}
+
+// floatArray renders an array of floats at the width the op declares. A NaN in
+// it fails the walk, as a scalar one does.
+func floatArray[T float32 | float64](w *walker, values []T, width int) {
+	w.to.beginArray(len(values))
+	for _, value := range values {
+		w.floatValue(float64(value), width)
+	}
+	w.to.endArray()
+}
+
+func (w *walker) boolArray(values []bool) {
+	w.to.beginArray(len(values))
+	for _, value := range values {
+		w.to.boolean(value)
+	}
+	w.to.endArray()
+}
+
+func (w *walker) blobArray(values [][]byte) {
+	w.to.beginArray(len(values))
+	for _, value := range values {
+		w.to.blob(value)
 	}
 	w.to.endArray()
 }
@@ -1288,6 +1314,8 @@ func (w *walker) narrowMap(reader *wire.Reader, field *planField) {
 			w.to.key(strconv.FormatInt(entries.ElementInt(), 10))
 		case mapUint:
 			w.to.key(strconv.FormatUint(entries.ElementUint(), 10))
+		case mapBool:
+			w.to.key(strconv.FormatBool(entries.ElementUint() == 1))
 		}
 		switch field.valueKind {
 		case mapString:
@@ -1302,6 +1330,8 @@ func (w *walker) narrowMap(reader *wire.Reader, field *planField) {
 			w.floatValue(float64FromReversed(entries.ElementUint()), 64)
 		case mapBool:
 			w.to.boolean(entries.ElementUint() == 1)
+		case mapBytes:
+			w.to.blob(entries.ElementBlob())
 		case mapStruct:
 			// A narrow list's element: a length and a body, whose key width the
 			// schema says because nothing on the wire does.
@@ -1354,6 +1384,8 @@ func (w *walker) wideMap(reader *wire.Reader8, field *planField) {
 			w.to.key(strconv.FormatInt(entries.ElementInt(), 10))
 		case mapUint:
 			w.to.key(strconv.FormatUint(entries.ElementUint(), 10))
+		case mapBool:
+			w.to.key(strconv.FormatBool(entries.ElementUint() == 1))
 		}
 		switch field.valueKind {
 		case mapString:
@@ -1368,6 +1400,8 @@ func (w *walker) wideMap(reader *wire.Reader8, field *planField) {
 			w.floatValue(float64FromReversed(entries.ElementUint()), 64)
 		case mapBool:
 			w.to.boolean(entries.ElementUint() == 1)
+		case mapBytes:
+			w.to.blob(entries.ElementBlob())
 		case mapStruct:
 			if body, wideKeys, ok := entries.ElementStructBody(); ok {
 				w.body(field.sub, body, wideKeys)
@@ -1454,12 +1488,11 @@ func (w *walker) mapList(entries *wire.Reader8, kind mapKind) {
 }
 
 // mapKeyIsRenderable says the kind is one the format accepts as a key. A float
-// and a bool are refused at plan time, so only a section from somewhere else can
-// name one — and a key that does not consume its bytes would misread every entry
+// is refused at plan time, so only a section from somewhere else can name one — and a key that does not consume its bytes would misread every entry
 // after it, so this is checked once before the loop rather than defaulted in it.
 func mapKeyIsRenderable(kind mapKind) bool {
 	switch kind {
-	case mapString, mapInt, mapUint:
+	case mapString, mapInt, mapUint, mapBool:
 		return true
 	}
 	return false

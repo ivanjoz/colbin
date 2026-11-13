@@ -47,6 +47,21 @@ type fuzzNarrowMaps struct {
 	Self   *map[string]fuzzNarrowMaps `cb:"3"`
 }
 
+// fuzzShapes is the shapes of pointed.go and wire/arrays.go at four key bits:
+// a slice of pointers, the fixed-width arrays, an array of blobs, a bool key
+// and blob values.
+type fuzzShapes struct {
+	Pointed []*fuzzLeaf        `cb:"1"`
+	F64s    []float64          `cb:"2"`
+	F32s    []float32          `cb:"3"`
+	Bools   []bool             `cb:"4"`
+	Blobs   [][]byte           `cb:"5"`
+	ByFlag  map[bool]string    `cb:"6"`
+	Chunks  map[string][]byte  `cb:"7"`
+	Tree    []*fuzzShapes      `cb:"8"`
+	Leaves  map[bool]*fuzzLeaf `cb:"9"`
+}
+
 type fuzzWide struct {
 	ID     int             `cb:"1"`
 	Any    any             `cb:"2"`
@@ -66,6 +81,14 @@ type fuzzWide struct {
 	Lists   map[string]*[]fuzzLeaf `cb:"29"`
 	Scalars map[int32][]string     `cb:"30"`
 	Records map[string]*fuzzLeaf   `cb:"31"`
+	// The shapes of fuzzShapes at eight key bits.
+	Pointed []*fuzzLeaf     `cb:"32"`
+	F64s    []float64       `cb:"33"`
+	F32s    []float32       `cb:"34"`
+	Bools   []bool          `cb:"35"`
+	Blobs   [][]byte        `cb:"36"`
+	ByFlag  map[bool][]byte `cb:"37"`
+	Shapes  fuzzShapes      `cb:"38"`
 	// Past 255, so the type is paged: Late is on the second page, and Last on
 	// the third with the second linking to it. See pages.go.
 	Late string `cb:"300"`
@@ -100,7 +123,21 @@ func FuzzUnmarshal(f *testing.F) {
 		Scalars: map[int32][]string{-1: {"a", ""}},
 		Records: map[string]*fuzzLeaf{"r": {B: 3}},
 	}
-	for _, value := range []any{&narrow, &wide} {
+	shapes := fuzzShapes{
+		Pointed: []*fuzzLeaf{{A: 1}, nil, {S: "s"}},
+		F64s:    []float64{1.5, -2}, F32s: []float32{0.5}, Bools: []bool{true, false},
+		Blobs:  [][]byte{{1}, {}, {2, 3}},
+		ByFlag: map[bool]string{true: "t", false: "f"}, Chunks: map[string][]byte{"c": {9}},
+		Tree:   []*fuzzShapes{{Bools: []bool{true}}, {Pointed: make([]*fuzzLeaf, tableThreshold)}},
+		Leaves: map[bool]*fuzzLeaf{true: {B: 1}},
+	}
+	wide.Pointed, wide.F64s, wide.F32s, wide.Bools = shapes.Pointed, shapes.F64s, shapes.F32s, shapes.Bools
+	wide.Blobs, wide.ByFlag, wide.Shapes = shapes.Blobs, map[bool][]byte{true: {1}}, shapes
+	// Arrays of floats long enough to be columns, at both key widths.
+	columns, wideColumns := prices(160), fuzzWide{}
+	floatColumns := fuzzShapes{F64s: columns.F64, F32s: columns.F32}
+	wideColumns.F64s, wideColumns.F32s = columns.F64, columns.F32
+	for _, value := range []any{&narrow, &wide, &shapes, &floatColumns, &wideColumns} {
 		for _, encode := range []func(any) ([]byte, error){Marshal, MarshalSelfDescribing} {
 			message, err := encode(value)
 			if err != nil {
@@ -152,11 +189,13 @@ func FuzzUnmarshal(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
+	shapesSchema := must(SchemaOf(fuzzShapes{}))
 	dictSchema := must(SchemaOf(dictPointerHolder{}))
 	listSchema := must(SchemaOf(listHolder{}))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		fuzzDecode[fuzzNarrow](t, data)
 		fuzzDecode[fuzzWide](t, data)
+		fuzzDecode[fuzzShapes](t, data)
 		fuzzDecode[nullTable](t, data)
 		fuzzDecode[wideNullTable](t, data)
 		fuzzDecode[wideParentNullTable](t, data)
@@ -164,7 +203,7 @@ func FuzzUnmarshal(f *testing.F) {
 		fuzzDecode[dictWideHolder](t, data)
 		fuzzDecode[listHolder](t, data)
 		fuzzDecode[listWideHolder](t, data)
-		for _, schema := range []*Schema{nil, narrowSchema, wideSchema, nullSchema, dictSchema, listSchema} {
+		for _, schema := range []*Schema{nil, narrowSchema, wideSchema, shapesSchema, nullSchema, dictSchema, listSchema} {
 			if text, err := ToJSON(schema, data); err == nil && !json.Valid(text) {
 				t.Fatalf("ToJSON wrote invalid JSON: %q", text)
 			}

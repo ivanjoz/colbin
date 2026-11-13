@@ -51,20 +51,24 @@ func TestEveryCaseRoundTrips(t *testing.T) {
 
 	// One fresh destination per corpus type, by the name the generator wrote.
 	fresh := map[string]func() any{
-		"main.Charge":      func() any { return &Charge{} },
-		"main.Scalars":     func() any { return &Scalars{} },
-		"main.Arrays":      func() any { return &Arrays{} },
-		"main.Optionals":   func() any { return &Optionals{} },
-		"main.Line":        func() any { return &Line{} },
-		"main.Order":       func() any { return &Order{} },
-		"main.Maps":        func() any { return &Maps{} },
-		"main.WideEvolved": func() any { return &WideEvolved{} },
-		"main.Wide":        func() any { return &Wide{} },
-		"main.WideWidths":  func() any { return &WideWidths{} },
-		"main.Hashed":      func() any { return &Hashed{} },
-		"main.PackedText":  func() any { return &PackedText{} },
-		"main.Ledger":      func() any { return &Ledger{} },
-		"*main.MaybeRows":  func() any { return &MaybeRows{} },
+		"main.Charge":          func() any { return &Charge{} },
+		"main.Scalars":         func() any { return &Scalars{} },
+		"main.Arrays":          func() any { return &Arrays{} },
+		"main.Optionals":       func() any { return &Optionals{} },
+		"main.Line":            func() any { return &Line{} },
+		"main.Order":           func() any { return &Order{} },
+		"main.Maps":            func() any { return &Maps{} },
+		"main.WideEvolved":     func() any { return &WideEvolved{} },
+		"main.Wide":            func() any { return &Wide{} },
+		"main.WideWidths":      func() any { return &WideWidths{} },
+		"main.Hashed":          func() any { return &Hashed{} },
+		"main.PackedText":      func() any { return &PackedText{} },
+		"main.Ledger":          func() any { return &Ledger{} },
+		"*main.MaybeRows":      func() any { return &MaybeRows{} },
+		"main.FixedArrays":     func() any { return &FixedArrays{} },
+		"main.FixedArraysWide": func() any { return &FixedArraysWide{} },
+		"main.BlobMaps":        func() any { return &BlobMaps{} },
+		"main.BlobMapsWide":    func() any { return &BlobMapsWide{} },
 	}
 
 	for _, one := range held.Cases {

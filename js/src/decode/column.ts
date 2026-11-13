@@ -31,7 +31,7 @@ const TR_DELTA = 1
 const TR_FOR = 2
 const TR_CONSTANT = 3
 const ZIGZAG = 4
-const HEADER_DECIMAL = 0x08
+export const HEADER_DECIMAL = 0x08
 const TWO32 = 4294967296
 const SAFE = Number.MAX_SAFE_INTEGER
 

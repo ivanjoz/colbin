@@ -89,6 +89,12 @@ const (
 	// format — a schema section writes the op byte — so a new one goes on the end
 	// and everything already written keeps its meaning.
 	opPointerStruct
+	// Arrays of floats, of bools and of blobs: an integer array's framing at the
+	// element's own width, and an array of strings' bytes. See wire/arrays.go.
+	opFloat64s
+	opFloat32s
+	opBools
+	opBytesList
 
 	// opCount bounds the block, so a schema section carrying a number this
 	// version does not assign is refused rather than indexed on.
@@ -221,7 +227,74 @@ type typePlan struct {
 
 var planCache sync.Map // reflect.Type -> *typePlan or error
 
+// planBuilds serialises building: two goroutines building at once would each
+// make a plan of the same nested type, and a type is to have one.
+var planBuilds sync.Mutex
+
+// planBuild is one planFor call's state: the plans it has made, which of them
+// are still having their fields walked, and which are whole.
+type planBuild struct {
+	plans map[reflect.Type]*typePlan
+	// open is the plans under construction, the root first.
+	open []*typePlan
+	// reach is the lowest index in open that the plan being built, or one it
+	// holds, has pointed back at, or noReach.
+	reach int
+	// cyclic is the finished plans that were finished while one they reach
+	// was still open, each with that one.
+	cyclic map[*typePlan]*typePlan
+	// whole is the finished plans that are not cyclic, which are what the
+	// cache takes.
+	whole []builtPlan
+}
+
+type builtPlan struct {
+	of   reflect.Type
+	plan *typePlan
+}
+
+const noReach = int(^uint(0) >> 1)
+
+func newPlanBuild() *planBuild {
+	return &planBuild{
+		plans:  map[reflect.Type]*typePlan{},
+		cyclic: map[*typePlan]*typePlan{},
+		reach:  noReach,
+	}
+}
+
+// touch notes that the plan being built points at one this build made. One
+// still open, or one finished under a plan still open, makes everything above
+// that plan a part of its cycle.
+func (build *planBuild) touch(plan *typePlan) {
+	anchor, cyclic := build.cyclic[plan]
+	if !cyclic {
+		anchor = plan
+	}
+	at := slices.Index(build.open, anchor)
+	if at < 0 {
+		if !cyclic {
+			return // finished and whole
+		}
+		// Its cycle is closed, and it is the form its cycle's first type gave
+		// it: whatever holds it here is good for this root alone.
+		at = 0
+	}
+	build.reach = min(build.reach, at)
+}
+
 // planFor resolves and caches the plan for a struct type.
+//
+// Every plan the build finishes is cached with it, not the root's alone, so
+// that a type has one plan whichever type reached it first: a row type held by
+// two roots, or encoded on its own as well. A plan's address is an identity —
+// a dictionary is kept per plan, an estimate is learned per plan — and two
+// plans of one type split both.
+//
+// The exception is a plan in a cycle that is not the cycle's first: it was
+// finished while the plan it points back at was half built, and what it derived
+// from that plan is what a nested one derives, not what the type derives when
+// it is the root. It is left out, and built again when it is asked for.
 func planFor(structType reflect.Type) (*typePlan, error) {
 	if cached, ok := planCache.Load(structType); ok {
 		if plan, ok := cached.(*typePlan); ok {
@@ -229,10 +302,22 @@ func planFor(structType reflect.Type) (*typePlan, error) {
 		}
 		return nil, cached.(error)
 	}
-	plan, err := planForBuilding(structType, map[reflect.Type]*typePlan{})
+	planBuilds.Lock()
+	defer planBuilds.Unlock()
+	if cached, ok := planCache.Load(structType); ok {
+		if plan, ok := cached.(*typePlan); ok {
+			return plan, nil
+		}
+		return nil, cached.(error)
+	}
+	build := newPlanBuild()
+	plan, err := buildPlan(structType, build)
 	if err != nil {
 		planCache.Store(structType, err)
 		return nil, err
+	}
+	for _, built := range build.whole {
+		planCache.Store(built.of, built.plan)
 	}
 	planCache.Store(structType, plan)
 	return plan, nil
@@ -241,11 +326,12 @@ func planFor(structType reflect.Type) (*typePlan, error) {
 // planForBuilding resolves a type, reusing the plan for one already under
 // construction further up the stack.
 //
-// That is what makes a recursive type terminate: the plan goes into `building`
+// That is what makes a recursive type terminate: the plan goes into the build
 // before its fields are walked, so a field that reaches back to it finds the
 // half-built plan and points at it rather than starting again.
-func planForBuilding(structType reflect.Type, building map[reflect.Type]*typePlan) (*typePlan, error) {
-	if plan, ok := building[structType]; ok {
+func planForBuilding(structType reflect.Type, build *planBuild) (*typePlan, error) {
+	if plan, ok := build.plans[structType]; ok {
+		build.touch(plan)
 		return plan, nil
 	}
 	if cached, ok := planCache.Load(structType); ok {
@@ -253,16 +339,20 @@ func planForBuilding(structType reflect.Type, building map[reflect.Type]*typePla
 			return plan, nil
 		}
 	}
-	return buildPlan(structType, building)
+	return buildPlan(structType, build)
 }
 
-func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*typePlan, error) {
+func buildPlan(structType reflect.Type, build *planBuild) (*typePlan, error) {
 	if structType.Kind() != reflect.Struct {
 		return nil, fmt.Errorf(
 			"colbin: the format encodes a struct, got %s", structType.Kind())
 	}
 	plan := &typePlan{}
-	building[structType] = plan
+	build.plans[structType] = plan
+	// What this plan reaches back to is counted from here, apart from what the
+	// plans before it under the same holder reached.
+	depth, outer := len(build.open), build.reach
+	build.open, build.reach = append(build.open, plan), noReach
 	// Keys are assigned after the walk, not during it: an unnumbered field takes
 	// the hash of its name and then probes past whatever is already used, so it
 	// has to know every *explicit* id first. See assignKeys.
@@ -312,7 +402,7 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 		if indirect {
 			fieldType = fieldType.Elem()
 		}
-		op, sub, sliceType, stride, compositeErr := compositeOpFor(fieldType, building)
+		op, sub, sliceType, stride, compositeErr := compositeOpFor(fieldType, build)
 		var shape mapShape
 		var typedMap *mapOps
 		var elemOp fieldOp
@@ -324,6 +414,12 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 		// buries that.
 		if compositeErr != nil && !errors.Is(compositeErr, errNotComposite) {
 			return nil, compositeErr
+		}
+		if indirect && op == opStructPtrs {
+			// The reader allocates an indirect field's pointee from sliceType,
+			// which for this op is the slice of structs and not the field's own.
+			return nil, fmt.Errorf("colbin: %s.%s: a pointer to %s is not carried: hold the slice itself",
+				typeName(structType), field.Name, fieldType)
 		}
 		if compositeErr != nil {
 			switch fieldType.Kind() {
@@ -337,7 +433,7 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 				if shape.record != nil {
 					// The value's plan, the way a slice of structs holds its
 					// element's: an error in it is reported as itself.
-					if sub, err = planForBuilding(shape.record, building); err != nil {
+					if sub, err = planForBuilding(shape.record, build); err != nil {
 						return nil, err
 					}
 				}
@@ -417,6 +513,15 @@ func buildPlan(structType reflect.Type, building map[reflect.Type]*typePlan) (*t
 	plan.reset = compileReset(structType)
 	if plan.rows != nil && plan.rows.flat && coversEveryField(structType, plan) {
 		plan.flatReads = plan.rows
+	}
+	build.open = build.open[:depth]
+	if build.reach < depth {
+		// The holder reaches whatever this one does.
+		build.cyclic[plan] = build.open[build.reach]
+		build.reach = min(build.reach, outer)
+	} else {
+		build.reach = outer
+		build.whole = append(build.whole, builtPlan{structType, plan})
 	}
 	return plan, nil
 }
@@ -676,6 +781,10 @@ func isNative(fieldType reflect.Type) bool {
 // schemaOp is the op a schema section names for one a plan holds: the 64-bit
 // form of a platform-width integer, which is what it is on a 64-bit platform.
 func schemaOp(op fieldOp, native bool) fieldOp {
+	if op == opStructPtrs {
+		// The pointers are not on the wire. See pointed.go.
+		return opStructs
+	}
 	if !native {
 		return op
 	}
@@ -791,6 +900,16 @@ func sliceOp(elementType reflect.Type) (fieldOp, error) {
 		return uintsOp, nil
 	case reflect.String:
 		return opStrings, nil
+	case reflect.Float64:
+		return opFloat64s, nil
+	case reflect.Float32:
+		return opFloat32s, nil
+	case reflect.Bool:
+		return opBools, nil
+	case reflect.Slice:
+		if elementType.Elem().Kind() == reflect.Uint8 {
+			return opBytesList, nil
+		}
 	case reflect.Interface:
 		if err := dynamicInterface(elementType); err != nil {
 			return 0, err
@@ -798,7 +917,7 @@ func sliceOp(elementType reflect.Type) (fieldOp, error) {
 		return opAnys, nil
 	}
 	return 0, fmt.Errorf(
-		"the format carries slices of integers, strings and `any`, not []%s", elementType)
+		"the format carries slices of numbers, bools, strings, blobs, structs and `any`, not []%s", elementType)
 }
 
 // Append encodes v onto dst, which may be nil. On failure it returns dst as it
@@ -954,7 +1073,8 @@ func (plan *typePlan) planSizeHint() int {
 		case opInt32, opUint32, opFloat32:
 			width = 5
 		case opString, opBytes, opInt8s, opInt16s, opInt32s, opInt64s,
-			opUint16s, opUint32s, opUint64s, opStrings:
+			opUint16s, opUint32s, opUint64s, opStrings,
+			opFloat64s, opFloat32s, opBools, opBytesList:
 			width = 18 // a short string or a small array, inline
 		}
 		total += width

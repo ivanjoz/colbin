@@ -41,6 +41,11 @@ var valueOps = []valueOp{
 	{op: opUint32s, goType: reflect.TypeFor[[]uint32](), write: "Uint32s", read: "Uint32s(nil)", json: jsonUnsignedArray},
 	{op: opUint64s, goType: reflect.TypeFor[[]uint64](), write: "Uint64s", read: "Uint64s(nil)", json: jsonUnsignedArray},
 	{op: opStrings, goType: reflect.TypeFor[[]string](), write: "Strings", read: "Strings(nil)", json: jsonTextArray},
+	{op: opFloat64s, goType: reflect.TypeFor[[]float64](), write: "Float64s", read: "Float64s(nil)", json: jsonFloat64Array},
+	{op: opFloat32s, goType: reflect.TypeFor[[]float32](), write: "Float32s", read: "Float32s(nil)", json: jsonFloat32Array},
+	{op: opBools, goType: reflect.TypeFor[[]bool](), write: "Bools", read: "Bools(nil)", json: jsonBoolArray},
+	// Each blob is copied out, as a []byte field's is.
+	{op: opBytesList, goType: reflect.TypeFor[[][]byte](), write: "BytesList", read: "BytesList(nil)", json: jsonBlobArray},
 }
 
 // valueOp is one row of valueOps.
@@ -72,13 +77,20 @@ const (
 	jsonSignedArray
 	jsonUnsignedArray
 	jsonTextArray
+	jsonFloat64Array
+	jsonFloat32Array
+	jsonBoolArray
+	jsonBlobArray
 )
 
 // goTypeName spells a row's type the way Go source does, which reflect does not
 // for a []byte.
 func goTypeName(row valueOp) string {
-	if row.op == opBytes {
+	switch row.op {
+	case opBytes:
 		return "[]byte"
+	case opBytesList:
+		return "[][]byte"
 	}
 	return row.goType.String()
 }

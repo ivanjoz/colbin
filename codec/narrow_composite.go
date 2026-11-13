@@ -196,7 +196,7 @@ func appendNarrowColumns(writer *wire.Writer, plan *typePlan, slice *sliceHeader
 	}
 	for index := range plan.fields {
 		field := &plan.fields[index]
-		if field.op == opStructs {
+		if field.op == opStructs || field.op == opStructPtrs {
 			continue // a list column, written after the rest
 		}
 		if field.op == opPointer {
@@ -301,6 +301,8 @@ func writeNarrowMapValue(writer *wire.Writer, kind mapKind, value reflect.Value)
 		} else {
 			writer.ElementUint(0)
 		}
+	case mapBytes:
+		writer.ElementString(bytesAsString(value.Bytes()))
 	}
 }
 
@@ -566,6 +568,8 @@ func readNarrowMapValue(reader *wire.Reader, kind mapKind, into reflect.Value) {
 		setFloatFromReversed(into, reader.ElementUint())
 	case mapBool:
 		into.SetBool(reader.ElementUint() == 1)
+	case mapBytes:
+		into.SetBytes(append([]byte{}, reader.ElementBlob()...))
 	default:
 		reader.Fail(errBadMapValue(kind))
 	}
