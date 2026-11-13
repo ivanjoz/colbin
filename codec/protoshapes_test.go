@@ -579,8 +579,11 @@ func TestBoolKeyedDynamicMapIsRefused(t *testing.T) {
 // What protoc-gen-go writes for a message, minus its oneofs: unexported state,
 // pointers for presence, and every repeated message a slice of pointers.
 type shapeGenerated struct {
-	state         [0]func()
-	sizeCache     int32
+	//lint:ignore U1000 there to be skipped, as protoc-gen-go's is.
+	state [0]func()
+	//lint:ignore U1000 there to be skipped, as protoc-gen-go's is.
+	sizeCache int32
+	//lint:ignore U1000 there to be skipped, as protoc-gen-go's is.
 	unknownFields []byte
 
 	Name     string                 `protobuf:"bytes,1,opt,name=name,proto3"`
